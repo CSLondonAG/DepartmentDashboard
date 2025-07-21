@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Streamlit logs and cache
+.streamlit/
+*.log
+
+# Environment files
+.env
+.venv/
+venv/
+env/
+*.env
+
+# Data files (if they shouldn't be committed)
+*.xlsx
+*.json
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.swp
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Jupyter notebooks (optional)
+*.ipynb_checkpoints/
