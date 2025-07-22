@@ -266,8 +266,8 @@ st.subheader("Core Metrics")
 c1, c2, c3, c4 = st.columns(4)
 render_custom_metric(c1, "Total Chats",         chat_total, "Total number of chat interactions", "#4CAF50")
 render_custom_metric(c2, "Total Emails",        email_total, "Total number of email interactions", "#4CAF50")
-render_custom_metric(c3, "Avg Chat AHT (mm:ss)", fmt_mmss(chat_aht), "Average Handle Time for chats", "#4CAF50")
-render_custom_metric(c4, "Avg Email AHT (mm:ss)", fmt_mmss(email_aht), "Average Handle Time for emails", "#4CAF50")
+render_custom_metric(c3, "Chat AHT (mm:ss)", fmt_mmss(chat_aht), "Average Handle Time for chats", "#4CAF50")
+render_custom_metric(c4, "Email AHT (mm:ss)", fmt_mmss(email_aht), "Average Handle Time for emails", "#4CAF50")
 
 # Additional metrics
 st.markdown("---")
@@ -280,7 +280,7 @@ email_util_color = get_utilization_color(email_util)
 render_custom_metric(m2, "Email Utilization",      f"{email_util:.1%}", "Percentage of time agents spend handling emails when available", email_util_color)
 
 email_resp_time_color = get_email_resp_time_color(avg_resp_secs)
-render_custom_metric(m3, "Avg Email Resp Time",    fmt_hms(avg_resp_secs), "Average response time for emails", email_resp_time_color)
+render_custom_metric(m3, "Avg Email Response Time",    fmt_hms(avg_resp_secs), "Average response time for emails", email_resp_time_color)
 
 chat_wait_time_color = get_chat_wait_time_color(avg_chat_wait_time)
 render_custom_metric(m4, "Avg Chat Wait Time (mm:ss)", fmt_mmss(avg_chat_wait_time), "Average wait time for answered chats", chat_wait_time_color)
