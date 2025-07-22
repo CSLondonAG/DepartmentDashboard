@@ -257,7 +257,7 @@ def render_custom_metric(col_object, label, value, help_text, border_color):
 
 
 # --- UI: Header & KPI Tiles ---
-st.title("📊 Department Performance Dashboard")
+st.title("Malawi CS Performance Dashboard")
 st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 st.markdown("---")
 
@@ -287,7 +287,7 @@ render_custom_metric(m4, "Avg Chat Wait Time (mm:ss)", fmt_mmss(avg_chat_wait_ti
 
 
 st.markdown("---")
-st.markdown("### 🎯 SLA Score Summary")
+st.markdown("SLA Score Summary")
 s1, s2, s3 = st.columns(3)
 chat_sla_color = get_sla_score_color(chat_weighted)
 render_custom_metric(s1, "Chat SLA Score",   f"{chat_weighted:.1f}", "Service Level Agreement score for chats", chat_sla_color)
@@ -300,7 +300,7 @@ render_custom_metric(s3, "Weighted SLA",     f"{weighted_sla:.1f}", "Overall wei
 
 # --- Weighted SLA Trend Chart ---
 st.markdown("---")
-st.subheader("📈 Weighted SLA Trend")
+st.subheader("Weighted SLA Trend")
 
 trend = pd.DataFrame({
     "Date":        df_daily["Date"],
