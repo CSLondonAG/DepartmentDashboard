@@ -235,7 +235,7 @@ def get_sla_score_color(score):
         return "#F44336" # Red
 
 def render_custom_metric(col_object, label, value, help_text, border_color):
-    """Renders a metric with custom border color and tooltip."""
+    """Renders a metric with custom border color and tooltip, allowing text resize and preventing wrap."""
     with col_object:
         st.markdown(f"""
         <div title="{help_text}" style="
@@ -250,18 +250,19 @@ def render_custom_metric(col_object, label, value, help_text, border_color):
             justify-content: center;
             height: 100%;
         ">
-            <div style="font-size: 1.1em; font-weight: 600; color: #555;">{label}</div>
-            <div style="font-size: 2.2em; font-weight: bold; color: #333; margin-top: 5px;">{value}</div>
+            <div style="font-size: clamp(0.8em, 1.5vw, 1.1em); font-weight: 600; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{label}</div>
+            <div style="font-size: clamp(1.5em, 3.5vw, 2.2em); font-weight: bold; color: #333; margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{value}</div>
         </div>
         """, unsafe_allow_html=True)
 
 
 # --- UI: Header & KPI Tiles ---
-st.title("📊 Department Performance Dashboard")
+st.title("Malawi CS Performance Dashboard")
 st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 st.markdown("---")
 
 # Core metrics
+st.subheader("Core Metrics")
 c1, c2, c3, c4 = st.columns(4)
 render_custom_metric(c1, "Total Chats",         chat_total, "Total number of chat interactions", "#4CAF50")
 render_custom_metric(c2, "Total Emails",        email_total, "Total number of email interactions", "#4CAF50")
@@ -286,7 +287,7 @@ render_custom_metric(m4, "Avg Chat Wait Time (mm:ss)", fmt_mmss(avg_chat_wait_ti
 
 
 st.markdown("---")
-st.markdown("### 🎯 SLA Score Summary")
+st.markdown("###SLA Score Summary")
 s1, s2, s3 = st.columns(3)
 chat_sla_color = get_sla_score_color(chat_weighted)
 render_custom_metric(s1, "Chat SLA Score",   f"{chat_weighted:.1f}", "Service Level Agreement score for chats", chat_sla_color)
@@ -299,7 +300,7 @@ render_custom_metric(s3, "Weighted SLA",     f"{weighted_sla:.1f}", "Overall wei
 
 # --- Weighted SLA Trend Chart ---
 st.markdown("---")
-st.subheader("📈 Weighted SLA Trend")
+st.subheader("Weighted SLA Trend")
 
 trend = pd.DataFrame({
     "Date":        df_daily["Date"],
