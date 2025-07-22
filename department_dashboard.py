@@ -257,7 +257,7 @@ def render_custom_metric(col_object, label, value, help_text, border_color):
 
 
 # --- UI: Header & KPI Tiles ---
-st.title("Malawi CS Performance Dashboard")
+st.title("📊 Department Performance Dashboard")
 st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 st.markdown("---")
 
@@ -287,7 +287,7 @@ render_custom_metric(m4, "Avg Chat Wait Time (mm:ss)", fmt_mmss(avg_chat_wait_ti
 
 
 st.markdown("---")
-st.markdown("SLA Score Summary")
+st.markdown("### 🎯 SLA Score Summary")
 s1, s2, s3 = st.columns(3)
 chat_sla_color = get_sla_score_color(chat_weighted)
 render_custom_metric(s1, "Chat SLA Score",   f"{chat_weighted:.1f}", "Service Level Agreement score for chats", chat_sla_color)
@@ -300,13 +300,18 @@ render_custom_metric(s3, "Weighted SLA",     f"{weighted_sla:.1f}", "Overall wei
 
 # --- Weighted SLA Trend Chart ---
 st.markdown("---")
-st.subheader("Weighted SLA Trend")
+st.subheader("📈 Weighted SLA Trend")
 
 trend = pd.DataFrame({
     "Date":        df_daily["Date"],
     "Weighted SLA": (df_daily["Chat SLA"]*df_daily["Chat Vol"] + df_daily["Email SLA"]*df_daily["Email Vol"]) /
                     (df_daily["Chat Vol"] + df_daily["Email Vol"])
 })
+
+# Convert start_date and end_date to datetime objects for consistent domain definition
+# Add extra padding for the x-axis to ensure first/last points are not clipped
+x_min_bound = datetime.combine(start_date, datetime.min.time()) - timedelta(days=0.5)
+x_max_bound = datetime.combine(end_date, datetime.max.time()) + timedelta(days=0.5)
 
 chart = (
     alt.Chart(trend)
@@ -318,8 +323,9 @@ chart = (
         "stroke": "#2F80ED" # Point border color
     }, color="#2F80ED") # Line color
     .encode(
-        x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%d %b", labelAngle=-45)),
-        y=alt.Y("Weighted SLA:Q", title="Weighted SLA Score", scale=alt.Scale(domain=[0, 100])),
+        x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%d %b", labelAngle=-45, tickCount='day'), # Added tickCount='day'
+                scale=alt.Scale(domain=[x_min_bound, x_max_bound])),
+        y=alt.Y("Weighted SLA:Q", title="Weighted SLA Score", scale=alt.Scale(domain=[0, 105])),
         tooltip=[
             alt.Tooltip("Date:T", format="%d %b"),
             alt.Tooltip("Weighted SLA:Q", format=".1f", title="SLA Score")
