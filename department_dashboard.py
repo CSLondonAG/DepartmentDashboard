@@ -323,7 +323,7 @@ chart = (
         "stroke": "#2F80ED" # Point border color
     }, color="#2F80ED") # Line color
     .encode(
-        x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%d %b", labelAngle=-45, tickCount='day'), # Added tickCount='day'
+        x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%d %b", labelAngle=-45, tickCount='day'),
                 scale=alt.Scale(domain=[x_min_bound, x_max_bound])),
         y=alt.Y("Weighted SLA:Q", title="Weighted SLA Score", scale=alt.Scale(domain=[0, 105])),
         tooltip=[
@@ -337,8 +337,12 @@ chart = (
 
 labels  = chart.mark_text(dy=-10, color="#2F80ED").encode(text=alt.Text("Weighted SLA:Q", format=".1f"))
 rule    = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="red", strokeDash=[5,5], size=2).encode(y="y:Q")
-rule_lb = alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left",dx=5,dy=-8,color="red")\
-            .encode(y="y:Q", text=alt.value("Target: 80%"))
+rule_lb = alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left", color="red", dy=-8)\
+            .encode(
+                y="y:Q",
+                text=alt.value("Target: 80%"),
+                x=alt.value(0) # Align to the far left (pixel coordinate 0)
+            )
 
 st.altair_chart((chart+labels+rule+rule_lb).properties(width=700, height=350),
                 use_container_width=True)
