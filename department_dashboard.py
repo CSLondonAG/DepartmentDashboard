@@ -19,17 +19,17 @@ st.markdown("""
 .main .block-container {
     padding-top: 2rem;
     padding-bottom: 2rem;
-    max-width: 1200px; /* Optional: Constrain width for a more focused layout */
+    max-width: 1200px;
     margin: auto;
 }
 
 /* Header and Subheader styling */
 h1, h2, h3 {
-    color: #0d47a1; /* A deep blue for headers */
+    color: #0d47a1;
     font-weight: 600;
 }
 .stMarkdown h3 {
-    color: #455a64; /* Darker grey for subheaders */
+    color: #455a64;
     border-bottom: 2px solid #e0e0e0;
     padding-bottom: 5px;
     margin-top: 2rem;
@@ -38,8 +38,8 @@ h1, h2, h3 {
 
 /* Custom metric tiles */
 .metric-container {
-    background-color: #f7f9fc; /* Light grey background for a clean look */
-    border-left: 5px solid; /* Use the left border for color coding */
+    background-color: #f7f9fc;
+    border-left: 5px solid;
     border-radius: 8px;
     padding: 1rem 1.5rem;
     box-shadow: 0 4px 6px rgba(0,0,0,0.05);
@@ -57,16 +57,16 @@ h1, h2, h3 {
 .metric-value {
     font-size: 2rem;
     font-weight: 700;
-    color: #1e88e5; /* A vibrant blue for values */
+    color: #1e88e5;
 }
 .metric-container-red {
-    border-left-color: #F44336; /* Red for low scores */
+    border-left-color: #F44336;
 }
 .metric-container-yellow {
-    border-left-color: #FFC107; /* Yellow for warning */
+    border-left-color: #FFC107;
 }
 .metric-container-green {
-    border-left-color: #4CAF50; /* Green for good */
+    border-left-color: #4CAF50;
 }
 
 /* Chart container styling */
@@ -81,7 +81,6 @@ h1, h2, h3 {
 }
 </style>
 """, unsafe_allow_html=True)
-
 
 # --- Helpers & Renderers ---
 def fmt_mmss(sec):
@@ -106,7 +105,6 @@ def get_sla_score_color(score):
     else: return "#F44336"
 
 def render_custom_metric(container, title, value, tooltip, color):
-    """Render a single metric tile with title, value, tooltip and colored border."""
     with container:
         st.markdown(
             f'<div class="metric-container" style="border-left-color:{color};" title="{tooltip}">'
@@ -172,9 +170,11 @@ avg_resp_secs = avg_resp_hrs * 3600
 answered_chats = chat_sla_p[chat_sla_p["Wait Time"].notna()]
 avg_chat_wait  = answered_chats["Wait Time"].mean() if len(answered_chats) else 0
 
-# --- Availability & Utilization ---
+# --- Availability & Utilization (Concurrency-Aware) ---
 window_start = datetime.combine(start_date, datetime.min.time())
 window_end   = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+
+# Calculate availability
 chat_avail_secs = email_avail_secs = 0
 for _, pres in df_presence.iterrows():
     s = max(pres["Start DT"], window_start)
@@ -185,9 +185,44 @@ for _, pres in df_presence.iterrows():
     if pres["Service Presence Status: Developer Name"] in ("Available_Email_and_Web","Available_All"):
         email_avail_secs += delta
 
-chat_handle_secs  = chat_df["Duration_sec"].sum()
-email_handle_secs = email_df["Duration_sec"].sum()
-chat_util  = chat_handle_secs  / chat_avail_secs  if chat_avail_secs  else 0
+# Calculate adjusted chat handle time accounting for concurrency
+def calculate_concurrent_handle_time(agent_df):
+    intervals = []
+    for _, row in agent_df.iterrows():
+        intervals.append((row["Start DT"], row["End DT"]))
+    
+    if not intervals:
+        return 0
+    
+    intervals.sort()
+    total_adjusted_time = 0
+    active_sessions = []
+    
+    for start, end in intervals:
+        active_sessions = [s for s in active_sessions if s > start]
+        active_sessions.append(end)
+        
+        if len(active_sessions) == 1:
+            total_adjusted_time += (end - start).total_seconds()
+        elif len(active_sessions) == 2:
+            next_start = min(active_sessions)
+            total_adjusted_time += (next_start - start).total_seconds() * 0.5
+            if end > next_start:
+                total_adjusted_time += (end - next_start).total_seconds()
+    
+    return total_adjusted_time
+
+chat_df_grouped = chat_df.groupby("User: Full Name")
+adjusted_chat_handle_secs = sum(
+    calculate_concurrent_handle_time(group) 
+    for _, group in chat_df_grouped
+)
+
+# Calculate email handle time (no concurrency adjustment needed for emails)
+email_handle_secs = email_df["Duration_sec"].sum() if len(email_df) else 0
+
+# Calculate utilizations
+chat_util = adjusted_chat_handle_secs / chat_avail_secs if chat_avail_secs else 0
 email_util = email_handle_secs / email_avail_secs if email_avail_secs else 0
 
 # --- Build per-day SLA & weighted SLA ---
@@ -215,7 +250,7 @@ df_daily["Weighted SLA"] = (
     df_daily["Chat SLA"]*df_daily["Chat Vol"] +
     df_daily["Email SLA"]*df_daily["Email Vol"]
 ) / (df_daily["Chat Vol"] + df_daily["Email Vol"])
-df_daily = df_daily.fillna(0) # Handle divisions by zero
+df_daily = df_daily.fillna(0)
 
 chat_weighted  = (df_daily["Chat SLA"]*df_daily["Chat Vol"]).sum()  / df_daily["Chat Vol"].sum() if df_daily["Chat Vol"].sum() > 0 else 0
 email_weighted = (df_daily["Email SLA"]*df_daily["Email Vol"]).sum() / df_daily["Email Vol"].sum() if df_daily["Email Vol"].sum() > 0 else 0
@@ -241,7 +276,7 @@ render_custom_metric(c4, "Avg Email AHT",       fmt_mmss(email_aht), "Average em
 # Operational Metrics
 st.subheader("Operational Metrics")
 m1, m2, m3 = st.columns(3)
-render_custom_metric(m1, "Chat Utilization",      f"{chat_util:.1%}",   "Agent-minute chat utilization",  get_utilization_color(chat_util))
+render_custom_metric(m1, "Chat Utilization",      f"{chat_util:.1%}",   "Agent-minute chat utilization (accounts for concurrency)",  get_utilization_color(chat_util))
 render_custom_metric(m2, "Email Utilization",     f"{email_util:.1%}",  "Agent-minute email utilization", get_utilization_color(email_util))
 render_custom_metric(m3, "Avg Email Resp Time",   fmt_hms(avg_resp_secs),"Average email response time",  get_sla_score_color(100 - (avg_resp_hrs * 100)))
 
@@ -252,12 +287,9 @@ render_custom_metric(s1, "Chat SLA Score",   f"{chat_weighted:.1f}",  "Weighted 
 render_custom_metric(s2, "Email SLA Score",  f"{email_weighted:.1f}", "Weighted email SLA",  get_sla_score_color(email_weighted))
 render_custom_metric(s3, "Weighted SLA",     f"{weighted_sla:.1f}",   "Overall weighted SLA",get_sla_score_color(weighted_sla))
 
-
 # Weighted SLA Trend Chart
 st.subheader("📈 Weighted SLA Trend")
-
 trend = df_daily[["Date","Weighted SLA"]].sort_values("Date")
-# Use a cleaner color scheme for the chart
 chart = (
     alt.Chart(trend)
     .mark_line(point={"size": 100, "color": "#1e88e5"}, color="#42a5f5", strokeWidth=3)
