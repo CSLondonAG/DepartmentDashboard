@@ -164,7 +164,8 @@ survey_question_cols = {
 short_survey_labels = {
     "Combined Recommendation Score": "NPS",
     "Was the issue reported in the chat resolved by the agent?": "Chat Issue Resolved %",
-    "Was the issue reported in the email resolved by the agent?": "Email Issue Resolved %"
+    "Was the issue reported in the email resolved by the agent?": "Email Issue Resolved %",
+    "How satisfied were you with the Customer Service you received today?": "CSAT (/5)"
 }
 
 # --- Sidebar: Date Range (chat.csv) ---
@@ -336,8 +337,8 @@ st.subheader("Core Metrics")
 cols = st.columns(4)
 render_custom_metric(cols[0],"Total Chats",chat_total,"Total chat interactions","info")
 render_custom_metric(cols[1],"Total Emails",email_total,"Total email interactions","info")
-render_custom_metric(cols[2],"Avg Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","info")
-render_custom_metric(cols[3],"Avg Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","info")
+render_custom_metric(cols[2],"Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","info")
+render_custom_metric(cols[3],"Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","info")
 
 # Operational Metrics
 st.markdown("---")
