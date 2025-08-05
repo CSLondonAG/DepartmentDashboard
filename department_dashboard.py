@@ -369,46 +369,6 @@ rule_lb= alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left",color="#e74c
             .encode(y="y:Q",text=alt.value("Target: 80%"))
 st.altair_chart((chart+labels+rule+rule_lb).properties(width=700,height=350),use_container_width=True)
 
-# Survey Score Trend Chart
-st.markdown("---")
-st.subheader("Average Survey Score Trend")
-survey_charts_exist = False
-if survey_questions.size > 0:
-    for q in survey_questions:
-        y_col = survey_question_cols[q]
-        q_data = df_daily.dropna(subset=[y_col])
-        if not q_data.empty:
-            survey_charts_exist = True
-            is_yes_no = survey_summary_metrics[q]["is_yes_no"]
-            y_title = "Yes %" if is_yes_no else "Average Score"
-            chart_title = f"Trend for '{q}'"
-            
-            survey_chart = (
-                alt.Chart(q_data, title=chart_title)
-                .mark_line(point=True, color="#1abc9c")
-                .encode(
-                    x=alt.X(field="Date", type="temporal", axis=alt.Axis(format="%d %b", labelAngle=-45, tickCount="day")),
-                    y=alt.Y(field=y_col, type="quantitative", title=y_title, scale=alt.Scale(domain=[0, 10] if not is_yes_no else [0, 1])),
-                    tooltip=[alt.Tooltip(field="Date", title="Date", type="temporal", format="%d %b"),
-                             alt.Tooltip(field=y_col, title=q, type="quantitative", format=".1f" if not is_yes_no else ".1%")]
-                )
-            )
-            
-            if is_yes_no:
-                survey_labels = survey_chart.mark_text(dy=-10, color="#1abc9c").encode(
-                    text=alt.Text(field=y_col, type="quantitative", format=".1%")
-                )
-            else:
-                survey_labels = survey_chart.mark_text(dy=-10, color="#1abc9c").encode(
-                    text=alt.Text(field=y_col, type="quantitative", format=".1f")
-                )
-            
-            st.altair_chart((survey_chart + survey_labels).properties(width=700, height=350), use_container_width=True)
-
-if not survey_charts_exist:
-    st.info("No survey data available for the selected date range for any survey type.")
-
-
 # Customer Comments
 st.markdown("---")
 st.subheader("Customer Comments")
