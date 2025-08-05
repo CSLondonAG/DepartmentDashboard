@@ -11,55 +11,59 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Aesthetically improved custom CSS with a modern, professional look
+# New custom CSS with a more vibrant, gradient-based aesthetic
 st.markdown("""
 <style>
-/* Main container styling */
+/* Main container styling with a light grey background */
 .main .block-container {
-    padding-top: 2rem;
-    padding-bottom: 2rem;
-    background-color: #f0f2f6;
+    padding-top: 3rem;
+    padding-bottom: 3rem;
+    background-color: #eef2f6;
 }
 
-/* Metric card styling */
+/* Metric card styling with a gradient and hover effect */
 .metric-container {
-    padding: 20px;
-    border-radius: 12px;
-    background-color: #ffffff;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    padding: 25px;
+    border-radius: 15px;
+    background: linear-gradient(135deg, #f9f9f9, #ffffff);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.1);
     text-align: center;
-    transition: transform 0.2s, box-shadow 0.2s;
-    border: 2px solid transparent;
+    transition: all 0.3s ease-in-out;
+    border-left: 5px solid transparent;
 }
 .metric-container:hover {
-    transform: translateY(-5px);
-    box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+    transform: translateY(-8px) scale(1.02);
+    box-shadow: 0 12px 30px rgba(0,0,0,0.15);
 }
 
 /* Specific metric card border colors */
-.metric-container.success { border-color: #4CAF50; }
-.metric-container.warning { border-color: #FFC107; }
-.metric-container.danger  { border-color: #F44336; }
+.metric-container.success { border-color: #1abc9c; } /* Turquoise */
+.metric-container.warning { border-color: #f39c12; } /* Orange */
+.metric-container.danger  { border-color: #e74c3c; } /* Red */
+.metric-container.info    { border-color: #3498db; } /* Blue for general stats */
 
-/* Metric titles and values */
+/* Metric titles and values with a new font */
 .metric-title {
-    font-family: 'Segoe UI', 'Roboto', sans-serif;
-    font-size: 1.1em;
-    font-weight: 500;
-    color: #4a4a4a;
-    margin-bottom: 8px;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1.2em;
+    font-weight: 600;
+    color: #555;
+    margin-bottom: 10px;
 }
 .metric-value {
-    font-family: 'Segoe UI', 'Roboto', sans-serif;
-    font-size: 2.2em;
-    font-weight: 700;
-    color: #1a73e8; /* A modern blue */
+    font-family: 'Montserrat', sans-serif;
+    font-size: 2.5em;
+    font-weight: 800;
+    color: #444;
 }
 
-/* Header and subheader styling */
+/* Header and subheader styling with a new font and color */
 h1, h2, h3 {
-    font-family: 'Segoe UI', 'Roboto', sans-serif;
-    color: #2c3e50; /* Darker text for better contrast */
+    font-family: 'Montserrat', sans-serif;
+    font-weight: 700;
+    color: #2c3e50;
+    border-bottom: 2px solid #3498db;
+    padding-bottom: 10px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -254,10 +258,10 @@ st.markdown("---")
 st.subheader("Core Metrics")
 c1,c2,c3,c4=st.columns(4)
 # Passing the border class directly to the updated renderer
-render_custom_metric(c1,"Total Chats",chat_total,"Total chat interactions","success")
-render_custom_metric(c2,"Total Emails",email_total,"Total email interactions","success")
-render_custom_metric(c3,"Avg Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","success")
-render_custom_metric(c4,"Avg Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","success")
+render_custom_metric(c1,"Total Chats",chat_total,"Total chat interactions","info")
+render_custom_metric(c2,"Total Emails",email_total,"Total email interactions","info")
+render_custom_metric(c3,"Avg Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","info")
+render_custom_metric(c4,"Avg Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","info")
 
 # Operational Metrics
 st.markdown("---")
@@ -265,7 +269,7 @@ st.subheader("Operational Metrics")
 m1,m2,m3=st.columns(3)
 render_custom_metric(m1,"Chat Utilization",f"{chat_util:.1%}","Agent-minute chat utilization",get_utilization_color(chat_util))
 render_custom_metric(m2,"Email Utilization",f"{email_util:.1%}","Agent-minute email utilization",get_utilization_color(email_util))
-render_custom_metric(m3,"Avg Chat Wait (sec)",f"{avg_chat_wait:.1f}","Average chat wait time","success")
+render_custom_metric(m3,"Avg Chat Wait (sec)",f"{avg_chat_wait:.1f}","Average chat wait time","info")
 
 # SLA Score Summary
 st.markdown("---")
@@ -283,7 +287,7 @@ x_max = datetime.combine(end_date,  datetime.max.time())+timedelta(days=0.5)
 trend = df_daily[["Date","Weighted SLA"]].sort_values("Date")
 chart = (
     alt.Chart(trend)
-    .mark_line(point=True, color="#4CAF50")  # Changed color to match success state
+    .mark_line(point=True, color="#3498db")  # A vibrant blue
     .encode(
         x=alt.X("Date:T",axis=alt.Axis(format="%d %b",labelAngle=-45,tickCount="day"),
                 scale=alt.Scale(domain=[x_min,x_max])),
@@ -291,8 +295,8 @@ chart = (
         tooltip=[alt.Tooltip("Date:T",format="%d %b"), alt.Tooltip("Weighted SLA:Q",format=".1f")]
     )
 )
-labels = chart.mark_text(dy=-10,color="#4CAF50").encode(text=alt.Text("Weighted SLA:Q",format=".1f"))
-rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="#F44336",strokeDash=[5,5]).encode(y="y:Q") # Changed color for target line
-rule_lb= alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left",color="#F44336",dy=-8)\
+labels = chart.mark_text(dy=-10,color="#3498db").encode(text=alt.Text("Weighted SLA:Q",format=".1f"))
+rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="#e74c3c",strokeDash=[5,5]).encode(y="y:Q") # A vibrant red for the target line
+rule_lb= alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left",color="#e74c3c",dy=-8)\
             .encode(y="y:Q",text=alt.value("Target: 80%"))
 st.altair_chart((chart+labels+rule+rule_lb).properties(width=700,height=350),use_container_width=True)
