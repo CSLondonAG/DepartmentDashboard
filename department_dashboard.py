@@ -313,7 +313,7 @@ survey_period = df_surveys[
     (df_surveys["Survey Taker: Created Date"].dt.date >= start_date) &
     (df_surveys["Survey Taker: Created Date"].dt.date <= end_date)
 ]
-total_surveys_taken = len(survey_period)
+total_surveys_taken = survey_period["Survey Taker: Survey Response"].nunique()
 survey_summary_metrics = {}
 for q in survey_questions:
     q_data = survey_period[survey_period["Survey Question: Question Title"] == q].dropna(subset=['Survey Score'])
@@ -406,6 +406,6 @@ chart = (
 )
 labels = chart.mark_text(dy=-10,color="#3498db").encode(text=alt.Text("Weighted SLA:Q",format=".1f"))
 rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="#e74c3c",strokeDash=[5,5]).encode(y="y:Q")
-rule_lb= alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left",color="#e74c3c",dy=-8)\
+rule_lb= alt.Chart(pd.DataFrame({"y":[80)})).mark_text(align="left",color="#e74c3c",dy=-8)\
             .encode(y="y:Q",text=alt.value("Target: 80%"))
 st.altair_chart((chart+labels+rule+rule_lb).properties(width=700,height=350),use_container_width=True)
