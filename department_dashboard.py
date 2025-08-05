@@ -108,6 +108,11 @@ def get_survey_score_color(score):
     elif score >= 6: return "warning"
     else: return "danger"
 
+def get_nps_color(nps_score):
+    if nps_score >= 50: return "success"
+    elif nps_score >= 0: return "warning"
+    else: return "danger"
+
 # --- Load & preprocess data ---
 BASE_DIR   = Path(__file__).parent
 chat_path  = BASE_DIR / "chat.csv"
@@ -283,13 +288,13 @@ df_daily["Weighted SLA"] = (
 ) / (df_daily["Chat Vol"]+df_daily["Email Vol"])
 
 # --- Summary SLA Scores ---
-chat_weighted  = (df_daily["Chat SLA"]*df_daily["Chat Vol"]).sum()  / df_daily["Chat Vol"].sum()
-email_weighted = (df_daily["Email SLA"]*df_daily["Email Vol"]).sum()/ df_daily["Email Vol"].sum()
+chat_weighted  = (df_daily["Chat SLA"]*df_daily["Chat Vol"]).sum()  / df_daily["Chat Vol"].sum() if df_daily["Chat Vol"].sum() > 0 else 0
+email_weighted = (df_daily["Email SLA"]*df_daily["Email Vol"]).sum()/ df_daily["Email Vol"].sum() if df_daily["Email Vol"].sum() > 0 else 0
 weighted_sla   = (
     (df_daily["Chat SLA"]*df_daily["Chat Vol"]+
      df_daily["Email SLA"]*df_daily["Email Vol"]).sum()
   / (df_daily["Chat Vol"]+df_daily["Email Vol"]).sum()
-)
+) if (df_daily["Chat Vol"]+df_daily["Email Vol"]).sum() > 0 else 0
 
 # --- Summary Survey Scores ---
 survey_period = df_surveys[
@@ -299,9 +304,16 @@ survey_period = df_surveys[
 survey_summary_metrics = {}
 for q in survey_questions:
     q_data = survey_period[survey_period["Survey Question: Question Title"] == q].dropna(subset=['Survey Score'])
-    avg_score = q_data["Survey Score"].mean() if len(q_data) > 0 else None
     count = len(q_data)
-    survey_summary_metrics[q] = {"avg_score": avg_score, "count": count, "is_yes_no": "Yes\nNo" in q_data["Survey Question: Choices"].unique() if not q_data.empty else False}
+
+    if q == combined_rec_title and count > 0:
+        promoters = len(q_data[q_data['Survey Score'] > 8])
+        detractors = len(q_data[q_data['Survey Score'] < 7])
+        nps_score = ((promoters - detractors) / count) * 100
+        survey_summary_metrics[q] = {"nps_score": nps_score, "count": count, "is_nps": True}
+    else:
+        avg_score = q_data["Survey Score"].mean() if count > 0 else None
+        survey_summary_metrics[q] = {"avg_score": avg_score, "count": count, "is_yes_no": "Yes\nNo" in q_data["Survey Question: Choices"].unique() if not q_data.empty else False, "is_nps": False}
 
 # --- UI: Header & Metrics ---
 st.title("📊 Department Performance Dashboard")
@@ -310,25 +322,11 @@ st.markdown("---")
 
 # Core Metrics
 st.subheader("Core Metrics")
-cols = st.columns(3 + len(survey_questions))
+cols = st.columns(4)
 render_custom_metric(cols[0],"Total Chats",chat_total,"Total chat interactions","info")
 render_custom_metric(cols[1],"Total Emails",email_total,"Total email interactions","info")
 render_custom_metric(cols[2],"Avg Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","info")
-# Dynamically create metric cards for each survey question
-for i, q in enumerate(survey_questions):
-    metric = survey_summary_metrics[q]
-    
-    if metric["is_yes_no"]:
-        title = f"Yes %: {q}"
-        value = f"{metric['avg_score'] * 100:.1f}%" if metric["avg_score"] is not None else "N/A"
-        tooltip = f"Percentage of 'Yes' responses for '{q}' ({metric['count']} responses)"
-    else:
-        title = f"Avg Score: {q}"  
-        value = f"{metric['avg_score']:.1f}" if metric["avg_score"] is not None else "N/A"
-        tooltip = f"Average survey score for '{q}' ({metric['count']} responses)"
-    
-    color = get_survey_score_color(metric["avg_score"]) if metric["avg_score"] is not None else "info"
-    render_custom_metric(cols[3+i], title, value, tooltip, color)
+render_custom_metric(cols[3],"Avg Email AHT (hh:mm:ss)",fmt_hms(email_aht),"Average email handle time","info")
 
 
 # Operational Metrics
@@ -346,6 +344,32 @@ s1,s2,s3=st.columns(3)
 render_custom_metric(s1,"Chat SLA Score",f"{chat_weighted:.1f}","Weighted chat SLA",get_sla_score_color(chat_weighted))
 render_custom_metric(s2,"Email SLA Score",f"{email_weighted:.1f}","Weighted email SLA",get_sla_score_color(email_weighted))
 render_custom_metric(s3,"Weighted SLA Score",f"{weighted_sla:.1f}","Overall weighted SLA",get_sla_score_color(weighted_sla))
+
+# Customer Survey Scores (New Section)
+st.markdown("---")
+st.subheader("Customer Survey Scores")
+cols_survey = st.columns(len(survey_questions))
+for i, q in enumerate(survey_questions):
+    metric = survey_summary_metrics[q]
+    
+    if metric.get("is_nps"):
+        title = "NPS: Combined Recommendation Score"
+        value = f"{metric['nps_score']:.0f}" if metric["nps_score"] is not None else "N/A"
+        tooltip = f"Net Promoter Score based on {metric['count']} responses"
+        color = get_nps_color(metric["nps_score"])
+    elif metric.get("is_yes_no"):
+        title = f"Yes %: {q}"
+        value = f"{metric['avg_score'] * 100:.1f}%" if metric["avg_score"] is not None else "N/A"
+        tooltip = f"Percentage of 'Yes' responses for '{q}' ({metric['count']} responses)"
+        color = get_survey_score_color(metric["avg_score"] * 10) if metric["avg_score"] is not None else "info"
+    else:
+        title = f"Avg Score: {q}"  
+        value = f"{metric['avg_score']:.1f}" if metric["avg_score"] is not None else "N/A"
+        tooltip = f"Average survey score for '{q}' ({metric['count']} responses)"
+        color = get_survey_score_color(metric["avg_score"]) if metric["avg_score"] is not None else "info"
+    
+    render_custom_metric(cols_survey[i], title, value, tooltip, color)
+
 
 # Weighted SLA Trend Chart
 st.markdown("---")
