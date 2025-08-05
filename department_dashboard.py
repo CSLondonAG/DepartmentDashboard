@@ -405,7 +405,8 @@ chart = (
     )
 )
 labels = chart.mark_text(dy=-10,color="#3498db").encode(text=alt.Text("Weighted SLA:Q",format=".1f"))
-rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="#e74c3c",strokeDash=[5,5]).encode(y="y:Q")
-rule_lb= alt.Chart(pd.DataFrame({"y":[80)})).mark_text(align="left",color="#e74c3c",dy=-8)\
+# Fixed the SyntaxError by correcting the DataFrame creation syntax
+rule   = alt.Chart(pd.DataFrame({"y": [80]})).mark_rule(color="#e74c3c",strokeDash=[5,5]).encode(y="y:Q")
+rule_lb= alt.Chart(pd.DataFrame({"y": [80]})).mark_text(align="left",color="#e74c3c",dy=-8)\
             .encode(y="y:Q",text=alt.value("Target: 80%"))
 st.altair_chart((chart+labels+rule+rule_lb).properties(width=700,height=350),use_container_width=True)
