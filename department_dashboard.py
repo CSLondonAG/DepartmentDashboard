@@ -10,31 +10,56 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Aesthetically improved custom CSS with a modern, professional look
 st.markdown("""
 <style>
+/* Main container styling */
 .main .block-container {
     padding-top: 2rem;
+    padding-bottom: 2rem;
+    background-color: #f0f2f6;
 }
+
+/* Metric card styling */
 .metric-container {
-    padding: 12px;
-    border-radius: 8px;
+    padding: 20px;
+    border-radius: 12px;
     background-color: #ffffff;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
     text-align: center;
+    transition: transform 0.2s, box-shadow 0.2s;
     border: 2px solid transparent;
 }
-.metric-container-warning {
-    border-color: #ff4d4d;
+.metric-container:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.12);
 }
+
+/* Specific metric card border colors */
+.metric-container.success { border-color: #4CAF50; }
+.metric-container.warning { border-color: #FFC107; }
+.metric-container.danger  { border-color: #F44336; }
+
+/* Metric titles and values */
 .metric-title {
+    font-family: 'Segoe UI', 'Roboto', sans-serif;
     font-size: 1.1em;
-    color: #333333;
-    margin-bottom: 4px;
+    font-weight: 500;
+    color: #4a4a4a;
+    margin-bottom: 8px;
 }
 .metric-value {
-    font-size: 1.8em;
-    font-weight: bold;
-    color: #007bff;
+    font-family: 'Segoe UI', 'Roboto', sans-serif;
+    font-size: 2.2em;
+    font-weight: 700;
+    color: #1a73e8; /* A modern blue */
+}
+
+/* Header and subheader styling */
+h1, h2, h3 {
+    font-family: 'Segoe UI', 'Roboto', sans-serif;
+    color: #2c3e50; /* Darker text for better contrast */
 }
 </style>
 """, unsafe_allow_html=True)
@@ -51,26 +76,28 @@ def fmt_hms(sec):
     m, s   = divmod(rem, 60)
     return f"{h:02}:{m:02}:{s:02}"
 
-def render_custom_metric(container, title, value, tooltip, color):
+# Updated renderer with new border class
+def render_custom_metric(container, title, value, tooltip, border_class):
     container.markdown(f"""
-        <div class="metric-container" style="border-color:{color}" title="{tooltip}">
+        <div class="metric-container {border_class}" title="{tooltip}">
             <div class="metric-title">{title}</div>
             <div class="metric-value">{value}</div>
         </div>
     """, unsafe_allow_html=True)
 
+# Updated color functions to return CSS classes
 def get_utilization_color(util):
-    if util >= 0.50: return "#4CAF50"
-    elif util >= 0.30: return "#FFC107"
-    else: return "#F44336"
+    if util >= 0.50: return "success"
+    elif util >= 0.30: return "warning"
+    else: return "danger"
 
 def get_email_resp_time_color(sec):
-    return "#F44336" if sec > 59*60 else "#4CAF50"
+    return "danger" if sec > 59*60 else "success"
 
 def get_sla_score_color(score):
-    if score >= 80: return "#4CAF50"
-    elif score >= 70: return "#FFC107"
-    else: return "#F44336"
+    if score >= 80: return "success"
+    elif score >= 70: return "warning"
+    else: return "danger"
 
 # --- Load & preprocess data ---
 BASE_DIR   = Path(__file__).parent
@@ -226,10 +253,11 @@ st.markdown("---")
 # Core Metrics
 st.subheader("Core Metrics")
 c1,c2,c3,c4=st.columns(4)
-render_custom_metric(c1,"Total Chats",chat_total,"Total chat interactions","#4CAF50")
-render_custom_metric(c2,"Total Emails",email_total,"Total email interactions","#4CAF50")
-render_custom_metric(c3,"Avg Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","#4CAF50")
-render_custom_metric(c4,"Avg Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","#4CAF50")
+# Passing the border class directly to the updated renderer
+render_custom_metric(c1,"Total Chats",chat_total,"Total chat interactions","success")
+render_custom_metric(c2,"Total Emails",email_total,"Total email interactions","success")
+render_custom_metric(c3,"Avg Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","success")
+render_custom_metric(c4,"Avg Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","success")
 
 # Operational Metrics
 st.markdown("---")
@@ -237,7 +265,7 @@ st.subheader("Operational Metrics")
 m1,m2,m3=st.columns(3)
 render_custom_metric(m1,"Chat Utilization",f"{chat_util:.1%}","Agent-minute chat utilization",get_utilization_color(chat_util))
 render_custom_metric(m2,"Email Utilization",f"{email_util:.1%}","Agent-minute email utilization",get_utilization_color(email_util))
-render_custom_metric(m3,"Avg Chat Wait (sec)",f"{avg_chat_wait:.1f}","Average chat wait time","#4CAF50")
+render_custom_metric(m3,"Avg Chat Wait (sec)",f"{avg_chat_wait:.1f}","Average chat wait time","success")
 
 # SLA Score Summary
 st.markdown("---")
@@ -255,7 +283,7 @@ x_max = datetime.combine(end_date,  datetime.max.time())+timedelta(days=0.5)
 trend = df_daily[["Date","Weighted SLA"]].sort_values("Date")
 chart = (
     alt.Chart(trend)
-    .mark_line(point=True,color="#2F80ED")
+    .mark_line(point=True, color="#4CAF50")  # Changed color to match success state
     .encode(
         x=alt.X("Date:T",axis=alt.Axis(format="%d %b",labelAngle=-45,tickCount="day"),
                 scale=alt.Scale(domain=[x_min,x_max])),
@@ -263,8 +291,8 @@ chart = (
         tooltip=[alt.Tooltip("Date:T",format="%d %b"), alt.Tooltip("Weighted SLA:Q",format=".1f")]
     )
 )
-labels = chart.mark_text(dy=-10,color="#2F80ED").encode(text=alt.Text("Weighted SLA:Q",format=".1f"))
-rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="red",strokeDash=[5,5]).encode(y="y:Q")
-rule_lb= alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left",color="red",dy=-8)\
+labels = chart.mark_text(dy=-10,color="#4CAF50").encode(text=alt.Text("Weighted SLA:Q",format=".1f"))
+rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="#F44336",strokeDash=[5,5]).encode(y="y:Q") # Changed color for target line
+rule_lb= alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left",color="#F44336",dy=-8)\
             .encode(y="y:Q",text=alt.value("Target: 80%"))
 st.altair_chart((chart+labels+rule+rule_lb).properties(width=700,height=350),use_container_width=True)
