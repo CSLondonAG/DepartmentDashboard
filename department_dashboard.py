@@ -372,13 +372,13 @@ st.altair_chart((chart+labels+rule+rule_lb).properties(width=700,height=350),use
 # Survey Score Trend Chart
 st.markdown("---")
 st.subheader("Average Survey Score Trend")
-survey_charts = []
+survey_charts_exist = False
 if survey_questions.size > 0:
     for q in survey_questions:
-        # Use the sanitized column name for the chart data
         y_col = survey_question_cols[q]
         q_data = df_daily.dropna(subset=[y_col])
         if not q_data.empty:
+            survey_charts_exist = True
             is_yes_no = survey_summary_metrics[q]["is_yes_no"]
             y_title = "Yes %" if is_yes_no else "Average Score"
             chart_title = f"Trend for '{q}'"
@@ -389,14 +389,12 @@ if survey_questions.size > 0:
                 .encode(
                     x=alt.X(field="Date", type="temporal", axis=alt.Axis(format="%d %b", labelAngle=-45, tickCount="day")),
                     y=alt.Y(field=y_col, type="quantitative", title=y_title, scale=alt.Scale(domain=[0, 10] if not is_yes_no else [0, 1])),
-                    # Use the original question title in the tooltip
                     tooltip=[alt.Tooltip(field="Date", title="Date", type="temporal", format="%d %b"),
                              alt.Tooltip(field=y_col, title=q, type="quantitative", format=".1f" if not is_yes_no else ".1%")]
                 )
             )
             
             if is_yes_no:
-                # Need to calculate percentage for labels
                 survey_labels = survey_chart.mark_text(dy=-10, color="#1abc9c").encode(
                     text=alt.Text(field=y_col, type="quantitative", format=".1%")
                 )
@@ -404,15 +402,12 @@ if survey_questions.size > 0:
                 survey_labels = survey_chart.mark_text(dy=-10, color="#1abc9c").encode(
                     text=alt.Text(field=y_col, type="quantitative", format=".1f")
                 )
+            
+            st.altair_chart((survey_chart + survey_labels).properties(width=700, height=350), use_container_width=True)
 
-            survey_charts.append(survey_chart + survey_labels)
+if not survey_charts_exist:
+    st.info("No survey data available for the selected date range for any survey type.")
 
-    if survey_charts:
-        st.altair_chart(alt.vconcat(*survey_charts).properties(width=700, height=350), use_container_width=True)
-    else:
-        st.info("No survey data available for the selected date range for any survey type.")
-else:
-    st.info("No survey data available for the selected date range.")
 
 # Customer Comments
 st.markdown("---")
