@@ -370,21 +370,9 @@ st.subheader("Customer Survey Scores")
 cols_survey = st.columns(len(survey_questions))
 for i, q in enumerate(survey_questions):
     metric = survey_summary_metrics[q]
-    title = "" # Initialize title variable
 
-    # Use a custom title for specific questions
-    if q == "How satisfied were you with the Customer Service you received today?":
-        title = "Customer Satisfaction (Out of 5)"
-    elif q == "Was the issue reported in the email resolved by the agent?":
-        title = "Email Resolution %"
-    elif q == "Was the issue reported in the chat resolved by the agent?":
-        title = "Chat Resolution %"
-    elif metric.get("is_nps"):
-        title = "NPS: Combined Recommendation Score"
-    elif metric.get("is_yes_no"):
-        title = f"Yes %: {q}"
-    else:
-        title = f"Avg Score: {q}"
+    # Use the full survey question as the title
+    title = q
 
     if metric.get("is_nps"):
         value = f"{metric['nps_score']:.0f}" if metric["nps_score"] is not None else "N/A"
