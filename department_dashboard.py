@@ -108,7 +108,6 @@ def get_survey_score_color(score):
     elif score >= 6: return "warning"
     else: return "danger"
 
-
 # --- Load & preprocess data ---
 BASE_DIR   = Path(__file__).parent
 chat_path  = BASE_DIR / "chat.csv"
@@ -132,6 +131,19 @@ df_surveys   = pd.read_csv(survey_path, dayfirst=True, parse_dates=["Survey Take
 
 for df in (df_items, df_presence, df_shifts, chat_sla_df, email_sla_df, df_surveys):
     df.columns = df.columns.str.strip()
+
+# --- NEW: Data Preprocessing for Survey Scores ---
+# Define the two recommendation questions to be combined
+rec_questions = [
+    "How likely are you to recommend Premier Bet to a friend or colleague?",
+    "How likely would you to to recommend Mercury Bet to a friend or colleague?"
+]
+combined_rec_title = "Combined Recommendation Score"
+df_surveys.loc[df_surveys["Survey Question: Question Title"].isin(rec_questions),
+               "Survey Question: Question Title"] = combined_rec_title
+
+# Identify unique survey question titles for dynamic processing
+survey_questions = df_surveys["Survey Question: Question Title"].dropna().unique()
 
 # --- Sidebar: Date Range (chat.csv) ---
 st.sidebar.header("Filter Options")
@@ -231,8 +243,6 @@ email_util = email_handle_secs / email_avail_secs if email_avail_secs else 0
 
 # --- Build per-day SLA & volumes ---
 daily = []
-# Identify unique survey question titles for dynamic processing
-survey_questions = df_surveys["Survey Question: Question Title"].dropna().unique()
 for d in pd.date_range(start_date, end_date):
     dd = d.normalize()
     # chat SLA & vol
@@ -249,7 +259,6 @@ for d in pd.date_range(start_date, end_date):
     avg_e= ed["Elapsed Time (Hours)"].mean() if len(ed) else 0
     sla_e= max(0, min(100, ((0.6*pct1 - 0.4*avg_e)/56.25)*100))
     
-    # survey scores - now per question title
     daily_entry = {"Date":dd, "Chat SLA":sla_c, "Chat Vol":v_c,
                    "Email SLA":sla_e,"Email Vol":v_e}
     
@@ -285,7 +294,7 @@ for q in survey_questions:
     q_data = survey_period[survey_period["Survey Question: Question Title"] == q].dropna(subset=['Survey Score'])
     avg_score = q_data["Survey Score"].mean() if len(q_data) > 0 else None
     count = len(q_data)
-    survey_summary_metrics[q] = {"avg_score": avg_score, "count": count}
+    survey_summary_metrics[q] = {"avg_score": avg_score, "count": count, "is_yes_no": "Yes\nNo" in q_data["Survey Question: Choices"].unique() if not q_data.empty else False}
 
 # --- UI: Header & Metrics ---
 st.title("📊 Department Performance Dashboard")
@@ -294,7 +303,6 @@ st.markdown("---")
 
 # Core Metrics
 st.subheader("Core Metrics")
-# Adjusting the column width to accommodate the new metrics
 cols = st.columns(3 + len(survey_questions))
 render_custom_metric(cols[0],"Total Chats",chat_total,"Total chat interactions","info")
 render_custom_metric(cols[1],"Total Emails",email_total,"Total email interactions","info")
@@ -302,10 +310,16 @@ render_custom_metric(cols[2],"Avg Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average 
 # Dynamically create metric cards for each survey question
 for i, q in enumerate(survey_questions):
     metric = survey_summary_metrics[q]
-    # Use the full question title as the metric card title
-    title = f"Avg Score: {q}"  
-    tooltip = f"Average survey score for '{q}' ({metric['count']} responses)"
-    value = f"{metric['avg_score']:.1f}" if metric["avg_score"] is not None else "N/A"
+    
+    if metric["is_yes_no"]:
+        title = f"Yes %: {q}"
+        value = f"{metric['avg_score'] * 100:.1f}%" if metric["avg_score"] is not None else "N/A"
+        tooltip = f"Percentage of 'Yes' responses for '{q}' ({metric['count']} responses)"
+    else:
+        title = f"Avg Score: {q}"  
+        value = f"{metric['avg_score']:.1f}" if metric["avg_score"] is not None else "N/A"
+        tooltip = f"Average survey score for '{q}' ({metric['count']} responses)"
+    
     color = get_survey_score_color(metric["avg_score"]) if metric["avg_score"] is not None else "info"
     render_custom_metric(cols[3+i], title, value, tooltip, color)
 
@@ -334,7 +348,7 @@ x_max = datetime.combine(end_date,  datetime.max.time())+timedelta(days=0.5)
 trend = df_daily[["Date","Weighted SLA"]].sort_values("Date")
 chart = (
     alt.Chart(trend)
-    .mark_line(point=True, color="#3498db")  # A vibrant blue
+    .mark_line(point=True, color="#3498db")
     .encode(
         x=alt.X("Date:T",axis=alt.Axis(format="%d %b",labelAngle=-45,tickCount="day"),
                 scale=alt.Scale(domain=[x_min,x_max])),
@@ -343,7 +357,7 @@ chart = (
     )
 )
 labels = chart.mark_text(dy=-10,color="#3498db").encode(text=alt.Text("Weighted SLA:Q",format=".1f"))
-rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="#e74c3c",strokeDash=[5,5]).encode(y="y:Q") # A vibrant red for the target line
+rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="#e74c3c",strokeDash=[5,5]).encode(y="y:Q")
 rule_lb= alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left",color="#e74c3c",dy=-8)\
             .encode(y="y:Q",text=alt.value("Target: 80%"))
 st.altair_chart((chart+labels+rule+rule_lb).properties(width=700,height=350),use_container_width=True)
@@ -356,16 +370,32 @@ if survey_questions.size > 0:
     for q in survey_questions:
         q_data = df_daily.dropna(subset=[f"Survey Score: {q}"])
         if not q_data.empty:
+            is_yes_no = survey_summary_metrics[q]["is_yes_no"]
+            y_title = "Yes %" if is_yes_no else "Average Score"
+            chart_title = f"Trend for '{q}'"
+            
             survey_chart = (
-                alt.Chart(q_data, title=f"Trend for '{q}'") # Use question title for chart title
-                .mark_line(point=True, color="#1abc9c") 
+                alt.Chart(q_data, title=chart_title)
+                .mark_line(point=True, color="#1abc9c")
                 .encode(
                     x=alt.X("Date:T", axis=alt.Axis(format="%d %b", labelAngle=-45, tickCount="day")),
-                    y=alt.Y(f"Survey Score: {q}", title="Average Score", scale=alt.Scale(domain=[0, 10])),
-                    tooltip=[alt.Tooltip("Date:T", format="%d %b"), alt.Tooltip(f"Survey Score: {q}", format=".1f")]
+                    y=alt.Y(f"Survey Score: {q}", title=y_title, scale=alt.Scale(domain=[0, 10] if not is_yes_no else [0, 1])),
+                    tooltip=[alt.Tooltip("Date:T", format="%d %b"),
+                             alt.Tooltip(f"Survey Score: {q}", format=".1f" if not is_yes_no else ".1%")]
                 )
             )
-            survey_labels = survey_chart.mark_text(dy=-10, color="#1abc9c").encode(text=alt.Text(f"Survey Score: {q}", format=".1f"))
+            
+            y_col = f"Survey Score: {q}"
+            if is_yes_no:
+                # Need to calculate percentage for labels
+                survey_labels = survey_chart.mark_text(dy=-10, color="#1abc9c").encode(
+                    text=alt.Text(y_col, format=".1%")
+                )
+            else:
+                survey_labels = survey_chart.mark_text(dy=-10, color="#1abc9c").encode(
+                    text=alt.Text(y_col, format=".1f")
+                )
+
             survey_charts.append(survey_chart + survey_labels)
 
     if survey_charts:
@@ -386,11 +416,9 @@ for q in survey_questions:
                             ]['Response'].unique()
     if len(comments) > 0:
         comment_found = True
-        st.markdown(f"**Comments for '{q}'**") # Use question title for comment header
+        st.markdown(f"**Comments for '{q}'**")
         for comment in comments:
             st.info(f"**💬** {comment}")
 
 if not comment_found:
     st.info("No customer comments available for the selected date range.")
-
-
