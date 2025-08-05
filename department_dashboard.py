@@ -11,7 +11,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# New custom CSS with a fixed height for metric containers and a new font size class
+# Reverting CSS to a flexible height for metric containers
 st.markdown("""
 <style>
 /* Main container styling with a light grey background */
@@ -30,7 +30,6 @@ st.markdown("""
     text-align: center;
     transition: all 0.3s ease-in-out;
     border-left: 5px solid transparent;
-    height: 120px; /* Fixed height to prevent vertical growth */
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -50,16 +49,6 @@ st.markdown("""
 .metric-title {
     font-family: 'Montserrat', sans-serif;
     font-size: 1.2em;
-    font-weight: 600;
-    color: #555;
-    margin-bottom: 5px;
-    line-height: 1.2em;
-    overflow: hidden;
-}
-/* New class for smaller font size for long titles */
-.metric-title-small {
-    font-family: 'Montserrat', sans-serif;
-    font-size: 0.9em;
     font-weight: 600;
     color: #555;
     margin-bottom: 5px;
@@ -96,14 +85,11 @@ def fmt_hms(sec):
     m, s   = divmod(rem, 60)
     return f"{h:02}:{m:02}"
 
-# Updated renderer to dynamically choose a font size class for the title
+# Reverting renderer to use a single font size and no fixed height
 def render_custom_metric(container, title, value, tooltip, border_class):
-    # Set a character limit and choose a CSS class accordingly
-    char_limit = 25
-    title_class = "metric-title" if len(title) <= char_limit else "metric-title-small"
     container.markdown(f"""
         <div class="metric-container {border_class}" title="{tooltip}">
-            <div class="{title_class}">{title}</div>
+            <div class="metric-title">{title}</div>
             <div class="metric-value">{value}</div>
         </div>
     """, unsafe_allow_html=True)
@@ -173,6 +159,12 @@ survey_questions = df_surveys["Survey Question: Question Title"].dropna().unique
 survey_question_cols = {
     q: q.replace(':', '').replace(' ', '_').replace('?', '').replace('-', '_').strip()
     for q in survey_questions
+}
+# Define shorter labels for the survey questions
+short_survey_labels = {
+    "Combined Recommendation Score": "NPS",
+    "Was the issue reported in the chat resolved by the agent?": "Chat Issue Resolved %",
+    "Was the issue reported in the email resolved by the agent?": "Email Issue Resolved %"
 }
 
 # --- Sidebar: Date Range (chat.csv) ---
@@ -371,20 +363,18 @@ cols_survey = st.columns(len(survey_questions))
 for i, q in enumerate(survey_questions):
     metric = survey_summary_metrics[q]
 
-    # Use the full survey question as the title
-    title = q
+    # Use the shorter, descriptive label
+    title = short_survey_labels.get(q, q)
+    tooltip = f"{q} ({metric['count']} responses)"
 
     if metric.get("is_nps"):
         value = f"{metric['nps_score']:.0f}" if metric["nps_score"] is not None else "N/A"
-        tooltip = f"Net Promoter Score based on {metric['count']} responses"
         color = get_nps_color(metric["nps_score"])
     elif metric.get("is_yes_no"):
         value = f"{metric['avg_score'] * 100:.1f}%" if metric["avg_score"] is not None else "N/A"
-        tooltip = f"Percentage of 'Yes' responses for '{q}' ({metric['count']} responses)"
         color = get_survey_score_color(metric['avg_score'] * 10) if metric["avg_score"] is not None else "info"
     else: # Default numeric score
         value = f"{metric['avg_score']:.1f}" if metric["avg_score"] is not None else "N/A"
-        tooltip = f"Average survey score for '{q}' ({metric['count']} responses)"
         color = get_survey_score_color(metric['avg_score']) if metric["avg_score"] is not None else "info"
 
     render_custom_metric(cols_survey[i], title, value, tooltip, color)
