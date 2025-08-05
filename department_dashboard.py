@@ -325,8 +325,8 @@ st.subheader("Core Metrics")
 cols = st.columns(4)
 render_custom_metric(cols[0],"Total Chats",chat_total,"Total chat interactions","info")
 render_custom_metric(cols[1],"Total Emails",email_total,"Total email interactions","info")
-render_custom_metric(cols[2],"Avg Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","info")
-render_custom_metric(cols[3],"Avg Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","info")
+render_custom_metric(cols[2],"Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","info")
+render_custom_metric(cols[3],"Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","info")
 
 # Operational Metrics
 st.markdown("---")
@@ -335,7 +335,7 @@ m1,m2,m3,m4 = st.columns(4)
 render_custom_metric(m1,"Chat Utilization",f"{chat_util:.1%}","Agent-minute chat utilization",get_utilization_color(chat_util))
 render_custom_metric(m2,"Email Utilization",f"{email_util:.1%}","Agent-minute email utilization",get_utilization_color(email_util))
 render_custom_metric(m3,"Avg Chat Wait (sec)",f"{avg_chat_wait:.1f}","Average chat wait time","info")
-render_custom_metric(m4,"Avg Email Resp Time (hh:mm)",fmt_hms(avg_resp_secs),"Average time to send the first response to an email",get_email_resp_time_color(avg_resp_secs))
+render_custom_metric(m4,"Avg Email Response Time (hh:mm)",fmt_hms(avg_resp_secs),"Average time to send the first response to an email",get_email_resp_time_color(avg_resp_secs))
 
 # SLA Score Summary
 st.markdown("---")
@@ -353,7 +353,7 @@ for i, q in enumerate(survey_questions):
     metric = survey_summary_metrics[q]
 
     if metric.get("is_nps"):
-        title = "NPS: Combined Recommendation Score"
+        title = "NPS Score"
         value = f"{metric['nps_score']:.0f}" if metric["nps_score"] is not None else "N/A"
         tooltip = f"Net Promoter Score based on {metric['count']} responses"
         color = get_nps_color(metric["nps_score"])
@@ -392,3 +392,4 @@ rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="#e74c3c",strokeDas
 rule_lb= alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left",color="#e74c3c",dy=-8)\
             .encode(y="y:Q",text=alt.value("Target: 80%"))
 st.altair_chart((chart+labels+rule+rule_lb).properties(width=700,height=350),use_container_width=True)
+
