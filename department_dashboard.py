@@ -313,6 +313,7 @@ survey_period = df_surveys[
     (df_surveys["Survey Taker: Created Date"].dt.date >= start_date) &
     (df_surveys["Survey Taker: Created Date"].dt.date <= end_date)
 ]
+total_surveys_taken = len(survey_period)
 survey_summary_metrics = {}
 for q in survey_questions:
     q_data = survey_period[survey_period["Survey Question: Question Title"] == q].dropna(subset=['Survey Score'])
@@ -360,6 +361,12 @@ render_custom_metric(s3,"Weighted SLA Score",f"{weighted_sla:.1f}","Overall weig
 # Customer Survey Scores (New Section)
 st.markdown("---")
 st.subheader("Customer Survey Scores")
+
+# New row for Total Surveys
+cols_total_surveys = st.columns(1)
+render_custom_metric(cols_total_surveys[0], "Total Surveys Taken", f"{total_surveys_taken}", "Total surveys taken in the selected date range", "info")
+
+# New row for individual survey metrics
 cols_survey = st.columns(len(survey_questions))
 for i, q in enumerate(survey_questions):
     metric = survey_summary_metrics[q]
