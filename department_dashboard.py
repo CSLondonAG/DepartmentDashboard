@@ -368,7 +368,9 @@ st.subheader("Average Survey Score Trend")
 survey_charts = []
 if survey_questions.size > 0:
     for q in survey_questions:
-        q_data = df_daily.dropna(subset=[f"Survey Score: {q}"])
+        # The column name with the colon is the source of the error, so we need to use it carefully.
+        y_col = f"Survey Score: {q}"
+        q_data = df_daily.dropna(subset=[y_col])
         if not q_data.empty:
             is_yes_no = survey_summary_metrics[q]["is_yes_no"]
             y_title = "Yes %" if is_yes_no else "Average Score"
@@ -378,22 +380,22 @@ if survey_questions.size > 0:
                 alt.Chart(q_data, title=chart_title)
                 .mark_line(point=True, color="#1abc9c")
                 .encode(
-                    x=alt.X("Date:T", axis=alt.Axis(format="%d %b", labelAngle=-45, tickCount="day")),
-                    y=alt.Y(f"Survey Score: {q}", title=y_title, scale=alt.Scale(domain=[0, 10] if not is_yes_no else [0, 1])),
-                    tooltip=[alt.Tooltip("Date:T", format="%d %b"),
-                             alt.Tooltip(f"Survey Score: {q}", format=".1f" if not is_yes_no else ".1%")]
+                    x=alt.X(field="Date", type="temporal", axis=alt.Axis(format="%d %b", labelAngle=-45, tickCount="day")),
+                    # Use the 'field' argument to explicitly pass the column name with the colon.
+                    y=alt.Y(field=y_col, type="quantitative", title=y_title, scale=alt.Scale(domain=[0, 10] if not is_yes_no else [0, 1])),
+                    tooltip=[alt.Tooltip(field="Date", title="Date", type="temporal", format="%d %b"),
+                             alt.Tooltip(field=y_col, title=y_title, type="quantitative", format=".1f" if not is_yes_no else ".1%")]
                 )
             )
             
-            y_col = f"Survey Score: {q}"
             if is_yes_no:
                 # Need to calculate percentage for labels
                 survey_labels = survey_chart.mark_text(dy=-10, color="#1abc9c").encode(
-                    text=alt.Text(y_col, format=".1%")
+                    text=alt.Text(field=y_col, type="quantitative", format=".1%")
                 )
             else:
                 survey_labels = survey_chart.mark_text(dy=-10, color="#1abc9c").encode(
-                    text=alt.Text(y_col, format=".1f")
+                    text=alt.Text(field=y_col, type="quantitative", format=".1f")
                 )
 
             survey_charts.append(survey_chart + survey_labels)
