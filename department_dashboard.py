@@ -328,7 +328,6 @@ render_custom_metric(cols[1],"Total Emails",email_total,"Total email interaction
 render_custom_metric(cols[2],"Avg Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","info")
 render_custom_metric(cols[3],"Avg Email AHT (hh:mm:ss)",fmt_hms(email_aht),"Average email handle time","info")
 
-
 # Operational Metrics
 st.markdown("---")
 st.subheader("Operational Metrics")
