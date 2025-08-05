@@ -145,6 +145,12 @@ df_surveys.loc[df_surveys["Survey Question: Question Title"].isin(rec_questions)
 # Identify unique survey question titles for dynamic processing
 survey_questions = df_surveys["Survey Question: Question Title"].dropna().unique()
 
+# Create a sanitized dictionary to map original question titles to safe column names
+survey_question_cols = {
+    q: q.replace(':', '').replace(' ', '_').replace('?', '').replace('-', '_').strip()
+    for q in survey_questions
+}
+
 # --- Sidebar: Date Range (chat.csv) ---
 st.sidebar.header("Filter Options")
 min_date = chat_sla_df["Date/Time Opened"].dt.date.min()
@@ -265,7 +271,8 @@ for d in pd.date_range(start_date, end_date):
     for q in survey_questions:
         sd = df_surveys[(df_surveys["Survey Question: Question Title"] == q) & 
                         (df_surveys["Survey Taker: Created Date"].dt.date == dd.date())]
-        daily_entry[f"Survey Score: {q}"] = sd["Survey Score"].mean() if len(sd) > 0 else None
+        # Use the sanitized column name for the daily dataframe
+        daily_entry[survey_question_cols[q]] = sd["Survey Score"].mean() if len(sd) > 0 else None
     
     daily.append(daily_entry)
     
@@ -368,8 +375,8 @@ st.subheader("Average Survey Score Trend")
 survey_charts = []
 if survey_questions.size > 0:
     for q in survey_questions:
-        # The column name with the colon is the source of the error, so we need to use it carefully.
-        y_col = f"Survey Score: {q}"
+        # Use the sanitized column name for the chart data
+        y_col = survey_question_cols[q]
         q_data = df_daily.dropna(subset=[y_col])
         if not q_data.empty:
             is_yes_no = survey_summary_metrics[q]["is_yes_no"]
@@ -381,10 +388,10 @@ if survey_questions.size > 0:
                 .mark_line(point=True, color="#1abc9c")
                 .encode(
                     x=alt.X(field="Date", type="temporal", axis=alt.Axis(format="%d %b", labelAngle=-45, tickCount="day")),
-                    # Use the 'field' argument to explicitly pass the column name with the colon.
                     y=alt.Y(field=y_col, type="quantitative", title=y_title, scale=alt.Scale(domain=[0, 10] if not is_yes_no else [0, 1])),
+                    # Use the original question title in the tooltip
                     tooltip=[alt.Tooltip(field="Date", title="Date", type="temporal", format="%d %b"),
-                             alt.Tooltip(field=y_col, title=y_title, type="quantitative", format=".1f" if not is_yes_no else ".1%")]
+                             alt.Tooltip(field=y_col, title=q, type="quantitative", format=".1f" if not is_yes_no else ".1%")]
                 )
             )
             
