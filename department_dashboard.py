@@ -11,7 +11,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# New custom CSS with a more vibrant, gradient-based aesthetic
+# New custom CSS with a fixed height for metric containers and a new font size class
 st.markdown("""
 <style>
 /* Main container styling with a light grey background */
@@ -30,6 +30,10 @@ st.markdown("""
     text-align: center;
     transition: all 0.3s ease-in-out;
     border-left: 5px solid transparent;
+    height: 120px; /* Fixed height to prevent vertical growth */
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
 }
 .metric-container:hover {
     transform: translateY(-8px) scale(1.02);
@@ -48,7 +52,19 @@ st.markdown("""
     font-size: 1.2em;
     font-weight: 600;
     color: #555;
-    margin-bottom: 10px;
+    margin-bottom: 5px;
+    line-height: 1.2em;
+    overflow: hidden;
+}
+/* New class for smaller font size for long titles */
+.metric-title-small {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 0.9em;
+    font-weight: 600;
+    color: #555;
+    margin-bottom: 5px;
+    line-height: 1.2em;
+    overflow: hidden;
 }
 .metric-value {
     font-family: 'Montserrat', sans-serif;
@@ -80,11 +96,14 @@ def fmt_hms(sec):
     m, s   = divmod(rem, 60)
     return f"{h:02}:{m:02}"
 
-# Updated renderer with new border class
+# Updated renderer to dynamically choose a font size class for the title
 def render_custom_metric(container, title, value, tooltip, border_class):
+    # Set a character limit and choose a CSS class accordingly
+    char_limit = 25
+    title_class = "metric-title" if len(title) <= char_limit else "metric-title-small"
     container.markdown(f"""
         <div class="metric-container {border_class}" title="{tooltip}">
-            <div class="metric-title">{title}</div>
+            <div class="{title_class}">{title}</div>
             <div class="metric-value">{value}</div>
         </div>
     """, unsafe_allow_html=True)
