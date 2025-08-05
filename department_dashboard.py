@@ -209,6 +209,12 @@ avg_resp_secs = avg_resp_hrs * 3600
 answered_chats = chat_sla_p[chat_sla_p["Wait Time"].notna()]
 avg_chat_wait  = answered_chats["Wait Time"].mean() if len(answered_chats) else 0
 
+# --- New: Unique customers ---
+# Using 'Visitor IP Address' to calculate unique chat customers
+unique_chat_customers = chat_sla_p['Visitor IP Address'].nunique()
+# This has been corrected to use the 'Your Email Address' column from email.csv
+unique_email_customers = email_sla_p['Your Email Address'].nunique()
+
 # --- Availability totals ---
 window_start = datetime.combine(start_date, datetime.min.time())
 window_end   = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
@@ -335,11 +341,15 @@ st.markdown("---")
 
 # Core Metrics
 st.subheader("Core Metrics")
-cols = st.columns(4)
+# Adjusting columns to fit 6 metrics in a single row for a wider layout
+cols = st.columns(6)
 render_custom_metric(cols[0],"Total Chats",chat_total,"Total chat interactions","info")
 render_custom_metric(cols[1],"Total Emails",email_total,"Total email interactions","info")
-render_custom_metric(cols[2],"Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","info")
-render_custom_metric(cols[3],"Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","info")
+render_custom_metric(cols[2],"Unique Chat Customers",unique_chat_customers,"Unique customers who contacted via chat","info")
+render_custom_metric(cols[3],"Unique Email Customers",unique_email_customers,"Unique customers who contacted via email","info")
+render_custom_metric(cols[4],"Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","info")
+render_custom_metric(cols[5],"Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","info")
+
 
 # Operational Metrics
 st.markdown("---")
