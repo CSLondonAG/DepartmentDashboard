@@ -78,7 +78,7 @@ def fmt_hms(sec):
     if pd.isna(sec): return "–"
     h, rem = divmod(int(sec), 3600)
     m, s   = divmod(rem, 60)
-    return f"{h:02}:{m:02}:{s:02}"
+    return f"{h:02}:{m:02}"
 
 # Updated renderer with new border class
 def render_custom_metric(container, title, value, tooltip, border_class):
@@ -269,18 +269,18 @@ for d in pd.date_range(start_date, end_date):
     pct1= (ed["Elapsed Time (Hours)"]<=1).sum()/len(ed)*100 if len(ed) else 0
     avg_e= ed["Elapsed Time (Hours)"].mean() if len(ed) else 0
     sla_e= max(0, min(100, ((0.6*pct1 - 0.4*avg_e)/56.25)*100))
-    
+
     daily_entry = {"Date":dd, "Chat SLA":sla_c, "Chat Vol":v_c,
                    "Email SLA":sla_e,"Email Vol":v_e}
-    
+
     for q in survey_questions:
-        sd = df_surveys[(df_surveys["Survey Question: Question Title"] == q) & 
+        sd = df_surveys[(df_surveys["Survey Question: Question Title"] == q) &
                         (df_surveys["Survey Taker: Created Date"].dt.date == dd.date())]
         # Use the sanitized column name for the daily dataframe
         daily_entry[survey_question_cols[q]] = sd["Survey Score"].mean() if len(sd) > 0 else None
-    
+
     daily.append(daily_entry)
-    
+
 df_daily = pd.DataFrame(daily)
 df_daily["Weighted SLA"] = (
     df_daily["Chat SLA"]*df_daily["Chat Vol"] +
@@ -326,15 +326,16 @@ cols = st.columns(4)
 render_custom_metric(cols[0],"Total Chats",chat_total,"Total chat interactions","info")
 render_custom_metric(cols[1],"Total Emails",email_total,"Total email interactions","info")
 render_custom_metric(cols[2],"Avg Chat AHT (mm:ss)",fmt_mmss(chat_aht),"Average chat handle time","info")
-render_custom_metric(cols[3],"Avg Email AHT (hh:mm:ss)",fmt_hms(email_aht),"Average email handle time","info")
+render_custom_metric(cols[3],"Avg Email AHT (mm:ss)",fmt_mmss(email_aht),"Average email handle time","info")
 
 # Operational Metrics
 st.markdown("---")
 st.subheader("Operational Metrics")
-m1,m2,m3=st.columns(3)
+m1,m2,m3,m4 = st.columns(4)
 render_custom_metric(m1,"Chat Utilization",f"{chat_util:.1%}","Agent-minute chat utilization",get_utilization_color(chat_util))
 render_custom_metric(m2,"Email Utilization",f"{email_util:.1%}","Agent-minute email utilization",get_utilization_color(email_util))
 render_custom_metric(m3,"Avg Chat Wait (sec)",f"{avg_chat_wait:.1f}","Average chat wait time","info")
+render_custom_metric(m4,"Avg Email Resp Time (hh:mm)",fmt_hms(avg_resp_secs),"Average time to send the first response to an email",get_email_resp_time_color(avg_resp_secs))
 
 # SLA Score Summary
 st.markdown("---")
@@ -350,7 +351,7 @@ st.subheader("Customer Survey Scores")
 cols_survey = st.columns(len(survey_questions))
 for i, q in enumerate(survey_questions):
     metric = survey_summary_metrics[q]
-    
+
     if metric.get("is_nps"):
         title = "NPS: Combined Recommendation Score"
         value = f"{metric['nps_score']:.0f}" if metric["nps_score"] is not None else "N/A"
@@ -362,11 +363,11 @@ for i, q in enumerate(survey_questions):
         tooltip = f"Percentage of 'Yes' responses for '{q}' ({metric['count']} responses)"
         color = get_survey_score_color(metric["avg_score"] * 10) if metric["avg_score"] is not None else "info"
     else:
-        title = f"Avg Score: {q}"  
+        title = f"Avg Score: {q}"
         value = f"{metric['avg_score']:.1f}" if metric["avg_score"] is not None else "N/A"
         tooltip = f"Average survey score for '{q}' ({metric['count']} responses)"
         color = get_survey_score_color(metric["avg_score"]) if metric["avg_score"] is not None else "info"
-    
+
     render_custom_metric(cols_survey[i], title, value, tooltip, color)
 
 
@@ -391,21 +392,3 @@ rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="#e74c3c",strokeDas
 rule_lb= alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left",color="#e74c3c",dy=-8)\
             .encode(y="y:Q",text=alt.value("Target: 80%"))
 st.altair_chart((chart+labels+rule+rule_lb).properties(width=700,height=350),use_container_width=True)
-
-# Customer Comments
-st.markdown("---")
-st.subheader("Customer Comments")
-comment_found = False
-for q in survey_questions:
-    # Filter comments for the specific survey question title
-    comments = survey_period[(survey_period['Question Type'] == 'Free Text') &
-                             (survey_period['Survey Question: Question Title'] == q)
-                            ]['Response'].unique()
-    if len(comments) > 0:
-        comment_found = True
-        st.markdown(f"**Comments for '{q}'**")
-        for comment in comments:
-            st.info(f"**💬** {comment}")
-
-if not comment_found:
-    st.info("No customer comments available for the selected date range.")
