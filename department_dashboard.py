@@ -4,7 +4,7 @@ import altair as alt
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# --- Page Config & Custom CSS ---
+# --- Page Config & Custom CSS (previous look & feel) ---
 st.set_page_config(
     page_title="Department Performance Dashboard",
     layout="wide",
@@ -13,15 +13,17 @@ st.set_page_config(
 st.markdown("""
 <style>
 .main .block-container { padding-top: 2rem; }
+
 .metric-container {
     padding: 12px;
     border-radius: 8px;
     background-color: #ffffff;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     text-align: center;
-    border: 2px solid transparent;  /* only the border is colored via inline style */
+    border: 2px solid transparent; /* only border is colored */
 }
 .metric-container-warning { border-color: #ff4d4d; }
+
 .metric-title { font-size: 1.1em; color: #333333; margin-bottom: 4px; }
 .metric-value { font-size: 1.8em; font-weight: bold; color: #007bff; }
 </style>
@@ -62,7 +64,6 @@ def get_sla_score_color(score):
 
 # Interval helpers
 def merge_intervals(ints):
-    """Merge overlapping intervals [(s,e),...] -> disjoint, sorted."""
     if not ints: return []
     ints = sorted(ints, key=lambda x: x[0])
     out = [list(ints[0])]
@@ -77,11 +78,10 @@ def clip_to_window(s, e, wstart, wend):
     s2, e2 = max(s, wstart), min(e, wend)
     return (s2, e2) if e2 > s2 else None
 
-def sum_secs(ints): 
+def sum_secs(ints):
     return sum((e - s).total_seconds() for s, e in ints)
 
 def intersect_sum(h_ints, a_ints):
-    """Sum of intersections between two interval lists."""
     h = merge_intervals(h_ints)
     a = merge_intervals(a_ints)
     i = j = 0
@@ -157,7 +157,6 @@ avg_chat_wait  = answered_chats["Wait Time"].mean() if len(answered_chats) else 
 window_start = datetime.combine(start_date, datetime.min.time())
 window_end   = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
 
-# Presence segments within the window, bucketed
 presence_win = df_presence[(df_presence["Start DT"] < window_end) &
                            (df_presence["End DT"]   > window_start)].copy()
 
@@ -169,7 +168,7 @@ for ag, grp in presence_win.groupby("Created By: Full Name"):
     co, eo, sh = [], [], []
     for _, r in grp.iterrows():
         seg = clip_to_window(r["Start DT"], r["End DT"], window_start, window_end)
-        if not seg: 
+        if not seg:
             continue
         st_name = r["Service Presence Status: Developer Name"]
         if st_name == "Available_Chat":
@@ -194,7 +193,7 @@ for ag, grp in email_df.groupby("User: Full Name"):
     ints = [x for x in ints if x]
     if ints: email_handles_map[ag] = merge_intervals(ints)
 
-# Compute per-agent handled seconds (intersection with availability unions)
+# Compute per-agent handled secs (intersection) and proportional denominators
 dept_chat_handle  = 0.0
 dept_email_handle = 0.0
 dept_chat_avail   = 0.0
@@ -207,24 +206,22 @@ for ag in agents:
     eo = email_only_map.get(ag, [])
     sh = shared_map.get(ag, [])
 
-    # availability unions per channel (for numerator intersection)
     chat_av_union  = merge_intervals(co + sh)
     email_av_union = merge_intervals(eo + sh)
 
     chat_hand  = intersect_sum(chat_handles_map.get(ag, []),  chat_av_union)  if chat_av_union  else 0.0
     email_hand = intersect_sum(email_handles_map.get(ag, []), email_av_union) if email_av_union else 0.0
 
-    # proportional split of shared availability minutes
     co_secs = sum_secs(co)
     eo_secs = sum_secs(eo)
     sh_secs = sum_secs(sh)
     total_hand = chat_hand + email_hand
 
     if sh_secs > 0:
-        if total_hand > 0:  # split by handled proportions
+        if total_hand > 0:
             sh_to_chat  = sh_secs * (chat_hand / total_hand)
             sh_to_email = sh_secs * (email_hand / total_hand)
-        else:               # no handled time -> split 50/50
+        else:
             sh_to_chat = sh_to_email = sh_secs / 2.0
     else:
         sh_to_chat = sh_to_email = 0.0
@@ -237,7 +234,6 @@ for ag in agents:
     dept_chat_avail   += chat_av
     dept_email_avail  += email_av
 
-# Final utilizations with proportional denominators
 chat_util  = (dept_chat_handle  / dept_chat_avail)  if dept_chat_avail  else 0
 email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
 
@@ -246,7 +242,7 @@ daily = []
 for d in pd.date_range(start_date, end_date):
     dd = d.normalize()
 
-    # Chat SLA (from chat.csv), but volume from report_items
+    # Chat SLA (from chat.csv), volume from report_items
     cd   = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == dd.date()]
     cw   = cd[cd["Wait Time"].notna()]
     pct60= (cw["Wait Time"] <= 60).sum() / len(cw) * 100 if len(cw) else 0
@@ -284,7 +280,7 @@ email_weighted = (df_daily["Email SLA"] * df_daily["Email Vol"]).sum() / df_dail
 total_vol      = (df_daily["Chat Vol"] + df_daily["Email Vol"]).sum()
 weighted_sla   = ((df_daily["Chat SLA"] * df_daily["Chat Vol"] + df_daily["Email SLA"] * df_daily["Email Vol"]).sum() / total_vol) if total_vol else 0
 
-# --- UI: Header & KPI Tiles ---
+# --- UI: Header & KPI Tiles (unchanged visuals) ---
 st.title("📊 Department Performance Dashboard")
 st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 st.markdown("---")
@@ -292,18 +288,18 @@ st.markdown("---")
 # Core Metrics
 st.subheader("Core Metrics")
 c1, c2, c3, c4 = st.columns(4)
-render_custom_metric(c1, "💬 Total Chats",            chat_total,     "Total chat interactions",          "#4CAF50")
-render_custom_metric(c2, "✉️ Total Emails",           email_total,    "Total email interactions",         "#4CAF50")
-render_custom_metric(c3, "⏳ Avg Chat Handle Time",    fmt_mmss(chat_aht),  "Average chat handle time",    "#4CAF50")
-render_custom_metric(c4, "⏳ Avg Email Handle Time",   fmt_mmss(email_aht), "Average email handle time",   "#4CAF50")
+render_custom_metric(c1, "💬 Total Chats",            chat_total,           "Total chat interactions",          "#4CAF50")
+render_custom_metric(c2, "✉️ Total Emails",           email_total,          "Total email interactions",         "#4CAF50")
+render_custom_metric(c3, "⏳ Avg Chat Handle Time",    fmt_mmss(chat_aht),   "Average chat handle time",         "#4CAF50")
+render_custom_metric(c4, "⏳ Avg Email Handle Time",   fmt_mmss(email_aht),  "Average email handle time",        "#4CAF50")
 
 # Operational Metrics
 st.markdown("---")
-st.subheader("Operational Metrics (Proportional Split)")
+st.subheader("Operational Metrics")
 m1, m2, m3 = st.columns(3)
-render_custom_metric(m1, "📈 Chat Utilization",     f"{chat_util:.1%}",  "Handled∩Available / Proportionally split availability", get_utilization_color(chat_util))
-render_custom_metric(m2, "📈 Email Utilization",    f"{email_util:.1%}", "Handled∩Available / Proportionally split availability", get_utilization_color(email_util))
-render_custom_metric(m3, "⏱️ Avg Email Resp Time",  fmt_hms(avg_resp_secs), "Average email response time", get_email_resp_time_color(avg_resp_secs))
+render_custom_metric(m1, "📈 Chat Utilization",     f"{chat_util:.1%}",     "Handled∩Available / split availability", get_utilization_color(chat_util))
+render_custom_metric(m2, "📈 Email Utilization",    f"{email_util:.1%}",    "Handled∩Available / split availability", get_utilization_color(email_util))
+render_custom_metric(m3, "⏱️ Avg Email Resp Time",  fmt_hms(avg_resp_secs), "Average email response time",           get_email_resp_time_color(avg_resp_secs))
 
 # SLA Score Summary
 st.markdown("---")
@@ -313,7 +309,7 @@ render_custom_metric(s1, "Chat SLA Score",     f"{chat_weighted:.1f}",  "Daily-v
 render_custom_metric(s2, "Email SLA Score",    f"{email_weighted:.1f}", "Daily-volume weighted email SLA", get_sla_score_color(email_weighted))
 render_custom_metric(s3, "Weighted SLA Score", f"{weighted_sla:.1f}",   "Volume-weighted blended SLA",     get_sla_score_color(weighted_sla))
 
-# --- Weighted SLA Trend Chart (one tick per day) ---
+# --- Weighted SLA Trend Chart (same style as before) ---
 st.markdown("---")
 st.subheader("Weighted SLA Trend")
 
