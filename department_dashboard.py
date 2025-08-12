@@ -32,6 +32,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =========================
+# SLA calibration constants
+# =========================
+CHAT_RESCALE_K  = 0.45   # Chat: (chat_raw / 0.45) * 80
+EMAIL_RESCALE_K = 0.50   # Email: (email_raw / 0.50) * 80  <-- Option A
+SLA_SCALE       = 80.0
+
+# =========================
 # Helpers
 # =========================
 def fmt_mmss(sec):
@@ -314,7 +321,7 @@ email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
 
 # =========================
 # Build per-day SLA & volumes (one row per day)
-# (IMPORTANT: uses FRACTIONS (0–1) per your spec.)
+# (Uses FRACTIONS (0–1) for % metrics as specified)
 # =========================
 daily = []
 for d in pd.date_range(start_date, end_date):
@@ -322,23 +329,22 @@ for d in pd.date_range(start_date, end_date):
 
     # --- Chat SLA (from chat.csv) ---
     cd = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == dd.date()]
-    cw = cd[cd["Wait Time"].notna()]  # rows with wait times
+    cw = cd[cd["Wait Time"].notna()]  # answered chats with wait times
 
-    # components as FRACTIONS / HOURS / MINUTES per your spec
-    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cw)) if len(cw) else 0.0  # <=60s / answered
+    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cw)) if len(cw) else 0.0  # fraction
     avg_wait_min    = (cw["Wait Time"].mean() / 60.0) if len(cw) else 0.0           # seconds -> minutes
-    abandon_frac    = ((cd["Abandoned After"] > 20).sum() / len(cd)) if len(cd) else 0.0
+    abandon_frac    = ((cd["Abandoned After"] > 20).sum() / len(cd)) if len(cd) else 0.0  # fraction
 
     chat_raw = 0.5 * frac_answer_60s - 0.3 * avg_wait_min - 0.2 * abandon_frac
-    sla_c    = max(0.0, min(100.0, (chat_raw / 0.45) * 80.0))
+    sla_c    = max(0.0, min(100.0, (chat_raw / CHAT_RESCALE_K) * SLA_SCALE))
 
     # --- Email SLA (from email.csv) ---
     ed = email_sla_p[email_sla_p["Date/Time Opened"].dt.date == dd.date()]
-    frac_le_1hr = ((ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed)) if len(ed) else 0.0
-    avg_resp_hr = (ed["Elapsed Time (Hours)"].mean()) if len(ed) else 0.0
+    frac_le_1hr = ((ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed)) if len(ed) else 0.0  # fraction
+    avg_resp_hr = (ed["Elapsed Time (Hours)"].mean()) if len(ed) else 0.0                  # hours
 
     email_raw = 0.6 * frac_le_1hr - 0.4 * avg_resp_hr
-    sla_e     = max(0.0, min(100.0, (email_raw / 0.5625) * 80.0))
+    sla_e     = max(0.0, min(100.0, (email_raw / EMAIL_RESCALE_K) * SLA_SCALE))
 
     # Volumes from report_items
     v_c = len(chat_df[chat_df["Start DT"].dt.date  == dd.date()])
