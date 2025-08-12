@@ -35,7 +35,7 @@ st.markdown("""
 # SLA calibration constants
 # =========================
 CHAT_RESCALE_K  = 0.45   # Chat: (chat_raw / 0.45) * 80
-EMAIL_RESCALE_K = 0.50   # Email: (email_raw / 0.50) * 80  <-- Option A
+EMAIL_RESCALE_K = 0.50   # Email: (email_raw / 0.50) * 80
 SLA_SCALE       = 80.0
 
 # =========================
@@ -66,7 +66,6 @@ def get_utilization_color(util):
     else: return "#F44336"
 
 def get_email_resp_time_color(sec):
-    # red if avg > 59 mins, else green
     return "#F44336" if (sec or 0) > 59*60 else "#4CAF50"
 
 def get_sla_score_color(score):
@@ -338,12 +337,13 @@ for d in pd.date_range(start_date, end_date):
     chat_raw = 0.5 * frac_answer_60s - 0.3 * avg_wait_min - 0.2 * abandon_frac
     sla_c    = max(0.0, min(100.0, (chat_raw / CHAT_RESCALE_K) * SLA_SCALE))
 
-    # --- Email SLA (from email.csv) ---
+    # --- Email SLA (REVISED: penalize only avg above 1 hour) ---
     ed = email_sla_p[email_sla_p["Date/Time Opened"].dt.date == dd.date()]
     frac_le_1hr = ((ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed)) if len(ed) else 0.0  # fraction
     avg_resp_hr = (ed["Elapsed Time (Hours)"].mean()) if len(ed) else 0.0                  # hours
 
-    email_raw = 0.6 * frac_le_1hr - 0.4 * avg_resp_hr
+    excess = max(avg_resp_hr - 1.0, 0.0)            # NEW: only penalize over 1 hour
+    email_raw = 0.6 * frac_le_1hr - 0.4 * excess
     sla_e     = max(0.0, min(100.0, (email_raw / EMAIL_RESCALE_K) * SLA_SCALE))
 
     # Volumes from report_items
@@ -437,6 +437,7 @@ st.altair_chart((chart + labels + rule + rule_lb).properties(width=700, height=3
 # =========================
 # Customer Feedback Section
 # =========================
+survey = survey  # already prepared above
 if survey is not None:
     survey_period = survey[
         (survey["Survey Date"].dt.date >= start_date) &
