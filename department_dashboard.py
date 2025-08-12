@@ -34,9 +34,12 @@ st.markdown("""
 # =========================
 # SLA calibration constants
 # =========================
-CHAT_RESCALE_K  = 0.45   # Chat: (chat_raw / 0.45) * 80
-EMAIL_RESCALE_K = 0.50   # Email: (email_raw / 0.50) * 80
-SLA_SCALE       = 80.0
+CHAT_RESCALE_K       = 0.4167  # Chat: (chat_raw / 0.4167) * 80  -> perfect ≈ 96
+EMAIL_RESCALE_K      = 0.50    # Email: (email_raw / 0.50) * 80  -> perfect ≈ 96
+SLA_SCALE            = 80.0
+
+# Chat target for “no penalty” wait (minutes)
+CHAT_TARGET_WAIT_MIN = 1.0
 
 # =========================
 # Helpers
@@ -320,33 +323,40 @@ email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
 
 # =========================
 # Build per-day SLA & volumes (one row per day)
-# (Uses FRACTIONS (0–1) for % metrics as specified)
 # =========================
 daily = []
 for d in pd.date_range(start_date, end_date):
     dd = d.normalize()
 
-    # --- Chat SLA (from chat.csv) ---
+    # --- Chat SLA (revised: only penalize wait ABOVE target; align numerator/denominator) ---
     cd = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == dd.date()]
-    cw = cd[cd["Wait Time"].notna()]  # answered chats with wait times
+    cw = cd[cd["Wait Time"].notna()]  # answered chats (have wait time)
 
-    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cw)) if len(cw) else 0.0  # fraction
-    avg_wait_min    = (cw["Wait Time"].mean() / 60.0) if len(cw) else 0.0           # seconds -> minutes
-    abandon_frac    = ((cd["Abandoned After"] > 20).sum() / len(cd)) if len(cd) else 0.0  # fraction
+    # % answered ≤60s = answered ≤60 / TOTAL chats (as per spec)
+    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cd)) if len(cd) else 0.0
 
-    chat_raw = 0.5 * frac_answer_60s - 0.3 * avg_wait_min - 0.2 * abandon_frac
+    # Average wait (minutes) across answered chats only
+    avg_wait_min = (cw["Wait Time"].mean() / 60.0) if len(cw) else 0.0
+
+    # Abandon rate includes only those abandoned AFTER 20s (fraction of total)
+    abandon_frac = ((cd["Abandoned After"] > 20).sum() / len(cd)) if len(cd) else 0.0
+
+    # Only penalize excess wait above 1 minute
+    excess_wait_min = max(avg_wait_min - CHAT_TARGET_WAIT_MIN, 0.0)
+
+    chat_raw = 0.5 * frac_answer_60s - 0.3 * excess_wait_min - 0.2 * abandon_frac
     sla_c    = max(0.0, min(100.0, (chat_raw / CHAT_RESCALE_K) * SLA_SCALE))
 
-    # --- Email SLA (REVISED: penalize only avg above 1 hour) ---
+    # --- Email SLA (revised previously: only penalize avg above 1 hour) ---
     ed = email_sla_p[email_sla_p["Date/Time Opened"].dt.date == dd.date()]
-    frac_le_1hr = ((ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed)) if len(ed) else 0.0  # fraction
-    avg_resp_hr = (ed["Elapsed Time (Hours)"].mean()) if len(ed) else 0.0                  # hours
+    frac_le_1hr = ((ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed)) if len(ed) else 0.0
+    avg_resp_hr = (ed["Elapsed Time (Hours)"].mean()) if len(ed) else 0.0
 
-    excess = max(avg_resp_hr - 1.0, 0.0)            # NEW: only penalize over 1 hour
+    excess = max(avg_resp_hr - 1.0, 0.0)
     email_raw = 0.6 * frac_le_1hr - 0.4 * excess
     sla_e     = max(0.0, min(100.0, (email_raw / EMAIL_RESCALE_K) * SLA_SCALE))
 
-    # Volumes from report_items
+    # Volumes from report_items (for weighting)
     v_c = len(chat_df[chat_df["Start DT"].dt.date  == dd.date()])
     v_e = len(email_df[email_df["Start DT"].dt.date == dd.date()])
 
@@ -365,7 +375,7 @@ df_daily["Weighted SLA"] = (
 ) / (df_daily["Chat Vol"] + df_daily["Email Vol"])
 df_daily["Weighted SLA"] = df_daily["Weighted SLA"].fillna(0)
 
-# Summary SLA Scores (volume-weighted across days)
+# Summary SLA Scores (volume-weighted across selected days)
 chat_weighted  = (df_daily["Chat SLA"]  * df_daily["Chat Vol"]).sum()  / df_daily["Chat Vol"].sum()  if df_daily["Chat Vol"].sum()  else 0
 email_weighted = (df_daily["Email SLA"] * df_daily["Email Vol"]).sum() / df_daily["Email Vol"].sum() if df_daily["Email Vol"].sum() else 0
 total_vol      = (df_daily["Chat Vol"] + df_daily["Email Vol"]).sum()
@@ -374,29 +384,29 @@ weighted_sla   = ((df_daily["Chat SLA"] * df_daily["Chat Vol"] + df_daily["Email
 # =========================
 # Header & KPI Tiles
 # =========================
-st.title("📊 Department Performance Dashboard")
+st.title("Department Performance Dashboard")
 st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 st.markdown("---")
 
 # Core Metrics
 st.subheader("Core Metrics")
 c1, c2, c3, c4 = st.columns(4)
-render_custom_metric(c1, "💬 Total Chats",            chat_total,           "Total chat interactions",          "#4CAF50")
-render_custom_metric(c2, "✉️ Total Emails",           email_total,          "Total email interactions",         "#4CAF50")
-render_custom_metric(c3, "⏳ Avg Chat Handle Time",    fmt_mmss(chat_aht),   "Average chat handle time",         "#4CAF50")
-render_custom_metric(c4, "⏳ Avg Email Handle Time",   fmt_mmss(email_aht),  "Average email handle time",        "#4CAF50")
+render_custom_metric(c1, "Total Chats",            chat_total,           "Total chat interactions",          "#4CAF50")
+render_custom_metric(c2, "Total Emails",           email_total,          "Total email interactions",         "#4CAF50")
+render_custom_metric(c3, "Avg Chat Handle Time",    fmt_mmss(chat_aht),   "Average chat handle time",         "#4CAF50")
+render_custom_metric(c4, "Avg Email Handle Time",   fmt_mmss(email_aht),  "Average email handle time",        "#4CAF50")
 
 # Operational Metrics
 st.markdown("---")
 st.subheader("Operational Metrics")
 m1, m2, m3 = st.columns(3)
-render_custom_metric(m1, "📈 Chat Utilization",     f"{chat_util:.1%}",     "Handled∩Available / proportional availability", get_utilization_color(chat_util))
-render_custom_metric(m2, "📈 Email Utilization",    f"{email_util:.1%}",    "Handled∩Available / proportional availability", get_utilization_color(email_util))
-render_custom_metric(m3, "⏱️ Avg Email Resp Time",  fmt_hms(avg_resp_secs), "Average email response time",           get_email_resp_time_color(avg_resp_secs))
+render_custom_metric(m1, "Chat Utilization",     f"{chat_util:.1%}",     "Handled∩Available / proportional availability", get_utilization_color(chat_util))
+render_custom_metric(m2, "Email Utilization",    f"{email_util:.1%}",    "Handled∩Available / proportional availability", get_utilization_color(email_util))
+render_custom_metric(m3, "Avg Email Resp Time",  fmt_hms(avg_resp_secs), "Average email response time",           get_email_resp_time_color(avg_resp_secs))
 
 # SLA Score Summary
 st.markdown("---")
-st.subheader("🎯 SLA Score Summary")
+st.subheader("SLA Score Summary")
 s1, s2, s3 = st.columns(3)
 render_custom_metric(s1, "Chat SLA Score",     f"{chat_weighted:.1f}",  "Daily-volume weighted chat SLA",  get_sla_score_color(chat_weighted))
 render_custom_metric(s2, "Email SLA Score",    f"{email_weighted:.1f}", "Daily-volume weighted email SLA", get_sla_score_color(email_weighted))
@@ -427,9 +437,9 @@ chart = (
     )
 )
 labels = chart.mark_text(dy=-10, color="#2F80ED").encode(text=alt.Text("Weighted SLA:Q", format=".1f"))
-rule   = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="red", strokeDash=[5,5]).encode(y="y:Q")
-rule_lb= alt.Chart(pd.DataFrame({"y":[80]})).mark_text(align="left", color="red", dy=-8)\
-            .encode(y="y:Q", text=alt.value("Target: 80%"))
+rule   = alt.Chart(pd.DataFrame({"y":[85]})).mark_rule(color="red", strokeDash=[5,5]).encode(y="y:Q")
+rule_lb= alt.Chart(pd.DataFrame({"y":[85]})).mark_text(align="left", color="red", dy=-8)\
+            .encode(y="y:Q", text=alt.value("Target: 85%"))
 
 st.altair_chart((chart + labels + rule + rule_lb).properties(width=700, height=350),
                 use_container_width=True)
@@ -437,7 +447,6 @@ st.altair_chart((chart + labels + rule + rule_lb).properties(width=700, height=3
 # =========================
 # Customer Feedback Section
 # =========================
-survey = survey  # already prepared above
 if survey is not None:
     survey_period = survey[
         (survey["Survey Date"].dt.date >= start_date) &
@@ -454,12 +463,12 @@ if survey is not None:
         fcr_overall   = (survey_period["FCR_bool"] == True).mean() * 100 if survey_period["FCR_bool"].notna().any() else None
 
         k1, k2, k3, k4 = st.columns(4)
-        render_custom_metric(k1, "🗳️ Surveys", f"{total_surveys:,}", "Total surveys in range", "#4CAF50")
-        render_custom_metric(k2, "😊 CSAT (avg %)", f"{csat_overall:.1f}%" if csat_overall is not None else "–",
+        render_custom_metric(k1, " Surveys", f"{total_surveys:,}", "Total surveys in range", "#4CAF50")
+        render_custom_metric(k2, " CSAT (avg %)", f"{csat_overall:.1f}%" if csat_overall is not None else "–",
                              "Average CSAT normalized to 0–100%", "#4CAF50")
-        render_custom_metric(k3, "⭐ NPS", f"{nps_overall:.1f}" if nps_overall is not None else "–",
+        render_custom_metric(k3, " NPS", f"{nps_overall:.1f}" if nps_overall is not None else "–",
                              "NPS: %Promoters − %Detractors", "#4CAF50")
-        render_custom_metric(k4, "🎯 FCR", f"{fcr_overall:.1f}%" if fcr_overall is not None else "–",
+        render_custom_metric(k4, " FCR", f"{fcr_overall:.1f}%" if fcr_overall is not None else "–",
                              "First Contact Resolution rate", "#4CAF50")
 
         # Per-channel tiles
