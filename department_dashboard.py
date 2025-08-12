@@ -314,27 +314,35 @@ email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
 
 # =========================
 # Build per-day SLA & volumes (one row per day)
+# (IMPORTANT: uses FRACTIONS (0–1) per your spec.)
 # =========================
 daily = []
 for d in pd.date_range(start_date, end_date):
     dd = d.normalize()
 
-    # Chat SLA (from chat.csv) – note: Wait/Abandoned are seconds in source
-    cd   = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == dd.date()]
-    cw   = cd[cd["Wait Time"].notna()]
-    pct60= (cw["Wait Time"] <= 60).sum() / len(cw) * 100 if len(cw) else 0
-    avg_w= (cw["Wait Time"].mean() / 60) if len(cw) else 0   # minutes
-    ar   = (cd["Abandoned After"] > 20).sum() / len(cd) * 100 if len(cd) else 0
-    sla_c= max(0, min(100, ((0.5 * pct60 - 0.3 * avg_w - 0.2 * ar) / 0.5625) * 80))
+    # --- Chat SLA (from chat.csv) ---
+    cd = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == dd.date()]
+    cw = cd[cd["Wait Time"].notna()]  # rows with wait times
 
-    # Email SLA (from email.csv)
-    ed   = email_sla_p[email_sla_p["Date/Time Opened"].dt.date == dd.date()]
-    pct1 = (ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed) * 100 if len(ed) else 0
-    avg_e= ed["Elapsed Time (Hours)"].mean() if len(ed) else 0
-    sla_e= max(0, min(100, ((0.6 * pct1 - 0.4 * avg_e) / 0.5625) * 80))
+    # components as FRACTIONS / HOURS / MINUTES per your spec
+    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cw)) if len(cw) else 0.0  # <=60s / answered
+    avg_wait_min    = (cw["Wait Time"].mean() / 60.0) if len(cw) else 0.0           # seconds -> minutes
+    abandon_frac    = ((cd["Abandoned After"] > 20).sum() / len(cd)) if len(cd) else 0.0
 
-    v_c  = len(chat_df[chat_df["Start DT"].dt.date  == dd.date()])
-    v_e  = len(email_df[email_df["Start DT"].dt.date == dd.date()])
+    chat_raw = 0.5 * frac_answer_60s - 0.3 * avg_wait_min - 0.2 * abandon_frac
+    sla_c    = max(0.0, min(100.0, (chat_raw / 0.45) * 80.0))
+
+    # --- Email SLA (from email.csv) ---
+    ed = email_sla_p[email_sla_p["Date/Time Opened"].dt.date == dd.date()]
+    frac_le_1hr = ((ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed)) if len(ed) else 0.0
+    avg_resp_hr = (ed["Elapsed Time (Hours)"].mean()) if len(ed) else 0.0
+
+    email_raw = 0.6 * frac_le_1hr - 0.4 * avg_resp_hr
+    sla_e     = max(0.0, min(100.0, (email_raw / 0.5625) * 80.0))
+
+    # Volumes from report_items
+    v_c = len(chat_df[chat_df["Start DT"].dt.date  == dd.date()])
+    v_e = len(email_df[email_df["Start DT"].dt.date == dd.date()])
 
     daily.append({
         "Date":      dd,
@@ -462,9 +470,11 @@ if survey is not None:
             cols = st.columns(len(by_chan))
             for i, row in enumerate(by_chan.itertuples(index=False)):
                 chan = row.ChanSimple
-                tip  = f"{int(row.Surveys)} surveys • " \
-                       f"NPS {row.NPS:.1f}" if row.NPS is not None else f"{int(row.Surveys)} surveys"
-                tip += f" • FCR {row.FCR_pct:.1f}%" if row.FCR_pct is not None else ""
+                tip  = f"{int(row.Surveys)} surveys"
+                if row.NPS is not None:
+                    tip += f" • NPS {row.NPS:.1f}"
+                if row.FCR_pct is not None:
+                    tip += f" • FCR {row.FCR_pct:.1f}%"
                 render_custom_metric(cols[i], f"{chan}: CSAT%", f"{(row.CSAT_pct or 0):.1f}%", tip, "#4CAF50")
 
         # Daily CSAT trend
