@@ -563,39 +563,8 @@ if survey is not None:
                 ordered=True
             )
 
-            # Base chart & aesthetic config
-            base = (
-                alt.Chart(daily_survey)
-                .properties(
-                    width=800,
-                    height=400,
-                    title=alt.TitleParams(
-                        text="CSAT & NPS Trend Analysis",
-                        font="Arial",
-                        fontSize=18,
-                        anchor="start",
-                        color="#111827"
-                    )
-                )
-                .configure_axis(
-                    grid=True,
-                    gridColor="#e5e7eb",
-                    gridDash=[2, 3],
-                    labelFont="Arial",
-                    titleFont="Arial",
-                    labelColor="#374151",
-                    titleColor="#111827"
-                )
-                .configure_view(
-                    stroke="#d1d5db",  # subtle border
-                    fill="white"
-                )
-                .configure_legend(
-                    orient="top-right",
-                    titleFont="Arial",
-                    labelFont="Arial"
-                )
-            )
+            # Base (no per-layer configure calls)
+            base = alt.Chart(daily_survey)
 
             # Shared X encoding
             x_enc = alt.X(
@@ -681,9 +650,8 @@ if survey is not None:
             )
 
             # Horizontal reference line at NPS = 0
-            nps_zero_df = pd.DataFrame({"zero": [0]})
             nps_zero_rule = (
-                alt.Chart(nps_zero_df)
+                alt.Chart(pd.DataFrame({"zero": [0]}))
                 .mark_rule(strokeDash=[6, 4], color="#9ca3af")
                 .encode(
                     y=alt.Y(
@@ -694,12 +662,45 @@ if survey is not None:
                 )
             )
 
-            # Combine & enable pan/zoom
-            trend = alt.layer(
-                csat_line, csat_points,
-                nps_line, nps_points,
-                nps_zero_rule
-            ).resolve_scale(y="independent").interactive()
+            # Combine layers and apply configs at the top level (fix for Altair v5 layering)
+            trend = (
+                alt.layer(
+                    csat_line, csat_points,
+                    nps_line, nps_points,
+                    nps_zero_rule
+                )
+                .resolve_scale(y="independent")
+                .properties(
+                    width=800,
+                    height=400,
+                    title=alt.TitleParams(
+                        text="CSAT & NPS Trend Analysis",
+                        font="Arial",
+                        fontSize=18,
+                        anchor="start",
+                        color="#111827"
+                    )
+                )
+                .configure_axis(
+                    grid=True,
+                    gridColor="#e5e7eb",
+                    gridDash=[2, 3],
+                    labelFont="Arial",
+                    titleFont="Arial",
+                    labelColor="#374151",
+                    titleColor="#111827"
+                )
+                .configure_view(
+                    stroke="#d1d5db",  # subtle border
+                    fill="white"
+                )
+                .configure_legend(
+                    orient="top-right",
+                    titleFont="Arial",
+                    labelFont="Arial"
+                )
+                .interactive()  # pan/zoom
+            )
 
             st.altair_chart(trend, use_container_width=True)
 
