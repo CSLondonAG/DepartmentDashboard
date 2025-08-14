@@ -540,8 +540,7 @@ if survey is not None:
                     get_csat_color_pct(row.CSAT_pct)
                 )
 
-        # --- CSAT & NPS Trend (dual-axis lines) ---
-        daily_survey = (
+   daily_survey = (
             survey_period
             .assign(Date=survey_period["Survey Date"].dt.normalize())
             .groupby("Date", as_index=False)
@@ -555,156 +554,177 @@ if survey is not None:
         if not daily_survey.empty:
             st.subheader("CSAT & NPS Trend Analysis")
 
+            # Ensure data is sorted by date
+            daily_survey = daily_survey.sort_values('Date')
+            
             # Build a 'Period' label for the x-axis (keeps ordering)
             daily_survey["Period"] = daily_survey["Date"].dt.strftime("%d %b")
-            daily_survey["Period"] = pd.Categorical(
-                daily_survey["Period"],
-                categories=list(daily_survey["Period"]),
-                ordered=True
-            )
+            
+            # Create order list for x-axis
+            period_order = daily_survey["Period"].tolist()
 
-            # Base (no per-layer configure calls)
+            # Base chart
             base = alt.Chart(daily_survey)
 
-            # Shared X encoding
-            x_enc = alt.X(
-                "Period:N",
-                title="Period",
-                sort=list(daily_survey["Period"].astype(str)),
-                axis=alt.Axis(labelAngle=45)
+            # Hover selection
+            hover = alt.selection_point(
+                on='mouseover', 
+                fields=['Period'], 
+                nearest=True, 
+                empty=False
             )
 
-            # Hover selection (highlight points)
-            hover = alt.selection_point(on='mouseover', fields=['Period'], nearest=True, empty=False)
-
-            # Single legend via 'metric' constant field mapped to color
-            metric_color = alt.Color(
-                "metric:N",
-                scale=alt.Scale(domain=["CSAT", "NPS"], range=["#2563eb", "#dc2626"]),
-                legend=alt.Legend(title="Metric", orient="top-right")
+            # CSAT line and points (left axis)
+            csat_line = base.mark_line(
+                strokeWidth=3,
+                color='#2563eb'
+            ).encode(
+                x=alt.X(
+                    'Period:N',
+                    title='Period',
+                    sort=period_order,
+                    axis=alt.Axis(labelAngle=-45)
+                ),
+                y=alt.Y(
+                    'CSAT_pct:Q',
+                    title='CSAT (%)',
+                    scale=alt.Scale(domain=[0, 100])
+                ),
+                tooltip=[
+                    alt.Tooltip('Period:N', title='Period'),
+                    alt.Tooltip('CSAT_pct:Q', title='CSAT (%)', format='.1f'),
+                    alt.Tooltip('Surveys:Q', title='Surveys', format='.0f')
+                ]
             )
 
-            # CSAT line + points (left axis)
-            csat_line = (
-                base
-                .transform_calculate(metric='"CSAT"')
-                .mark_line(strokeWidth=3)
-                .encode(
-                    x=x_enc,
-                    y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
-                    color=metric_color,
-                    tooltip=[
-                        alt.Tooltip("Period:N", title="Period"),
-                        alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
-                        alt.Tooltip("NPS:Q", title="NPS Score", format=".0f")
-                    ]
+            csat_points = base.mark_point(
+                filled=True,
+                color='#2563eb'
+            ).encode(
+                x=alt.X('Period:N', sort=period_order),
+                y='CSAT_pct:Q',
+                size=alt.condition(hover, alt.value(120), alt.value(60)),
+                tooltip=[
+                    alt.Tooltip('Period:N', title='Period'),
+                    alt.Tooltip('CSAT_pct:Q', title='CSAT (%)', format='.1f')
+                ]
+            ).add_params(hover)
+
+            # NPS line and points (right axis)
+            nps_line = base.mark_line(
+                strokeWidth=3,
+                color='#dc2626',
+                strokeDash=[5, 5]  # Dashed line to differentiate
+            ).encode(
+                x=alt.X(
+                    'Period:N',
+                    sort=period_order,
+                    axis=alt.Axis(labelAngle=-45)
+                ),
+                y=alt.Y(
+                    'NPS:Q',
+                    title='NPS Score',
+                    scale=alt.Scale(domain=[-100, 100])
+                ),
+                tooltip=[
+                    alt.Tooltip('Period:N', title='Period'),
+                    alt.Tooltip('NPS:Q', title='NPS Score', format='.0f'),
+                    alt.Tooltip('Surveys:Q', title='Surveys', format='.0f')
+                ]
+            )
+
+            nps_points = base.mark_point(
+                filled=True,
+                color='#dc2626',
+                shape='square'  # Different shape for NPS
+            ).encode(
+                x=alt.X('Period:N', sort=period_order),
+                y='NPS:Q',
+                size=alt.condition(hover, alt.value(120), alt.value(60)),
+                tooltip=[
+                    alt.Tooltip('Period:N', title='Period'),
+                    alt.Tooltip('NPS:Q', title='NPS Score', format='.0f')
+                ]
+            ).add_params(hover)
+
+            # Reference line at NPS = 0
+            nps_zero = alt.Chart(
+                pd.DataFrame({'y': [0]})
+            ).mark_rule(
+                color='#9ca3af',
+                strokeDash=[6, 4],
+                opacity=0.5
+            ).encode(
+                y='y:Q'
+            )
+
+            # Create two separate charts and combine them
+            csat_chart = alt.layer(
+                csat_line, 
+                csat_points
+            ).properties(
+                width=800,
+                height=400
+            )
+
+            nps_chart = alt.layer(
+                nps_line, 
+                nps_points,
+                nps_zero
+            ).properties(
+                width=800,
+                height=400
+            ).encode(
+                y=alt.Y(
+                    'NPS:Q',
+                    title='NPS Score',
+                    axis=alt.Axis(orient='right'),
+                    scale=alt.Scale(domain=[-100, 100])
                 )
             )
 
-            csat_points = (
-                base
-                .transform_calculate(metric='"CSAT"')
-                .mark_point(filled=True)
-                .encode(
-                    x=x_enc,
-                    y="CSAT_pct:Q",
-                    color=metric_color,
-                    size=alt.condition(hover, alt.value(120), alt.value(60))
-                )
-                .add_params(hover)
+            # Combine the charts with resolve_scale
+            combined_chart = alt.layer(
+                csat_chart,
+                nps_chart
+            ).resolve_scale(
+                y='independent'
+            ).properties(
+                title={
+                    'text': 'CSAT & NPS Trend Analysis',
+                    'fontSize': 18,
+                    'anchor': 'start'
+                }
+            ).configure_axis(
+                grid=True,
+                gridColor='#e5e7eb',
+                gridDash=[2, 3],
+                labelFontSize=11,
+                titleFontSize=12
+            ).configure_view(
+                strokeWidth=1,
+                stroke='#d1d5db'
             )
 
-            # NPS line + points (right axis)
-            nps_line = (
-                base
-                .transform_calculate(metric='"NPS"')
-                .mark_line(strokeWidth=3)
-                .encode(
-                    x=x_enc,
-                    y=alt.Y(
-                        "NPS:Q",
-                        title="NPS Score",
-                        axis=alt.Axis(orient="right"),
-                        scale=alt.Scale(domain=[-100, 100])
-                    ),
-                    color=metric_color,
-                    tooltip=[
-                        alt.Tooltip("Period:N", title="Period"),
-                        alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
-                        alt.Tooltip("NPS:Q", title="NPS Score", format=".0f")
-                    ]
-                )
-            )
-
-            nps_points = (
-                base
-                .transform_calculate(metric='"NPS"')
-                .mark_point(filled=True)
-                .encode(
-                    x=x_enc,
-                    y="NPS:Q",
-                    color=metric_color,
-                    size=alt.condition(hover, alt.value(120), alt.value(60))
-                )
-                .add_params(hover)
-            )
-
-            # Horizontal reference line at NPS = 0
-            nps_zero_rule = (
-                alt.Chart(pd.DataFrame({"zero": [0]}))
-                .mark_rule(strokeDash=[6, 4], color="#9ca3af")
-                .encode(
-                    y=alt.Y(
-                        "zero:Q",
-                        axis=alt.Axis(orient="right"),
-                        scale=alt.Scale(domain=[-100, 100])
-                    )
-                )
-            )
-
-            # Combine layers and apply configs at the top level (fix for Altair v5 layering)
-            trend = (
-                alt.layer(
-                    csat_line, csat_points,
-                    nps_line, nps_points,
-                    nps_zero_rule
-                )
-                .resolve_scale(y="independent")
-                .properties(
-                    width=800,
-                    height=400,
-                    title=alt.TitleParams(
-                        text="CSAT & NPS Trend Analysis",
-                        font="Arial",
-                        fontSize=18,
-                        anchor="start",
-                        color="#111827"
-                    )
-                )
-                .configure_axis(
-                    grid=True,
-                    gridColor="#e5e7eb",
-                    gridDash=[2, 3],
-                    labelFont="Arial",
-                    titleFont="Arial",
-                    labelColor="#374151",
-                    titleColor="#111827"
-                )
-                .configure_view(
-                    stroke="#d1d5db",  # subtle border
-                    fill="white"
-                )
-                .configure_legend(
-                    orient="top-right",
-                    titleFont="Arial",
-                    labelFont="Arial"
-                )
-                .interactive()  # pan/zoom
-            )
-
-            st.altair_chart(trend, use_container_width=True)
+            # Add a custom legend
+            st.altair_chart(combined_chart, use_container_width=True)
+            
+            # Add a simple legend below the chart
+            st.markdown("""
+            <div style='display: flex; justify-content: center; gap: 30px; margin-top: 10px;'>
+                <div style='display: flex; align-items: center; gap: 8px;'>
+                    <div style='width: 20px; height: 3px; background-color: #2563eb;'></div>
+                    <span style='color: #374151; font-size: 14px;'>CSAT (%)</span>
+                </div>
+                <div style='display: flex; align-items: center; gap: 8px;'>
+                    <div style='width: 20px; height: 0; border-top: 3px dashed #dc2626;'></div>
+                    <span style='color: #374151; font-size: 14px;'>NPS Score</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
     else:
         st.info("No survey responses in the selected date range.")
 else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
+
