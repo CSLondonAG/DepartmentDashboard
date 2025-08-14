@@ -573,79 +573,33 @@ if survey is not None:
                 axis=alt.Axis(labelAngle=45)
             )
 
-            # Hover selection (highlight points)
-            hover = alt.selection_point(on='mouseover', fields=['Period'], nearest=True, empty=False)
-
-            # Single legend via 'metric' constant field mapped to color
-            metric_color = alt.Color(
-                "metric:N",
-                scale=alt.Scale(domain=["CSAT", "NPS"], range=["#2563eb", "#dc2626"]),
-                legend=alt.Legend(title="Metric", orient="top-right")
+            # CSAT bars on the left Y-axis
+            csat_bars = base.mark_bar(color='#2563eb', opacity=0.7).encode(
+                x=x_enc,
+                y=alt.Y('CSAT_pct:Q', title='CSAT (%)', scale=alt.Scale(domain=[0, 100])),
+                tooltip=[
+                    alt.Tooltip("Period:N", title="Period"),
+                    alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
+                    alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
+                    alt.Tooltip("Surveys:Q", title="Total Surveys")
+                ]
             )
 
-            # CSAT line + points (left axis)
-            csat_line = (
-                base
-                .transform_calculate(metric='"CSAT"')
-                .mark_line(strokeWidth=3)
-                .encode(
-                    x=x_enc,
-                    y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
-                    color=metric_color,
-                    tooltip=[
-                        alt.Tooltip("Period:N", title="Period"),
-                        alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
-                        alt.Tooltip("NPS:Q", title="NPS Score", format=".0f")
-                    ]
-                )
-            )
-
-            csat_points = (
-                base
-                .transform_calculate(metric='"CSAT"')
-                .mark_point(filled=True)
-                .encode(
-                    x=x_enc,
-                    y="CSAT_pct:Q",
-                    color=metric_color,
-                    size=alt.condition(hover, alt.value(120), alt.value(60))
-                )
-                .add_params(hover)
-            )
-
-            # NPS line + points (right axis)
-            nps_line = (
-                base
-                .transform_calculate(metric='"NPS"')
-                .mark_line(strokeWidth=3)
-                .encode(
-                    x=x_enc,
-                    y=alt.Y(
-                        "NPS:Q",
-                        title="NPS Score",
-                        axis=alt.Axis(orient="right"),
-                        scale=alt.Scale(domain=[-100, 100])
-                    ),
-                    color=metric_color,
-                    tooltip=[
-                        alt.Tooltip("Period:N", title="Period"),
-                        alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
-                        alt.Tooltip("NPS:Q", title="NPS Score", format=".0f")
-                    ]
-                )
-            )
-
-            nps_points = (
-                base
-                .transform_calculate(metric='"NPS"')
-                .mark_point(filled=True)
-                .encode(
-                    x=x_enc,
-                    y="NPS:Q",
-                    color=metric_color,
-                    size=alt.condition(hover, alt.value(120), alt.value(60))
-                )
-                .add_params(hover)
+            # NPS line on the right Y-axis
+            nps_line = base.mark_line(color='#dc2626', strokeWidth=3, point=True).encode(
+                x=x_enc,
+                y=alt.Y(
+                    "NPS:Q",
+                    title="NPS Score",
+                    axis=alt.Axis(orient="right"),
+                    scale=alt.Scale(domain=[-100, 100])
+                ),
+                tooltip=[
+                    alt.Tooltip("Period:N", title="Period"),
+                    alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
+                    alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
+                    alt.Tooltip("Surveys:Q", title="Total Surveys")
+                ]
             )
 
             # Horizontal reference line at NPS = 0
@@ -655,18 +609,15 @@ if survey is not None:
                 .encode(
                     y=alt.Y(
                         "zero:Q",
-                        axis=alt.Axis(orient="right"),
-                        scale=alt.Scale(domain=[-100, 100])
+                        axis=alt.Axis(orient="right", title="")
                     )
                 )
             )
 
-            # Combine layers and apply configs at the top level (fix for Altair v5 layering)
+            # Combine layers
             trend = (
                 alt.layer(
-                    csat_line, csat_points,
-                    nps_line, nps_points,
-                    nps_zero_rule
+                    csat_bars, nps_line, nps_zero_rule
                 )
                 .resolve_scale(y="independent")
                 .properties(
@@ -692,11 +643,6 @@ if survey is not None:
                 .configure_view(
                     stroke="#d1d5db",  # subtle border
                     fill="white"
-                )
-                .configure_legend(
-                    orient="top-right",
-                    titleFont="Arial",
-                    labelFont="Arial"
                 )
                 .interactive()  # pan/zoom
             )
