@@ -76,7 +76,7 @@ def get_sla_score_color(score):
     elif score >= 70: return "#FFC107"
     else: return "#F44336"
 
-# --- NEW: Survey color helpers ---
+# --- Survey color helpers (your thresholds) ---
 def get_csat_color_pct(v):
     if v is None or pd.isna(v): return "#9E9E9E"  # grey if missing
     return "#F44336" if v < 70 else "#4CAF50"
@@ -175,7 +175,8 @@ if survey_path.exists():
         parse_dates=["Survey Taker: Created Date"],
         low_memory=False
     )
-    survey_q.columns = survey_q.columns.stripped = survey_q.columns.str.strip()
+    # FIXED: strip column names
+    survey_q.columns = survey_q.columns.str.strip()
 
     # Ensure required columns exist
     req_cols = {"Survey Taker: ID", "Survey Taker: Created Date",
@@ -341,26 +342,20 @@ daily = []
 for d in pd.date_range(start_date, end_date):
     dd = d.normalize()
 
-    # --- Chat SLA (revised: only penalize wait ABOVE target; align numerator/denominator) ---
+    # --- Chat SLA (revised: only penalize wait ABOVE target) ---
     cd = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == dd.date()]
     cw = cd[cd["Wait Time"].notna()]  # answered chats (have wait time)
 
-    # % answered ≤60s = answered ≤60 / TOTAL chats (as per spec)
-    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cd)) if len(cd) else 0.0
+    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cd)) if len(cd) else 0.0  # fraction of TOTAL chats
+    avg_wait_min    = (cw["Wait Time"].mean() / 60.0) if len(cw) else 0.0           # seconds -> minutes
+    abandon_frac    = ((cd["Abandoned After"] > 20).sum() / len(cd)) if len(cd) else 0.0  # fraction
 
-    # Average wait (minutes) across answered chats only
-    avg_wait_min = (cw["Wait Time"].mean() / 60.0) if len(cw) else 0.0
-
-    # Abandon rate includes only those abandoned AFTER 20s (fraction of total)
-    abandon_frac = ((cd["Abandoned After"] > 20).sum() / len(cd)) if len(cd) else 0.0
-
-    # Only penalize excess wait above 1 minute
     excess_wait_min = max(avg_wait_min - CHAT_TARGET_WAIT_MIN, 0.0)
 
     chat_raw = 0.5 * frac_answer_60s - 0.3 * excess_wait_min - 0.2 * abandon_frac
     sla_c    = max(0.0, min(100.0, (chat_raw / CHAT_RESCALE_K) * SLA_SCALE))
 
-    # --- Email SLA (revised previously: only penalize avg above 1 hour) ---
+    # --- Email SLA (revised: only penalize avg above 1 hour) ---
     ed = email_sla_p[email_sla_p["Date/Time Opened"].dt.date == dd.date()]
     frac_le_1hr = ((ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed)) if len(ed) else 0.0
     avg_resp_hr = (ed["Elapsed Time (Hours)"].mean()) if len(ed) else 0.0
@@ -397,29 +392,29 @@ weighted_sla   = ((df_daily["Chat SLA"] * df_daily["Chat Vol"] + df_daily["Email
 # =========================
 # Header & KPI Tiles
 # =========================
-st.title("Department Performance Dashboard")
+st.title("📊 Department Performance Dashboard")
 st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 st.markdown("---")
 
 # Core Metrics
 st.subheader("Core Metrics")
 c1, c2, c3, c4 = st.columns(4)
-render_custom_metric(c1, "Total Chats",            chat_total,           "Total chat interactions",          "#4CAF50")
-render_custom_metric(c2, "Total Emails",           email_total,          "Total email interactions",         "#4CAF50")
-render_custom_metric(c3, "Avg Chat Handle Time",    fmt_mmss(chat_aht),   "Average chat handle time",         "#4CAF50")
-render_custom_metric(c4, "Avg Email Handle Time",   fmt_mmss(email_aht),  "Average email handle time",        "#4CAF50")
+render_custom_metric(c1, "💬 Total Chats",            chat_total,           "Total chat interactions",          "#4CAF50")
+render_custom_metric(c2, "✉️ Total Emails",           email_total,          "Total email interactions",         "#4CAF50")
+render_custom_metric(c3, "⏳ Avg Chat Handle Time",    fmt_mmss(chat_aht),   "Average chat handle time",         "#4CAF50")
+render_custom_metric(c4, "⏳ Avg Email Handle Time",   fmt_mmss(email_aht),  "Average email handle time",        "#4CAF50")
 
 # Operational Metrics
 st.markdown("---")
 st.subheader("Operational Metrics")
 m1, m2, m3 = st.columns(3)
-render_custom_metric(m1, "Chat Utilization",     f"{chat_util:.1%}",     "Handled∩Available / proportional availability", get_utilization_color(chat_util))
-render_custom_metric(m2, "Email Utilization",    f"{email_util:.1%}",    "Handled∩Available / proportional availability", get_utilization_color(email_util))
-render_custom_metric(m3, "Avg Email Resp Time",  fmt_hms(avg_resp_secs), "Average email response time",           get_email_resp_time_color(avg_resp_secs))
+render_custom_metric(m1, "📈 Chat Utilization",     f"{chat_util:.1%}",     "Handled∩Available / proportional availability", get_utilization_color(chat_util))
+render_custom_metric(m2, "📈 Email Utilization",    f"{email_util:.1%}",    "Handled∩Available / proportional availability", get_utilization_color(email_util))
+render_custom_metric(m3, "⏱️ Avg Email Resp Time",  fmt_hms(avg_resp_secs), "Average email response time",           get_email_resp_time_color(avg_resp_secs))
 
 # SLA Score Summary
 st.markdown("---")
-st.subheader("SLA Score Summary")
+st.subheader("🎯 SLA Score Summary")
 s1, s2, s3 = st.columns(3)
 render_custom_metric(s1, "Chat SLA Score",     f"{chat_weighted:.1f}",  "Daily-volume weighted chat SLA",  get_sla_score_color(chat_weighted))
 render_custom_metric(s2, "Email SLA Score",    f"{email_weighted:.1f}", "Daily-volume weighted email SLA", get_sla_score_color(email_weighted))
@@ -476,22 +471,21 @@ if survey is not None:
         fcr_overall   = (survey_period["FCR_bool"] == True).mean() * 100 if survey_period["FCR_bool"].notna().any() else None
 
         k1, k2, k3, k4 = st.columns(4)
-        render_custom_metric(k1, " Surveys", f"{total_surveys:,}", "Total surveys in range", "#4CAF50")
-        # --- UPDATED colors based on your thresholds ---
-        render_custom_metric(k2, " CSAT (avg %)",
+        render_custom_metric(k1, "🗳️ Surveys", f"{total_surveys:,}", "Total surveys in range", "#4CAF50")
+        render_custom_metric(k2, "😊 CSAT (avg %)",
                              f"{csat_overall:.1f}%" if csat_overall is not None else "–",
                              "Average CSAT normalized to 0–100%",
                              get_csat_color_pct(csat_overall))
-        render_custom_metric(k3, " NPS",
+        render_custom_metric(k3, "⭐ NPS",
                              f"{nps_overall:.1f}" if nps_overall is not None else "–",
                              "NPS: %Promoters − %Detractors",
                              get_nps_color(nps_overall))
-        render_custom_metric(k4, " FCR",
+        render_custom_metric(k4, "🎯 FCR",
                              f"{fcr_overall:.1f}%" if fcr_overall is not None else "–",
                              "First Contact Resolution rate",
                              get_fcr_color_pct(fcr_overall))
 
-        # Per-channel tiles
+        # Per-channel tiles (CSAT color threshold applied)
         survey_period["ChanSimple"] = survey_period["Channel"].map(lambda x: "Email" if "Email" in str(x) else "Chat" if "Chat" in str(x) else "Other")
         by_chan = (survey_period
                    .groupby("ChanSimple")
@@ -511,7 +505,6 @@ if survey is not None:
                     tip += f" • NPS {row.NPS:.1f}"
                 if row.FCR_pct is not None:
                     tip += f" • FCR {row.FCR_pct:.1f}%"
-                # --- UPDATED: color CSAT tiles red if <70% ---
                 render_custom_metric(
                     cols[i],
                     f"{chan}: CSAT%",
@@ -520,35 +513,60 @@ if survey is not None:
                     get_csat_color_pct(row.CSAT_pct)
                 )
 
-        # Daily CSAT trend
+        # ---- CSAT & NPS Trend (dual-axis layered chart) ----
         daily_survey = (survey_period
             .assign(Date=survey_period["Survey Date"].dt.normalize())
             .groupby("Date", as_index=False)
-            .agg(CSAT_pct=("CSAT%","mean"), Surveys=("CSAT%","size"))
+            .agg(
+                CSAT_pct=("CSAT%","mean"),
+                NPS=("NPS_raw", _nps_from_0_10),
+                Surveys=("CSAT%","size")
+            )
         )
         if not daily_survey.empty:
-            st.subheader("CSAT Trend")
+            st.subheader("CSAT & NPS Trend")
+
             tick_dates2 = daily_survey["Date"].tolist()
             x_min2 = datetime.combine(start_date, datetime.min.time()) - timedelta(days=0.5)
             x_max2 = datetime.combine(end_date,   datetime.max.time()) + timedelta(days=0.5)
 
-            csat_chart = (
-                alt.Chart(daily_survey)
-                .mark_line(point=True, color="#2F80ED")
-                .encode(
-                    x=alt.X("Date:T",
-                            axis=alt.Axis(format="%d %b", labelAngle=-45, values=tick_dates2),
-                            scale=alt.Scale(domain=[x_min2, x_max2]),
-                            title="Date"),
-                    y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
-                    tooltip=[
-                        alt.Tooltip("Date:T", format="%d %b"),
-                        alt.Tooltip("CSAT_pct:Q", format=".1f", title="CSAT %"),
-                        alt.Tooltip("Surveys:Q", format="d", title="# Surveys")
-                    ]
-                )
+            base = alt.Chart(daily_survey).encode(
+                x=alt.X("Date:T",
+                        axis=alt.Axis(format="%d %b", labelAngle=-45, values=tick_dates2),
+                        scale=alt.Scale(domain=[x_min2, x_max2]),
+                        title="Date")
             )
-            labels2 = csat_chart.mark_text(dy=-10, color="#2F80ED").encode(text=alt.Text("CSAT_pct:Q", format=".1f"))
-            st.altair_chart(csat_chart + labels2, use_container_width=True)
+
+            csat_line = base.mark_line(point=True, color="#2F80ED").encode(
+                y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
+                tooltip=[
+                    alt.Tooltip("Date:T", format="%d %b"),
+                    alt.Tooltip("CSAT_pct:Q", format=".1f", title="CSAT (%)"),
+                    alt.Tooltip("NPS:Q", format=".1f", title="NPS"),
+                    alt.Tooltip("Surveys:Q", format="d", title="# Surveys")
+                ]
+            )
+            csat_labels = base.mark_text(dy=-10, color="#2F80ED").encode(
+                y="CSAT_pct:Q",
+                text=alt.Text("CSAT_pct:Q", format=".1f")
+            )
+
+            nps_line = base.mark_line(point=True, color="#27AE60").encode(
+                y=alt.Y("NPS:Q", title="NPS", axis=alt.Axis(orient="right"),
+                        scale=alt.Scale(domain=[-100, 100])),
+                tooltip=[
+                    alt.Tooltip("Date:T", format="%d %b"),
+                    alt.Tooltip("NPS:Q", format=".1f", title="NPS"),
+                    alt.Tooltip("CSAT_pct:Q", format=".1f", title="CSAT (%)"),
+                    alt.Tooltip("Surveys:Q", format="d", title="# Surveys")
+                ]
+            )
+            nps_labels = base.mark_text(dy=12, color="#27AE60").encode(
+                y="NPS:Q",
+                text=alt.Text("NPS:Q", format=".1f")
+            )
+
+            trend = (csat_line + csat_labels + nps_line + nps_labels).resolve_scale(y='independent')
+            st.altair_chart(trend.properties(width=700, height=350), use_container_width=True)
     else:
         st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
