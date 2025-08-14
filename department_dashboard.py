@@ -76,6 +76,19 @@ def get_sla_score_color(score):
     elif score >= 70: return "#FFC107"
     else: return "#F44336"
 
+# --- NEW: Survey color helpers ---
+def get_csat_color_pct(v):
+    if v is None or pd.isna(v): return "#9E9E9E"  # grey if missing
+    return "#F44336" if v < 70 else "#4CAF50"
+
+def get_nps_color(v):
+    if v is None or pd.isna(v): return "#9E9E9E"
+    return "#F44336" if v < 0 else "#4CAF50"
+
+def get_fcr_color_pct(v):
+    if v is None or pd.isna(v): return "#9E9E9E"
+    return "#F44336" if v < 50 else "#4CAF50"
+
 # Interval helpers
 def merge_intervals(ints):
     """Merge overlapping intervals [(s,e),...] -> disjoint, sorted."""
@@ -162,7 +175,7 @@ if survey_path.exists():
         parse_dates=["Survey Taker: Created Date"],
         low_memory=False
     )
-    survey_q.columns = survey_q.columns.str.strip()
+    survey_q.columns = survey_q.columns.stripped = survey_q.columns.str.strip()
 
     # Ensure required columns exist
     req_cols = {"Survey Taker: ID", "Survey Taker: Created Date",
@@ -464,12 +477,19 @@ if survey is not None:
 
         k1, k2, k3, k4 = st.columns(4)
         render_custom_metric(k1, " Surveys", f"{total_surveys:,}", "Total surveys in range", "#4CAF50")
-        render_custom_metric(k2, " CSAT (avg %)", f"{csat_overall:.1f}%" if csat_overall is not None else "–",
-                             "Average CSAT normalized to 0–100%", "#4CAF50")
-        render_custom_metric(k3, " NPS", f"{nps_overall:.1f}" if nps_overall is not None else "–",
-                             "NPS: %Promoters − %Detractors", "#4CAF50")
-        render_custom_metric(k4, " FCR", f"{fcr_overall:.1f}%" if fcr_overall is not None else "–",
-                             "First Contact Resolution rate", "#4CAF50")
+        # --- UPDATED colors based on your thresholds ---
+        render_custom_metric(k2, " CSAT (avg %)",
+                             f"{csat_overall:.1f}%" if csat_overall is not None else "–",
+                             "Average CSAT normalized to 0–100%",
+                             get_csat_color_pct(csat_overall))
+        render_custom_metric(k3, " NPS",
+                             f"{nps_overall:.1f}" if nps_overall is not None else "–",
+                             "NPS: %Promoters − %Detractors",
+                             get_nps_color(nps_overall))
+        render_custom_metric(k4, " FCR",
+                             f"{fcr_overall:.1f}%" if fcr_overall is not None else "–",
+                             "First Contact Resolution rate",
+                             get_fcr_color_pct(fcr_overall))
 
         # Per-channel tiles
         survey_period["ChanSimple"] = survey_period["Channel"].map(lambda x: "Email" if "Email" in str(x) else "Chat" if "Chat" in str(x) else "Other")
@@ -491,7 +511,14 @@ if survey is not None:
                     tip += f" • NPS {row.NPS:.1f}"
                 if row.FCR_pct is not None:
                     tip += f" • FCR {row.FCR_pct:.1f}%"
-                render_custom_metric(cols[i], f"{chan}: CSAT%", f"{(row.CSAT_pct or 0):.1f}%", tip, "#4CAF50")
+                # --- UPDATED: color CSAT tiles red if <70% ---
+                render_custom_metric(
+                    cols[i],
+                    f"{chan}: CSAT%",
+                    f"{(row.CSAT_pct or 0):.1f}%",
+                    tip,
+                    get_csat_color_pct(row.CSAT_pct)
+                )
 
         # Daily CSAT trend
         daily_survey = (survey_period
