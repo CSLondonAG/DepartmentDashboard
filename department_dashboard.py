@@ -540,191 +540,47 @@ if survey is not None:
                     get_csat_color_pct(row.CSAT_pct)
                 )
 
-   daily_survey = (
+        # --- CSAT & NPS Trend (dual-axis lines) ---
+        st.subheader("CSAT & NPS Trend Analysis")
+        monthly_kpis = (
             survey_period
-            .assign(Date=survey_period["Survey Date"].dt.normalize())
-            .groupby("Date", as_index=False)
+            .assign(month=survey_period["Survey Date"].dt.to_period('M'))
+            .groupby('month', as_index=False)
             .agg(
-                CSAT_pct=("CSAT%","mean"),
-                NPS=("NPS_raw", _nps_from_0_10),
-                Surveys=("CSAT%","size")
+                csat=('CSAT%', 'mean'),
+                nps=('NPS_raw', _nps_from_0_10)
             )
         )
+        if not monthly_kpis.empty:
+            monthly_kpis['month'] = monthly_kpis['month'].dt.to_timestamp()
 
-        if not daily_survey.empty:
-            st.subheader("CSAT & NPS Trend Analysis")
-
-            # Ensure data is sorted by date
-            daily_survey = daily_survey.sort_values('Date')
-            
-            # Build a 'Period' label for the x-axis (keeps ordering)
-            daily_survey["Period"] = daily_survey["Date"].dt.strftime("%d %b")
-            
-            # Create order list for x-axis
-            period_order = daily_survey["Period"].tolist()
-
-            # Base chart
-            base = alt.Chart(daily_survey)
-
-            # Hover selection
-            hover = alt.selection_point(
-                on='mouseover', 
-                fields=['Period'], 
-                nearest=True, 
-                empty=False
+            # Create a base chart for layering
+            base = alt.Chart(monthly_kpis).encode(
+                x=alt.X('month', axis=alt.Axis(format="%b", title="Month")),
             )
 
-            # CSAT line and points (left axis)
-            csat_line = base.mark_line(
-                strokeWidth=3,
-                color='#2563eb'
-            ).encode(
-                x=alt.X(
-                    'Period:N',
-                    title='Period',
-                    sort=period_order,
-                    axis=alt.Axis(labelAngle=-45)
-                ),
-                y=alt.Y(
-                    'CSAT_pct:Q',
-                    title='CSAT (%)',
-                    scale=alt.Scale(domain=[0, 100])
-                ),
-                tooltip=[
-                    alt.Tooltip('Period:N', title='Period'),
-                    alt.Tooltip('CSAT_pct:Q', title='CSAT (%)', format='.1f'),
-                    alt.Tooltip('Surveys:Q', title='Surveys', format='.0f')
-                ]
+            # CSAT bars on the left Y-axis
+            csat_bars = base.mark_bar(opacity=0.7, color='#28a745').encode(
+                y=alt.Y('csat', axis=alt.Axis(title='CSAT')),
+                tooltip=[alt.Tooltip('month', format="%b %Y"), 'csat']
             )
 
-            csat_points = base.mark_point(
-                filled=True,
-                color='#2563eb'
-            ).encode(
-                x=alt.X('Period:N', sort=period_order),
-                y='CSAT_pct:Q',
-                size=alt.condition(hover, alt.value(120), alt.value(60)),
-                tooltip=[
-                    alt.Tooltip('Period:N', title='Period'),
-                    alt.Tooltip('CSAT_pct:Q', title='CSAT (%)', format='.1f')
-                ]
-            ).add_params(hover)
-
-            # NPS line and points (right axis)
-            nps_line = base.mark_line(
-                strokeWidth=3,
-                color='#dc2626',
-                strokeDash=[5, 5]  # Dashed line to differentiate
-            ).encode(
-                x=alt.X(
-                    'Period:N',
-                    sort=period_order,
-                    axis=alt.Axis(labelAngle=-45)
-                ),
-                y=alt.Y(
-                    'NPS:Q',
-                    title='NPS Score',
-                    scale=alt.Scale(domain=[-100, 100])
-                ),
-                tooltip=[
-                    alt.Tooltip('Period:N', title='Period'),
-                    alt.Tooltip('NPS:Q', title='NPS Score', format='.0f'),
-                    alt.Tooltip('Surveys:Q', title='Surveys', format='.0f')
-                ]
+            # NPS line on the right Y-axis
+            nps_line = base.mark_line(color='#ffc107', point=True).encode(
+                y=alt.Y('nps', axis=alt.Axis(title='NPS')),
+                tooltip=[alt.Tooltip('month', format="%b %Y"), 'nps']
             )
 
-            nps_points = base.mark_point(
-                filled=True,
-                color='#dc2626',
-                shape='square'  # Different shape for NPS
-            ).encode(
-                x=alt.X('Period:N', sort=period_order),
-                y='NPS:Q',
-                size=alt.condition(hover, alt.value(120), alt.value(60)),
-                tooltip=[
-                    alt.Tooltip('Period:N', title='Period'),
-                    alt.Tooltip('NPS:Q', title='NPS Score', format='.0f')
-                ]
-            ).add_params(hover)
-
-            # Reference line at NPS = 0
-            nps_zero = alt.Chart(
-                pd.DataFrame({'y': [0]})
-            ).mark_rule(
-                color='#9ca3af',
-                strokeDash=[6, 4],
-                opacity=0.5
-            ).encode(
-                y='y:Q'
-            )
-
-            # Create two separate charts and combine them
-            csat_chart = alt.layer(
-                csat_line, 
-                csat_points
-            ).properties(
-                width=800,
-                height=400
-            )
-
-            nps_chart = alt.layer(
-                nps_line, 
-                nps_points,
-                nps_zero
-            ).properties(
-                width=800,
-                height=400
-            ).encode(
-                y=alt.Y(
-                    'NPS:Q',
-                    title='NPS Score',
-                    axis=alt.Axis(orient='right'),
-                    scale=alt.Scale(domain=[-100, 100])
-                )
-            )
-
-            # Combine the charts with resolve_scale
-            combined_chart = alt.layer(
-                csat_chart,
-                nps_chart
-            ).resolve_scale(
+            # Layer the charts and resolve the scales to be independent
+            csat_nps_chart = alt.layer(csat_bars, nps_line).resolve_scale(
                 y='independent'
             ).properties(
-                title={
-                    'text': 'CSAT & NPS Trend Analysis',
-                    'fontSize': 18,
-                    'anchor': 'start'
-                }
-            ).configure_axis(
-                grid=True,
-                gridColor='#e5e7eb',
-                gridDash=[2, 3],
-                labelFontSize=11,
-                titleFontSize=12
-            ).configure_view(
-                strokeWidth=1,
-                stroke='#d1d5db'
+                title='CSAT vs NPS Trend'
             )
 
-            # Add a custom legend
-            st.altair_chart(combined_chart, use_container_width=True)
-            
-            # Add a simple legend below the chart
-            st.markdown("""
-            <div style='display: flex; justify-content: center; gap: 30px; margin-top: 10px;'>
-                <div style='display: flex; align-items: center; gap: 8px;'>
-                    <div style='width: 20px; height: 3px; background-color: #2563eb;'></div>
-                    <span style='color: #374151; font-size: 14px;'>CSAT (%)</span>
-                </div>
-                <div style='display: flex; align-items: center; gap: 8px;'>
-                    <div style='width: 20px; height: 0; border-top: 3px dashed #dc2626;'></div>
-                    <span style='color: #374151; font-size: 14px;'>NPS Score</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.altair_chart(csat_nps_chart, use_container_width=True)
 
     else:
         st.info("No survey responses in the selected date range.")
 else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
-
