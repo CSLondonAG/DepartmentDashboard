@@ -587,7 +587,7 @@ if survey is not None:
             csat_line = (
                 base
                 .transform_calculate(metric='"CSAT"')
-                .mark_line(strokeWidth=3, point=True)
+                .mark_line(strokeWidth=3, point=True)  # Changed mark_bar to mark_line
                 .encode(
                     x=x_enc,
                     y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
@@ -624,30 +624,6 @@ if survey is not None:
                 )
             )
 
-            # CSAT Labels
-            csat_labels = base.mark_text(
-                align='center',
-                baseline='middle',
-                dy=-10,  # Nudge text up for better visibility
-                color='#2563eb'
-            ).encode(
-                x=x_enc,
-                y=alt.Y("CSAT_pct:Q", scale=alt.Scale(domain=[0, 100])),
-                text=alt.Text("CSAT_pct:Q", format=".1f")
-            )
-
-            # NPS Labels
-            nps_labels = base.mark_text(
-                align='center',
-                baseline='middle',
-                dy=-10,  # Nudge text up for better visibility
-                color='#dc2626'
-            ).encode(
-                x=x_enc,
-                y=alt.Y("NPS:Q", scale=alt.Scale(domain=[-100, 100])),
-                text=alt.Text("NPS:Q", format=".0f")
-            )
-
             # Horizontal reference line at NPS = 0
             nps_zero_rule = (
                 alt.Chart(pd.DataFrame({"zero": [0]}))
@@ -663,9 +639,7 @@ if survey is not None:
             # Combine layers
             trend = (
                 alt.layer(
-                    csat_line, csat_labels,
-                    nps_line, nps_labels,
-                    nps_zero_rule
+                    csat_line, nps_line, nps_zero_rule
                 )
                 .resolve_scale(y="independent")
                 .properties(
