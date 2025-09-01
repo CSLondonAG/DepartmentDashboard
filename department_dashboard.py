@@ -675,3 +675,175 @@ if survey is not None:
         st.info("No survey responses in the selected date range.")
 else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
+# =========================
+# Hourly Weighted SLA (selected day)
+# =========================
+st.markdown("---")
+st.subheader("⏱️ Hourly Weighted SLA (selected day)")
+
+# Pick a single date to drill into (default = end_date)
+hourly_date = st.date_input(
+    "Select a day for hourly view",
+    value=end_date,
+    min_value=min_date,
+    max_value=max_date
+)
+
+def _clamp01(x):  # helper for safety when we compute fractions
+    if pd.isna(x): return 0.0
+    return max(0.0, min(1.0, float(x)))
+
+def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
+    """Return a dataframe with one row per hour of the selected day:
+       [Hour, Chat SLA, Chat Vol, Email SLA, Email Vol, Weighted SLA]"""
+    day_start = datetime.combine(sel_date, datetime.min.time())
+    day_end   = day_start + timedelta(days=1)
+
+    # --- Slice SLA sources to the day and build hourly keys ---
+    chat_day  = chat_sla_df[(chat_sla_df["Date/Time Opened"] >= day_start) &
+                            (chat_sla_df["Date/Time Opened"] <  day_end)].copy()
+    email_day = email_sla_df[(email_sla_df["Date/Time Opened"] >= day_start) &
+                             (email_sla_df["Date/Time Opened"] <  day_end)].copy()
+
+    chat_day["Hour"]  = chat_day["Date/Time Opened"].dt.floor("H")
+    email_day["Hour"] = email_day["Date/Time Opened"].dt.floor("H")
+
+    # --- Volumes for weighting come from report_items (actual handled items) ---
+    items_day = df_items[(df_items["Start DT"] >= day_start) & (df_items["Start DT"] < day_end)].copy()
+    items_day["Hour"] = items_day["Start DT"].dt.floor("H")
+
+    chat_vol_hour = (
+        items_day[items_day["Service Channel: Developer Name"] == "sfdc_liveagent"]
+        .groupby("Hour").size().rename("Chat Vol")
+    )
+    email_vol_hour = (
+        items_day[items_day["Service Channel: Developer Name"] == "casesChannel"]
+        .groupby("Hour").size().rename("Email Vol")
+    )
+
+    # --- Build an hourly frame with all 24 hours to keep the axis continuous ---
+    hours = pd.date_range(day_start, day_end, freq="H", inclusive="left")
+    out = pd.DataFrame({"Hour": hours})
+
+    # --- Compute Chat SLA per hour ---
+    def _chat_sla_for_group(g: pd.DataFrame) -> float:
+        if g.empty: return None
+        # Total chats in hour = len(g); answered chats with wait times:
+        answered = g[g["Wait Time"].notna()]
+        total    = len(g)
+        frac_60  = _clamp01((answered["Wait Time"] <= 60).sum() / total) if total else 0.0
+        avg_wait_min = (answered["Wait Time"].mean() / 60.0) if len(answered) else 0.0
+        abandon_frac = _clamp01((g["Abandoned After"] > 20).sum() / total) if total else 0.0
+        excess_wait  = max(avg_wait_min - CHAT_TARGET_WAIT_MIN, 0.0)
+        raw = 0.5 * frac_60 - 0.3 * excess_wait - 0.2 * abandon_frac
+        return max(0.0, min(100.0, (raw / CHAT_RESCALE_K) * SLA_SCALE))
+
+    chat_hour_sla = chat_day.groupby("Hour").apply(_chat_sla_for_group).rename("Chat SLA")
+
+    # --- Compute Email SLA per hour ---
+    def _email_sla_for_group(g: pd.DataFrame) -> float:
+        if g.empty: return None
+        total = len(g)
+        frac_le_1hr = _clamp01((g["Elapsed Time (Hours)"] <= 1).sum() / total) if total else 0.0
+        avg_resp_hr = g["Elapsed Time (Hours)"].mean() if total else 0.0
+        excess = max((avg_resp_hr or 0.0) - 1.0, 0.0)
+        raw = 0.6 * frac_le_1hr - 0.4 * excess
+        return max(0.0, min(100.0, (raw / EMAIL_RESCALE_K) * SLA_SCALE))
+
+    email_hour_sla = email_day.groupby("Hour").apply(_email_sla_for_group).rename("Email SLA")
+
+    # --- Join everything on Hour ---
+    out = (
+        out.set_index("Hour")
+           .join([chat_hour_sla, email_hour_sla, chat_vol_hour, email_vol_hour])
+           .reset_index()
+    )
+
+    # --- Weighted SLA per hour (using item volumes) ---
+    def _weighted(row):
+        cv = row.get("Chat Vol", 0) or 0
+        ev = row.get("Email Vol", 0) or 0
+        denom = cv + ev
+        if denom == 0: return None
+        cs = row.get("Chat SLA", 0) or 0
+        es = row.get("Email SLA", 0) or 0
+        return (cs * cv + es * ev) / denom
+
+    out["Weighted SLA"] = out.apply(_weighted, axis=1)
+
+    # for neat display
+    out["HourLabel"] = out["Hour"].dt.strftime("%H:%M")
+    return out
+
+df_hourly = compute_hourly_sla_for_date(hourly_date)
+
+if df_hourly[["Chat Vol","Email Vol"]].fillna(0).sum().sum() == 0:
+    st.info("No activity for the selected day.")
+else:
+    show_breakdown = st.checkbox("Show Chat & Email lines", value=False)
+
+    # Weighted SLA line
+    weighted_line = (
+        alt.Chart(df_hourly)
+        .mark_line(point=True, color="#2F80ED")
+        .encode(
+            x=alt.X("Hour:T", title="Hour", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
+            y=alt.Y("Weighted SLA:Q", title="Weighted SLA", scale=alt.Scale(domain=[0, 105])),
+            tooltip=[
+                alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
+                alt.Tooltip("Weighted SLA:Q", format=".1f"),
+                alt.Tooltip("Chat Vol:Q", title="Chat Vol", format=".0f"),
+                alt.Tooltip("Email Vol:Q", title="Email Vol", format=".0f"),
+            ],
+        )
+    )
+
+    # Optional channel lines
+    if show_breakdown:
+        chat_line = (
+            alt.Chart(df_hourly)
+            .mark_line(point=True, color="#0EA5E9")
+            .encode(
+                x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
+                y=alt.Y("Chat SLA:Q", title=None, scale=alt.Scale(domain=[0, 105])),
+                tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Chat SLA:Q", format=".1f")],
+            )
+        )
+        email_line = (
+            alt.Chart(df_hourly)
+            .mark_line(point=True, color="#EF4444", strokeDash=[5, 3])
+            .encode(
+                x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
+                y=alt.Y("Email SLA:Q", title=None, scale=alt.Scale(domain=[0, 105])),
+                tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Email SLA:Q", format=".1f")],
+            )
+        )
+        combined = weighted_line + chat_line + email_line
+    else:
+        combined = weighted_line
+
+    # Target line (85 shown here; change to your chosen target)
+    target_val = 85
+    rule = alt.Chart(pd.DataFrame({"y": [target_val]})).mark_rule(color="red", strokeDash=[5, 5]).encode(y="y:Q")
+    rule_lb = (
+        alt.Chart(pd.DataFrame({"y": [target_val]}))
+        .mark_text(align="left", dy=-8, color="red")
+        .encode(y="y:Q", text=alt.value(f"Target: {target_val}%"))
+    )
+
+    st.altair_chart(
+        (combined + rule + rule_lb)
+        .properties(width=900, height=360, title=f"Hourly Weighted SLA — {hourly_date:%d %b %Y}")
+        .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2, 3])
+        .configure_view(stroke="#d1d5db", fill="white"),
+        use_container_width=True,
+    )
+
+    with st.expander("View hourly table"):
+        show_cols = ["Hour", "Chat SLA", "Chat Vol", "Email SLA", "Email Vol", "Weighted SLA"]
+        st.dataframe(df_hourly[show_cols].style.format({
+            "Chat SLA": "{:.1f}",
+            "Email SLA": "{:.1f}",
+            "Weighted SLA": "{:.1f}",
+        }), use_container_width=True)
+
