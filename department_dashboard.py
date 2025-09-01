@@ -676,7 +676,7 @@ if survey is not None:
 else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
 # =========================
-# Hourly Weighted SLA (selected day)
+# Hourly Weighted SLA (selected day) + Available Agents
 # =========================
 st.markdown("---")
 st.subheader("⏱️ Hourly Weighted SLA (selected day)")
@@ -689,27 +689,82 @@ hourly_date = st.date_input(
     max_value=max_date
 )
 
-def _clamp01(x):  # helper for safety when we compute fractions
+def _clamp01(x):
     if pd.isna(x): return 0.0
     return max(0.0, min(1.0, float(x)))
 
-def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
-    """Return a dataframe with one row per hour of the selected day:
-       [Hour, Chat SLA, Chat Vol, Email SLA, Email Vol, Weighted SLA]"""
+def compute_hourly_available_agents(sel_date: datetime.date) -> pd.DataFrame:
+    """
+    For each hour of the day, count distinct agents in an available status
+    overlapping that hour — separately for Chat and Email.
+    """
     day_start = datetime.combine(sel_date, datetime.min.time())
     day_end   = day_start + timedelta(days=1)
 
-    # --- Slice SLA sources to the day and build hourly keys ---
+    pres_day = df_presence[(df_presence["Start DT"] < day_end) &
+                           (df_presence["End DT"]   > day_start)].copy()
+
+    if pres_day.empty:
+        hours = pd.date_range(day_start, day_end, freq="H", inclusive="left")
+        return pd.DataFrame({
+            "Hour": hours,
+            "Chat Agents": 0,
+            "Email Agents": 0
+        })
+
+    CHAT_STAT  = {"Available_Chat", "Available_All"}
+    EMAIL_STAT = {"Available_Email_and_Web", "Available_All"}
+
+    # Prepare hour buckets
+    hours = pd.date_range(day_start, day_end, freq="H", inclusive="left").to_pydatetime().tolist()
+    hour_sets_chat  = {h: set() for h in hours}
+    hour_sets_email = {h: set() for h in hours}
+
+    for _, r in pres_day.iterrows():
+        stt = max(r["Start DT"].to_pydatetime(), day_start)
+        end = min(r["End DT"].to_pydatetime(),   day_end)
+        if end <= stt: 
+            continue
+        agent  = str(r["Created By: Full Name"])
+        status = str(r["Service Presence Status: Developer Name"])
+
+        # Step through every hour overlapped by this presence segment
+        h = stt.replace(minute=0, second=0, microsecond=0)
+        while h < end:
+            hour_start = h
+            hour_end   = h + timedelta(hours=1)
+            o_s = max(stt, hour_start)
+            o_e = min(end, hour_end)
+            if o_e > o_s:  # overlaps this hour
+                if status in CHAT_STAT:
+                    hour_sets_chat[hour_start].add(agent)
+                if status in EMAIL_STAT:
+                    hour_sets_email[hour_start].add(agent)
+            h = hour_end
+
+    out = pd.DataFrame({
+        "Hour": hours,
+        "Chat Agents": [len(hour_sets_chat[h]) for h in hours],
+        "Email Agents": [len(hour_sets_email[h]) for h in hours],
+    })
+    return out
+
+def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
+    """Return one row per hour: Chat/Email SLA, volumes, agents, and Weighted SLA."""
+    day_start = datetime.combine(sel_date, datetime.min.time())
+    day_end   = day_start + timedelta(days=1)
+
+    # SLA sources sliced to day (bucket to hour)
     chat_day  = chat_sla_df[(chat_sla_df["Date/Time Opened"] >= day_start) &
                             (chat_sla_df["Date/Time Opened"] <  day_end)].copy()
     email_day = email_sla_df[(email_sla_df["Date/Time Opened"] >= day_start) &
                              (email_sla_df["Date/Time Opened"] <  day_end)].copy()
-
     chat_day["Hour"]  = chat_day["Date/Time Opened"].dt.floor("H")
     email_day["Hour"] = email_day["Date/Time Opened"].dt.floor("H")
 
-    # --- Volumes for weighting come from report_items (actual handled items) ---
-    items_day = df_items[(df_items["Start DT"] >= day_start) & (df_items["Start DT"] < day_end)].copy()
+    # Volumes (handled) from report_items
+    items_day = df_items[(df_items["Start DT"] >= day_start) &
+                         (df_items["Start DT"] <  day_end)].copy()
     items_day["Hour"] = items_day["Start DT"].dt.floor("H")
 
     chat_vol_hour = (
@@ -721,17 +776,16 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
         .groupby("Hour").size().rename("Email Vol")
     )
 
-    # --- Build an hourly frame with all 24 hours to keep the axis continuous ---
+    # Hour scaffold
     hours = pd.date_range(day_start, day_end, freq="H", inclusive="left")
     out = pd.DataFrame({"Hour": hours})
 
-    # --- Compute Chat SLA per hour ---
+    # Hourly Chat SLA
     def _chat_sla_for_group(g: pd.DataFrame) -> float:
         if g.empty: return None
-        # Total chats in hour = len(g); answered chats with wait times:
+        total = len(g)
         answered = g[g["Wait Time"].notna()]
-        total    = len(g)
-        frac_60  = _clamp01((answered["Wait Time"] <= 60).sum() / total) if total else 0.0
+        frac_60 = _clamp01((answered["Wait Time"] <= 60).sum() / total) if total else 0.0
         avg_wait_min = (answered["Wait Time"].mean() / 60.0) if len(answered) else 0.0
         abandon_frac = _clamp01((g["Abandoned After"] > 20).sum() / total) if total else 0.0
         excess_wait  = max(avg_wait_min - CHAT_TARGET_WAIT_MIN, 0.0)
@@ -740,7 +794,7 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
 
     chat_hour_sla = chat_day.groupby("Hour").apply(_chat_sla_for_group).rename("Chat SLA")
 
-    # --- Compute Email SLA per hour ---
+    # Hourly Email SLA
     def _email_sla_for_group(g: pd.DataFrame) -> float:
         if g.empty: return None
         total = len(g)
@@ -752,14 +806,18 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
 
     email_hour_sla = email_day.groupby("Hour").apply(_email_sla_for_group).rename("Email SLA")
 
-    # --- Join everything on Hour ---
+    # Join SLA + Volumes
     out = (
         out.set_index("Hour")
            .join([chat_hour_sla, email_hour_sla, chat_vol_hour, email_vol_hour])
            .reset_index()
     )
 
-    # --- Weighted SLA per hour (using item volumes) ---
+    # Agents available per hour
+    agents_hourly = compute_hourly_available_agents(sel_date)
+    out = out.merge(agents_hourly, on="Hour", how="left")
+
+    # Weighted SLA per hour
     def _weighted(row):
         cv = row.get("Chat Vol", 0) or 0
         ev = row.get("Email Vol", 0) or 0
@@ -770,8 +828,6 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
         return (cs * cv + es * ev) / denom
 
     out["Weighted SLA"] = out.apply(_weighted, axis=1)
-
-    # for neat display
     out["HourLabel"] = out["Hour"].dt.strftime("%H:%M")
     return out
 
@@ -781,6 +837,7 @@ if df_hourly[["Chat Vol","Email Vol"]].fillna(0).sum().sum() == 0:
     st.info("No activity for the selected day.")
 else:
     show_breakdown = st.checkbox("Show Chat & Email lines", value=False)
+    show_agents    = st.checkbox("Overlay available agents (bars)", value=True)
 
     # Weighted SLA line
     weighted_line = (
@@ -794,11 +851,15 @@ else:
                 alt.Tooltip("Weighted SLA:Q", format=".1f"),
                 alt.Tooltip("Chat Vol:Q", title="Chat Vol", format=".0f"),
                 alt.Tooltip("Email Vol:Q", title="Email Vol", format=".0f"),
+                alt.Tooltip("Chat Agents:Q", title="Chat Agents", format=".0f"),
+                alt.Tooltip("Email Agents:Q", title="Email Agents", format=".0f"),
             ],
         )
     )
 
-    # Optional channel lines
+    layers = [weighted_line]
+
+    # Optional channel SLA lines
     if show_breakdown:
         chat_line = (
             alt.Chart(df_hourly)
@@ -818,11 +879,36 @@ else:
                 tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Email SLA:Q", format=".1f")],
             )
         )
-        combined = weighted_line + chat_line + email_line
-    else:
-        combined = weighted_line
+        layers += [chat_line, email_line]
 
-    # Target line (85 shown here; change to your chosen target)
+    # Optional agents bars (right axis)
+    if show_agents:
+        # Sum both channels (or choose one) – here we show both bars side-by-side
+        bars_chat = (
+            alt.Chart(df_hourly)
+            .mark_bar(opacity=0.25, color="#0EA5E9")
+            .encode(
+                x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
+                y=alt.Y("Chat Agents:Q",
+                        title="Agents Available",
+                        axis=alt.Axis(orient="right"),
+                        scale=alt.Scale(nice=True)),
+            )
+        )
+        bars_email = (
+            alt.Chart(df_hourly)
+            .mark_bar(opacity=0.25, color="#EF4444")
+            .encode(
+                x=alt.X("Hour:T"),
+                y=alt.Y("Email Agents:Q",
+                        title="Agents Available",
+                        axis=alt.Axis(orient="right"),
+                        scale=alt.Scale(nice=True)),
+            )
+        )
+        layers += [bars_chat, bars_email]
+
+    # Target line (adjust to your target)
     target_val = 85
     rule = alt.Chart(pd.DataFrame({"y": [target_val]})).mark_rule(color="red", strokeDash=[5, 5]).encode(y="y:Q")
     rule_lb = (
@@ -831,8 +917,10 @@ else:
         .encode(y="y:Q", text=alt.value(f"Target: {target_val}%"))
     )
 
+    combined = alt.layer(*layers, rule, rule_lb).resolve_scale(y="independent")
+
     st.altair_chart(
-        (combined + rule + rule_lb)
+        combined
         .properties(width=900, height=360, title=f"Hourly Weighted SLA — {hourly_date:%d %b %Y}")
         .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2, 3])
         .configure_view(stroke="#d1d5db", fill="white"),
@@ -840,10 +928,16 @@ else:
     )
 
     with st.expander("View hourly table"):
-        show_cols = ["Hour", "Chat SLA", "Chat Vol", "Email SLA", "Email Vol", "Weighted SLA"]
-        st.dataframe(df_hourly[show_cols].style.format({
-            "Chat SLA": "{:.1f}",
-            "Email SLA": "{:.1f}",
-            "Weighted SLA": "{:.1f}",
-        }), use_container_width=True)
+        show_cols = ["Hour", "Chat SLA", "Chat Vol", "Email SLA", "Email Vol",
+                     "Chat Agents", "Email Agents", "Weighted SLA"]
+        st.dataframe(
+            df_hourly[show_cols].style.format({
+                "Chat SLA": "{:.1f}",
+                "Email SLA": "{:.1f}",
+                "Weighted SLA": "{:.1f}",
+            }),
+            use_container_width=True
+        )
+
+
 
