@@ -253,7 +253,7 @@ avg_resp_hrs  = email_sla_p["Elapsed Time (Hours)"].mean() if len(email_sla_p) e
 avg_resp_secs = avg_resp_hrs * 3600
 
 # =========================
-# Availability & Handling (Proportional split for overall utilization)
+# Availability & Handling (Proportional split for overall utilization tiles)
 # =========================
 window_start = datetime.combine(start_date, datetime.min.time())
 window_end   = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
@@ -694,40 +694,34 @@ def compute_hourly_available_minutes_and_logged_in(sel_date: datetime.date) -> p
     avail_secs_per_hour  = {h: 0.0 for h in hours}
     logged_sets_per_hour = {h: set() for h in hours}
 
-    if pres_day.empty:
-        return pd.DataFrame({
-            "Hour": hours,
-            "Avail (min)": 0.0,
-            "Logged In Agents": 0
-        })
-
     AVAILABLE_STATUSES = {"Available_Chat", "Available_Email_and_Web", "Available_All"}
 
-    # Walk each presence row; allocate overlapped seconds into hour bins
-    for _, r in pres_day.iterrows():
-        seg = _clip(r["Start DT"].to_pydatetime(), r["End DT"].to_pydatetime(), day_start, day_end)
-        if not seg:
-            continue
+    if not pres_day.empty:
+        # Walk each presence row; allocate overlapped seconds into hour bins
+        for _, r in pres_day.iterrows():
+            seg = _clip(r["Start DT"].to_pydatetime(), r["End DT"].to_pydatetime(), day_start, day_end)
+            if not seg:
+                continue
 
-        stt, end = seg
-        agent  = str(r["Created By: Full Name"])
-        status = str(r["Service Presence Status: Developer Name"])
+            stt, end = seg
+            agent  = str(r["Created By: Full Name"])
+            status = str(r["Service Presence Status: Developer Name"])
 
-        # Step across each hour overlapped by this segment
-        h = stt.replace(minute=0, second=0, microsecond=0)
-        while h < end:
-            hour_start = h
-            hour_end   = h + timedelta(hours=1)
-            o = _clip(stt, end, hour_start, hour_end)
-            if o:
-                o_s, o_e = o
-                dur = (o_e - o_s).total_seconds()
-                logged_sets_per_hour[hour_start].add(agent)
+            # Step across each hour overlapped by this segment
+            h = stt.replace(minute=0, second=0, microsecond=0)
+            while h < end:
+                hour_start = h
+                hour_end   = h + timedelta(hours=1)
+                o = _clip(stt, end, hour_start, hour_end)
+                if o:
+                    o_s, o_e = o
+                    dur = (o_e - o_s).total_seconds()
+                    logged_sets_per_hour[hour_start].add(agent)
 
-                if status in AVAILABLE_STATUSES:
-                    avail_secs_per_hour[hour_start] += dur
+                    if status in AVAILABLE_STATUSES:
+                        avail_secs_per_hour[hour_start] += dur
 
-            h = hour_end
+                h = hour_end
 
     return pd.DataFrame({
         "Hour": hours,
@@ -954,3 +948,158 @@ else:
             }),
             use_container_width=True
         )
+
+# =========================
+# 👥 Daily Schedule Summary (selected day)
+# =========================
+st.markdown("---")
+st.subheader("👥 Daily Schedule Summary (selected day)")
+
+def _find_col(cols, candidates, contains_all=None, exclude=None):
+    """
+    Find first matching column by exact name in `candidates` (case-insensitive),
+    else by contains (all substrings). Returns column name or None.
+    """
+    cl = [c.lower() for c in cols]
+    # exact
+    for cand in candidates:
+        if cand.lower() in cl:
+            return cols[cl.index(cand.lower())]
+    # contains
+    if contains_all:
+        for c in cols:
+            name = c.lower()
+            if all(s in name for s in contains_all):
+                if not exclude or not any(x in name for x in exclude):
+                    return c
+    return None
+
+def _to_dt(series):
+    return pd.to_datetime(series, errors="coerce", dayfirst=True)
+
+def build_daily_schedule(df_shifts: pd.DataFrame, day: datetime.date) -> pd.DataFrame:
+    if df_shifts is None or df_shifts.empty:
+        return pd.DataFrame(columns=["Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift"])
+
+    # Normalize columns
+    cols = list(df_shifts.columns)
+
+    # Agent/Name
+    name_col = _find_col(cols, ["Agent","User: Full Name","Full Name","Name","Created By: Full Name"],
+                         contains_all=["name"])
+    if not name_col:
+        name_col = cols[0]  # fallback to first col
+
+    # Shift date (optional)
+    date_col = _find_col(cols, ["Date","Shift Date","Scheduled Date"], contains_all=["date"])
+    # Start/End
+    start_col = _find_col(cols, ["Shift Start","Start Time","Start","Shift Start Time"], contains_all=["start"], exclude=["lunch"])
+    end_col   = _find_col(cols, ["Shift End","End Time","End","Shift End Time"], contains_all=["end"], exclude=["lunch"])
+    # Lunch
+    lunch_start_col = _find_col(cols, ["Lunch Start","Break Start"], contains_all=["lunch","start"])
+    lunch_end_col   = _find_col(cols, ["Lunch End","Break End"], contains_all=["lunch","end"])
+
+    df = df_shifts.copy()
+
+    # Try to parse datetimes
+    if start_col is not None:
+        df["_shift_start"] = _to_dt(df[start_col])
+    else:
+        df["_shift_start"] = pd.NaT
+
+    if end_col is not None:
+        df["_shift_end"] = _to_dt(df[end_col])
+    else:
+        df["_shift_end"] = pd.NaT
+
+    if lunch_start_col is not None:
+        df["_lunch_start"] = _to_dt(df[lunch_start_col])
+    else:
+        df["_lunch_start"] = pd.NaT
+
+    if lunch_end_col is not None:
+        df["_lunch_end"] = _to_dt(df[lunch_end_col])
+    else:
+        df["_lunch_end"] = pd.NaT
+
+    if date_col is not None:
+        df["_date"] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True).dt.date
+    else:
+        # derive date from shift start if present
+        df["_date"] = df["_shift_start"].dt.date
+
+    # Filter rows whose shift intersects the day (00:00 to 24:00)
+    day_start = datetime.combine(day, datetime.min.time())
+    day_end   = day_start + timedelta(days=1)
+
+    def overlaps_day(row):
+        s = row["_shift_start"]
+        e = row["_shift_end"]
+        # If either is missing, try date-only match
+        if pd.isna(s) or pd.isna(e):
+            return row["_date"] == day
+        return (s < day_end) and (e > day_start)
+
+    df = df[df.apply(overlaps_day, axis=1)].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift"])
+
+    # Compute total shift duration within the selected day (minus lunch overlap if both present)
+    def fmt_time(x):
+        return "—" if pd.isna(x) else pd.to_datetime(x).strftime("%H:%M")
+
+    def overlapped_seconds(a_s, a_e, w_s, w_e):
+        if pd.isna(a_s) or pd.isna(a_e): return 0
+        s = max(a_s, w_s); e = min(a_e, w_e)
+        return max((e - s).total_seconds(), 0)
+
+    total_list = []
+    for _, r in df.iterrows():
+        s = r["_shift_start"]
+        e = r["_shift_end"]
+        # Shift overlap (if missing, assume full day only when date matches)
+        if pd.isna(s) or pd.isna(e):
+            shift_secs = 24 * 3600  # worst-case placeholder for missing times but matching date
+        else:
+            shift_secs = overlapped_seconds(s, e, day_start, day_end)
+
+        # Lunch overlap to subtract
+        if pd.notna(r["_lunch_start"]) and pd.notna(r["_lunch_end"]):
+            lunch_secs = overlapped_seconds(r["_lunch_start"], r["_lunch_end"], day_start, day_end)
+        else:
+            lunch_secs = 0
+
+        total_secs = max(shift_secs - lunch_secs, 0)
+        total_list.append(total_secs)
+
+    out = pd.DataFrame({
+        "Agent": df[name_col].astype(str),
+        "Shift Start": df["_shift_start"].apply(fmt_time),
+        "Lunch Start": df["_lunch_start"].apply(fmt_time),
+        "Lunch End":   df["_lunch_end"].apply(fmt_time),
+        "Shift End":   df["_shift_end"].apply(fmt_time),
+        "Total Shift": [fmt_mmss(x) if x < 360000 else "—" for x in total_list]  # guard absurd durations
+    })
+
+    # Sort by shift start time (missing at bottom)
+    sort_key = pd.to_datetime(df["_shift_start"], errors="coerce")
+    out = out.assign(_sort=sort_key).sort_values(["_sort","Agent"]).drop(columns=["_sort"]).reset_index(drop=True)
+    return out
+
+schedule_df = build_daily_schedule(df_shifts, hourly_date)
+
+if schedule_df.empty:
+    st.info(f"No scheduled agents found for {hourly_date:%d %b %Y}.")
+else:
+    left, right = st.columns([3,1])
+    with left:
+        st.dataframe(schedule_df, use_container_width=True)
+    with right:
+        st.metric("Scheduled agents", f"{len(schedule_df):,}")
+        # Sum total shift seconds from "Total Shift" back to seconds (best-effort)
+        def _mmss_to_sec(s):
+            if not isinstance(s, str) or ":" not in s: return 0
+            m, s2 = s.split(":")
+            return int(m)*60 + int(s2)
+        total_secs = sum(_mmss_to_sec(x) for x in schedule_df["Total Shift"])
+        st.metric("Total scheduled time", fmt_hms(total_secs))
