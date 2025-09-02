@@ -352,35 +352,26 @@ daily = []
 for d in pd.date_range(start_date, end_date):
     dd = d.normalize()
 
-    # --- Chat SLA (revised: only penalize wait ABOVE target; align numerator/denominator) ---
+    # --- Chat SLA (revised) ---
     cd = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == dd.date()]
     cw = cd[cd["Wait Time"].notna()]  # answered chats with wait times
 
-    # % answered ≤60s = answered ≤60 / TOTAL chats (fraction 0–1)
-    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cd)) if len(cd) else 0.0
-
-    # Average wait (minutes) across answered chats only
+    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cd)) if len(cd) else 0.0  # fraction 0–1
     avg_wait_min    = (cw["Wait Time"].mean() / 60.0) if len(cw) else 0.0
-
-    # Abandon rate includes only those abandoned AFTER 20s (fraction of total)
     abandon_frac    = ((cd["Abandoned After"] > 20).sum() / len(cd)) if len(cd) else 0.0
 
-    # Only penalize excess wait above target
     excess_wait_min = max(avg_wait_min - CHAT_TARGET_WAIT_MIN, 0.0)
-
     chat_raw = 0.5 * frac_answer_60s - 0.3 * excess_wait_min - 0.2 * abandon_frac
     sla_c    = max(0.0, min(100.0, (chat_raw / CHAT_RESCALE_K) * SLA_SCALE))
 
-    # --- Email SLA (revised: only penalize avg above 1 hour) ---
+    # --- Email SLA (revised) ---
     ed = email_sla_p[email_sla_p["Date/Time Opened"].dt.date == dd.date()]
     frac_le_1hr = ((ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed)) if len(ed) else 0.0
     avg_resp_hr = (ed["Elapsed Time (Hours)"].mean()) if len(ed) else 0.0
-
     excess = max(avg_resp_hr - 1.0, 0.0)
     email_raw = 0.6 * frac_le_1hr - 0.4 * excess
     sla_e     = max(0.0, min(100.0, (email_raw / EMAIL_RESCALE_K) * SLA_SCALE))
 
-    # Volumes from report_items (for weighting)
     v_c = len(chat_df[chat_df["Start DT"].dt.date  == dd.date()])
     v_e = len(email_df[email_df["Start DT"].dt.date == dd.date()])
 
@@ -508,7 +499,7 @@ if survey is not None:
             get_fcr_color_pct(fcr_overall)
         )
 
-        # --- Per-channel tiles (CSAT color threshold applied) ---
+        # --- Per-channel tiles ---
         survey_period["ChanSimple"] = survey_period["Channel"].map(
             lambda x: "Email" if "Email" in str(x) else "Chat" if "Chat" in str(x) else "Other"
         )
@@ -540,8 +531,7 @@ if survey is not None:
                     get_csat_color_pct(row.CSAT_pct)
                 )
 
-        # --- CSAT & NPS Trend (dual-axis lines) ---
-        st.subheader("CSAT & NPS Trend Analysis")
+        # --- CSAT & NPS Trend (dual-axis lines; cleaned) ---
         daily_survey = (
             survey_period
             .assign(Date=survey_period["Survey Date"].dt.normalize())
@@ -551,96 +541,85 @@ if survey is not None:
                 NPS=("NPS_raw", _nps_from_0_10),
                 Surveys=("CSAT%","size")
             )
-        )
+        ).sort_values("Date")
 
         if not daily_survey.empty:
-            # Build a 'Period' label for the x-axis (keeps ordering)
-            daily_survey["Period"] = daily_survey["Date"].dt.strftime("%d %b")
-            daily_survey["Period"] = pd.Categorical(
-                daily_survey["Period"],
-                categories=list(daily_survey["Period"]),
-                ordered=True
-            )
+            st.subheader("CSAT & NPS Trend Analysis")
 
-            # Base (no per-layer configure calls)
             base = alt.Chart(daily_survey)
+            x_enc = alt.X("Date:T", title="Period", axis=alt.Axis(format="%d %b", labelAngle=45))
+            hover = alt.selection_point(on="mouseover", fields=["Date"], nearest=True, empty=False)
 
-            # Shared X encoding
-            x_enc = alt.X(
-                "Period:N",
-                title="Period",
-                sort=list(daily_survey["Period"].astype(str)),
-                axis=alt.Axis(labelAngle=45)
-            )
-
-            # Hover selection (highlight points)
-            hover = alt.selection_point(on='mouseover', fields=['Period'], nearest=True, empty=False)
-
-            # Single legend via 'metric' constant field mapped to color
-            metric_color = alt.Color(
-                "metric:N",
-                scale=alt.Scale(domain=["CSAT", "NPS"], range=["#2563eb", "#dc2626"]),
-                legend=alt.Legend(title="Metric", orient="top-right")
-            )
-
-            # CSAT line + points (left axis)
+            # Lines (only these draw axes)
             csat_line = (
-                base
-                .transform_calculate(metric='"CSAT"')
-                .mark_line(strokeWidth=3, point=True)  # Changed mark_bar to mark_line
+                base.mark_line(strokeWidth=3, color="#2563eb")
                 .encode(
                     x=x_enc,
                     y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
-                    color=metric_color,
                     tooltip=[
-                        alt.Tooltip("Period:N", title="Period"),
+                        alt.Tooltip("Date:T", title="Period", format="%d %b"),
                         alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
-                        alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
-                        alt.Tooltip("Surveys:Q", title="Total Surveys")
-                    ]
+                        alt.Tooltip("Surveys:Q", title="Surveys", format=".0f"),
+                    ],
                 )
             )
 
-            # NPS line + points (right axis)
             nps_line = (
-                base
-                .transform_calculate(metric='"NPS"')
-                .mark_line(strokeWidth=3, point=True)
+                base.mark_line(strokeWidth=3, color="#dc2626", strokeDash=[5, 5])
                 .encode(
                     x=x_enc,
                     y=alt.Y(
                         "NPS:Q",
                         title="NPS Score",
                         axis=alt.Axis(orient="right"),
-                        scale=alt.Scale(domain=[-100, 100])
+                        scale=alt.Scale(domain=[-100, 100]),
                     ),
-                    color=metric_color,
                     tooltip=[
-                        alt.Tooltip("Period:N", title="Period"),
-                        alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
+                        alt.Tooltip("Date:T", title="Period", format="%d %b"),
                         alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
-                        alt.Tooltip("Surveys:Q", title="Total Surveys")
-                    ]
+                        alt.Tooltip("Surveys:Q", title="Surveys", format=".0f"),
+                    ],
                 )
             )
 
-            # Horizontal reference line at NPS = 0
+            # Points (share scales, no axes)
+            csat_points = (
+                base.mark_point(filled=True, color="#2563eb")
+                .encode(
+                    x=x_enc,
+                    y=alt.Y("CSAT_pct:Q", axis=None, scale=alt.Scale(domain=[0, 100])),
+                    size=alt.condition(hover, alt.value(120), alt.value(60)),
+                    tooltip=[
+                        alt.Tooltip("Date:T", title="Period", format="%d %b"),
+                        alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
+                    ],
+                )
+                .add_params(hover)
+            )
+
+            nps_points = (
+                base.mark_point(filled=True, color="#dc2626", shape="square")
+                .encode(
+                    x=x_enc,
+                    y=alt.Y("NPS:Q", axis=None, scale=alt.Scale(domain=[-100, 100])),
+                    size=alt.condition(hover, alt.value(120), alt.value(60)),
+                    tooltip=[
+                        alt.Tooltip("Date:T", title="Period", format="%d %b"),
+                        alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
+                    ],
+                )
+                .add_params(hover)
+            )
+
+            # Zero line for NPS (no axis)
             nps_zero_rule = (
                 alt.Chart(pd.DataFrame({"zero": [0]}))
-                .mark_rule(strokeDash=[6, 4], color="#9ca3af")
-                .encode(
-                    y=alt.Y(
-                        "zero:Q",
-                        axis=alt.Axis(orient="right", title="")
-                    )
-                )
+                .mark_rule(strokeDash=[6, 4], color="#9ca3af", opacity=0.6)
+                .encode(y=alt.Y("zero:Q", axis=None, scale=alt.Scale(domain=[-100, 100])))
             )
 
-            # Combine layers
             trend = (
-                alt.layer(
-                    csat_line, nps_line, nps_zero_rule
-                )
+                alt.layer(csat_line, nps_line, csat_points, nps_points, nps_zero_rule)
                 .resolve_scale(y="independent")
                 .properties(
                     width=800,
@@ -650,8 +629,8 @@ if survey is not None:
                         font="Arial",
                         fontSize=18,
                         anchor="start",
-                        color="#111827"
-                    )
+                        color="#111827",
+                    ),
                 )
                 .configure_axis(
                     grid=True,
@@ -660,13 +639,11 @@ if survey is not None:
                     labelFont="Arial",
                     titleFont="Arial",
                     labelColor="#374151",
-                    titleColor="#111827"
+                    titleColor="#111827",
                 )
-                .configure_view(
-                    stroke="#d1d5db",  # subtle border
-                    fill="white"
-                )
-                .interactive()  # pan/zoom
+                .configure_view(stroke="#d1d5db", fill="white")
+                .configure_legend(orient="top-right", titleFont="Arial", labelFont="Arial")
+                .interactive()
             )
 
             st.altair_chart(trend, use_container_width=True)
@@ -675,6 +652,7 @@ if survey is not None:
         st.info("No survey responses in the selected date range.")
 else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
+
 # =========================
 # Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
 # =========================
@@ -736,7 +714,7 @@ def compute_hourly_available_minutes_and_logged_in(sel_date: datetime.date) -> p
             "Logged In Agents": 0
         })
 
-    # --- Proportional split ratio per agent for the day (from handled intervals) ---
+    # Proportional split ratio per agent for the day (from handled intervals)
     items_day = df_items[(df_items["Start DT"] < day_end) &
                          (df_items["End DT"]   > day_start)].copy()
     ratios = {}  # agent -> chat_share (0..1)
@@ -763,7 +741,7 @@ def compute_hourly_available_minutes_and_logged_in(sel_date: datetime.date) -> p
     EMAIL_STAT = {"Available_Email_and_Web"}
     SHARED     = {"Available_All"}
 
-    # --- Walk each presence row; allocate overlapped seconds into hour bins ---
+    # Walk each presence row; allocate overlapped seconds into hour bins
     for _, r in pres_day.iterrows():
         seg = _clip(r["Start DT"].to_pydatetime(), r["End DT"].to_pydatetime(), day_start, day_end)
         if not seg:
@@ -973,49 +951,60 @@ else:
         .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2, 3])\
         .configure_view(stroke="#d1d5db", fill="white")
 
-   # --- Logged In Agents per Hour (bigger, clearer) ---
-max_agents = int((df_hourly["Logged In Agents"].max() or 0) + 1)
+    st.altair_chart(combined_top, use_container_width=True)
 
-agents_chart = (
-    alt.Chart(df_hourly)
-    .mark_bar(color="#6B7280", opacity=0.70)
-    .encode(
-        x=alt.X(
-            "Hour:T",
-            title="Hour",
-            axis=alt.Axis(format="%H:%M", labelAngle=-45, labelLimit=140)
-        ),
-        y=alt.Y(
-            "Logged In Agents:Q",
-            title="Logged In Agents",
-            scale=alt.Scale(domain=[0, max_agents])  # keeps bars tall & readable
-        ),
-        tooltip=[
-            alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-            alt.Tooltip("Logged In Agents:Q", format=".0f"),
-        ],
+    # --- Logged In Agents per Hour (bigger, clearer) ---
+    max_agents_val = pd.to_numeric(df_hourly["Logged In Agents"], errors="coerce").max()
+    max_agents = int((0 if pd.isna(max_agents_val) else max_agents_val) + 1)
+
+    agents_chart = (
+        alt.Chart(df_hourly)
+        .mark_bar(color="#6B7280", opacity=0.70)
+        .encode(
+            x=alt.X(
+                "Hour:T",
+                title="Hour",
+                axis=alt.Axis(format="%H:%M", labelAngle=-45, labelLimit=140)
+            ),
+            y=alt.Y(
+                "Logged In Agents:Q",
+                title="Logged In Agents",
+                scale=alt.Scale(domain=[0, max_agents])
+            ),
+            tooltip=[
+                alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
+                alt.Tooltip("Logged In Agents:Q", format=".0f"),
+            ],
+        )
+        .properties(
+            width=900,
+            height=220,  # larger for clarity
+            title="Logged In Agents per Hour"
+        )
+        .configure_axis(
+            grid=True,
+            gridColor="#e5e7eb",
+            gridDash=[2, 3]
+        )
+        .configure_view(
+            stroke="#d1d5db",
+            fill="white"
+        )
     )
-    .properties(
-        width=900,
-        height=220,  # was 120 — larger for clarity
-        title="Logged In Agents per Hour"
-    )
-    .configure_axis(
-        grid=True,
-        gridColor="#e5e7eb",
-        gridDash=[2, 3]
-    )
-    .configure_view(
-        stroke="#d1d5db",
-        fill="white"
-    )
-)
 
-st.altair_chart(agents_chart, use_container_width=True)
+    st.altair_chart(agents_chart, use_container_width=True)
 
-
-
-
-
-
-
+    with st.expander("View hourly table"):
+        show_cols = ["Hour", "Chat SLA", "Chat Vol", "Email SLA", "Email Vol",
+                     "Chat Avail (min)", "Email Avail (min)", "Logged In Agents", "Weighted SLA"]
+        st.dataframe(
+            df_hourly[show_cols].style.format({
+                "Chat SLA": "{:.1f}",
+                "Email SLA": "{:.1f}",
+                "Weighted SLA": "{:.1f}",
+                "Chat Avail (min)": "{:.0f}",
+                "Email Avail (min)": "{:.0f}",
+                "Logged In Agents": "{:.0f}",
+            }),
+            use_container_width=True
+        )
