@@ -676,7 +676,7 @@ if survey is not None:
 else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
 # =========================
-# Hourly Weighted SLA (selected day) + Available Agents
+# Hourly Weighted SLA (selected day) + Available Minutes
 # =========================
 st.markdown("---")
 st.subheader("⏱️ Hourly Weighted SLA (selected day)")
@@ -693,64 +693,116 @@ def _clamp01(x):
     if pd.isna(x): return 0.0
     return max(0.0, min(1.0, float(x)))
 
-def compute_hourly_available_agents(sel_date: datetime.date) -> pd.DataFrame:
+def _merge_intervals(ints):
+    if not ints: return []
+    ints = sorted(ints, key=lambda x: x[0])
+    out = [list(ints[0])]
+    for s, e in ints[1:]:
+        if s > out[-1][1]:
+            out.append([s, e])
+        else:
+            out[-1][1] = max(out[-1][1], e)
+    return [(s, e) for s, e in out]
+
+def _clip(seg_s, seg_e, w_s, w_e):
+    s, e = max(seg_s, w_s), min(seg_e, w_e)
+    return (s, e) if e > s else None
+
+def _sum_secs(ints):
+    return sum((e - s).total_seconds() for s, e in ints)
+
+def compute_hourly_available_minutes(sel_date: datetime.date) -> pd.DataFrame:
     """
-    For each hour of the day, count distinct agents in an available status
-    overlapping that hour — separately for Chat and Email.
+    For each hour of the day, sum minutes in available status, split `Available_All`
+    proportionally by each agent's handled share (chat vs email) for that day.
     """
     day_start = datetime.combine(sel_date, datetime.min.time())
     day_end   = day_start + timedelta(days=1)
 
+    # Presence segments overlapping the day
     pres_day = df_presence[(df_presence["Start DT"] < day_end) &
                            (df_presence["End DT"]   > day_start)].copy()
-
     if pres_day.empty:
         hours = pd.date_range(day_start, day_end, freq="H", inclusive="left")
-        return pd.DataFrame({
-            "Hour": hours,
-            "Chat Agents": 0,
-            "Email Agents": 0
-        })
+        return pd.DataFrame({"Hour": hours,
+                             "Chat Avail (min)": 0.0,
+                             "Email Avail (min)": 0.0})
 
-    CHAT_STAT  = {"Available_Chat", "Available_All"}
-    EMAIL_STAT = {"Available_Email_and_Web", "Available_All"}
+    # Build handled share per agent for the day (used to split Available_All)
+    items_day = df_items[(df_items["Start DT"] < day_end) &
+                         (df_items["End DT"]   > day_start)].copy()
+    ratios = {}
+    if not items_day.empty:
+        # Clip to day window and group by agent & channel
+        items_day["s_clip"] = items_day["Start DT"].apply(lambda x: max(x, day_start))
+        items_day["e_clip"] = items_day["End DT"].apply(lambda x: min(x, day_end))
+        items_day = items_day[items_day["e_clip"] > items_day["s_clip"]].copy()
+
+        for ag, grp in items_day.groupby("User: Full Name"):
+            chat_ints  = []
+            email_ints = []
+            for _, r in grp.iterrows():
+                seg = (r["s_clip"].to_pydatetime(), r["e_clip"].to_pydatetime())
+                if r["Service Channel: Developer Name"] == "sfdc_liveagent":
+                    chat_ints.append(seg)
+                elif r["Service Channel: Developer Name"] == "casesChannel":
+                    email_ints.append(seg)
+            ch = _sum_secs(_merge_intervals(chat_ints))
+            em = _sum_secs(_merge_intervals(email_ints))
+            tot = ch + em
+            if tot > 0:
+                ratios[ag] = ch / tot
+            else:
+                ratios[ag] = 0.5  # no handling -> split evenly
+    # Default split if agent not present in items
+    default_ratio = 0.5
 
     # Prepare hour buckets
     hours = pd.date_range(day_start, day_end, freq="H", inclusive="left").to_pydatetime().tolist()
-    hour_sets_chat  = {h: set() for h in hours}
-    hour_sets_email = {h: set() for h in hours}
+    chat_secs_per_hour  = {h: 0.0 for h in hours}
+    email_secs_per_hour = {h: 0.0 for h in hours}
 
+    CHAT_STAT  = {"Available_Chat"}
+    EMAIL_STAT = {"Available_Email_and_Web"}
+    SHARED     = {"Available_All"}
+
+    # Walk each presence row; accumulate overlapped seconds into hour bins
     for _, r in pres_day.iterrows():
-        stt = max(r["Start DT"].to_pydatetime(), day_start)
-        end = min(r["End DT"].to_pydatetime(),   day_end)
-        if end <= stt: 
+        seg = _clip(r["Start DT"].to_pydatetime(), r["End DT"].to_pydatetime(), day_start, day_end)
+        if not seg:
             continue
+        stt, end = seg
         agent  = str(r["Created By: Full Name"])
         status = str(r["Service Presence Status: Developer Name"])
+        split  = ratios.get(agent, default_ratio)  # chat share for shared segments
 
-        # Step through every hour overlapped by this presence segment
+        # Step across each hour overlapped by this segment
         h = stt.replace(minute=0, second=0, microsecond=0)
         while h < end:
             hour_start = h
             hour_end   = h + timedelta(hours=1)
-            o_s = max(stt, hour_start)
-            o_e = min(end, hour_end)
-            if o_e > o_s:  # overlaps this hour
+            o = _clip(stt, end, hour_start, hour_end)
+            if o:
+                o_s, o_e = o
+                dur = (o_e - o_s).total_seconds()
                 if status in CHAT_STAT:
-                    hour_sets_chat[hour_start].add(agent)
-                if status in EMAIL_STAT:
-                    hour_sets_email[hour_start].add(agent)
+                    chat_secs_per_hour[hour_start] += dur
+                elif status in EMAIL_STAT:
+                    email_secs_per_hour[hour_start] += dur
+                elif status in SHARED:
+                    chat_secs_per_hour[hour_start]  += dur * split
+                    email_secs_per_hour[hour_start] += dur * (1.0 - split)
             h = hour_end
 
     out = pd.DataFrame({
         "Hour": hours,
-        "Chat Agents": [len(hour_sets_chat[h]) for h in hours],
-        "Email Agents": [len(hour_sets_email[h]) for h in hours],
+        "Chat Avail (min)":  [chat_secs_per_hour[h]  / 60.0 for h in hours],
+        "Email Avail (min)": [email_secs_per_hour[h] / 60.0 for h in hours],
     })
     return out
 
 def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
-    """Return one row per hour: Chat/Email SLA, volumes, agents, and Weighted SLA."""
+    """Return one row per hour: Chat/Email SLA, volumes, available minutes, and Weighted SLA."""
     day_start = datetime.combine(sel_date, datetime.min.time())
     day_end   = day_start + timedelta(days=1)
 
@@ -813,9 +865,9 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
            .reset_index()
     )
 
-    # Agents available per hour
-    agents_hourly = compute_hourly_available_agents(sel_date)
-    out = out.merge(agents_hourly, on="Hour", how="left")
+    # Available minutes per hour (proportional split of Available_All)
+    avail_minutes = compute_hourly_available_minutes(sel_date)
+    out = out.merge(avail_minutes, on="Hour", how="left")
 
     # Weighted SLA per hour
     def _weighted(row):
@@ -837,7 +889,7 @@ if df_hourly[["Chat Vol","Email Vol"]].fillna(0).sum().sum() == 0:
     st.info("No activity for the selected day.")
 else:
     show_breakdown = st.checkbox("Show Chat & Email lines", value=False)
-    show_agents    = st.checkbox("Overlay available agents (bars)", value=True)
+    show_avail     = st.checkbox("Overlay available minutes (bars)", value=True)
 
     # Weighted SLA line
     weighted_line = (
@@ -851,8 +903,8 @@ else:
                 alt.Tooltip("Weighted SLA:Q", format=".1f"),
                 alt.Tooltip("Chat Vol:Q", title="Chat Vol", format=".0f"),
                 alt.Tooltip("Email Vol:Q", title="Email Vol", format=".0f"),
-                alt.Tooltip("Chat Agents:Q", title="Chat Agents", format=".0f"),
-                alt.Tooltip("Email Agents:Q", title="Email Agents", format=".0f"),
+                alt.Tooltip("Chat Avail (min):Q", title="Chat Avail (min)", format=".0f"),
+                alt.Tooltip("Email Avail (min):Q", title="Email Avail (min)", format=".0f"),
             ],
         )
     )
@@ -881,16 +933,15 @@ else:
         )
         layers += [chat_line, email_line]
 
-    # Optional agents bars (right axis)
-    if show_agents:
-        # Sum both channels (or choose one) – here we show both bars side-by-side
+    # Optional available-minute bars (right axis)
+    if show_avail:
         bars_chat = (
             alt.Chart(df_hourly)
             .mark_bar(opacity=0.25, color="#0EA5E9")
             .encode(
                 x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-                y=alt.Y("Chat Agents:Q",
-                        title="Agents Available",
+                y=alt.Y("Chat Avail (min):Q",
+                        title="Available Minutes",
                         axis=alt.Axis(orient="right"),
                         scale=alt.Scale(nice=True)),
             )
@@ -900,8 +951,8 @@ else:
             .mark_bar(opacity=0.25, color="#EF4444")
             .encode(
                 x=alt.X("Hour:T"),
-                y=alt.Y("Email Agents:Q",
-                        title="Agents Available",
+                y=alt.Y("Email Avail (min):Q",
+                        title="Available Minutes",
                         axis=alt.Axis(orient="right"),
                         scale=alt.Scale(nice=True)),
             )
@@ -929,15 +980,18 @@ else:
 
     with st.expander("View hourly table"):
         show_cols = ["Hour", "Chat SLA", "Chat Vol", "Email SLA", "Email Vol",
-                     "Chat Agents", "Email Agents", "Weighted SLA"]
+                     "Chat Avail (min)", "Email Avail (min)", "Weighted SLA"]
         st.dataframe(
             df_hourly[show_cols].style.format({
                 "Chat SLA": "{:.1f}",
                 "Email SLA": "{:.1f}",
                 "Weighted SLA": "{:.1f}",
+                "Chat Avail (min)": "{:.0f}",
+                "Email Avail (min)": "{:.0f}",
             }),
             use_container_width=True
         )
+
 
 
 
