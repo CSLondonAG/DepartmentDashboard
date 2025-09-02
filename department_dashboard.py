@@ -37,9 +37,7 @@ st.markdown("""
 CHAT_RESCALE_K       = 0.4167  # Chat: (chat_raw / 0.4167) * 80 -> perfect ≈ 96
 EMAIL_RESCALE_K      = 0.50    # Email: (email_raw / 0.50) * 80 -> perfect ≈ 96
 SLA_SCALE            = 80.0
-
-# Chat target for “no penalty” wait (minutes)
-CHAT_TARGET_WAIT_MIN = 1.0
+CHAT_TARGET_WAIT_MIN = 1.0     # “no penalty” wait threshold in minutes
 
 # =========================
 # Helpers
@@ -76,9 +74,9 @@ def get_sla_score_color(score):
     elif score >= 70: return "#FFC107"
     else: return "#F44336"
 
-# --- Survey color helpers (your thresholds) ---
+# --- Survey color helpers ---
 def get_csat_color_pct(v):
-    if v is None or pd.isna(v): return "#9E9E9E"  # grey if missing
+    if v is None or pd.isna(v): return "#9E9E9E"
     return "#F44336" if v < 70 else "#4CAF50"
 
 def get_nps_color(v):
@@ -91,7 +89,6 @@ def get_fcr_color_pct(v):
 
 # Interval helpers
 def merge_intervals(ints):
-    """Merge overlapping intervals [(s,e),...] -> disjoint, sorted."""
     if not ints: return []
     ints = sorted(ints, key=lambda x: x[0])
     out = [list(ints[0])]
@@ -110,7 +107,6 @@ def sum_secs(ints):
     return sum((e - s).total_seconds() for s, e in ints)
 
 def intersect_sum(h_ints, a_ints):
-    """Sum of intersections between two interval lists."""
     h = merge_intervals(h_ints)
     a = merge_intervals(a_ints)
     i = j = 0
@@ -177,7 +173,6 @@ if survey_path.exists():
     )
     survey_q.columns = survey_q.columns.str.strip()
 
-    # Ensure required columns exist
     req_cols = {"Survey Taker: ID", "Survey Taker: Created Date",
                 "Survey Question: Survey", "Survey Question: Question Title", "Response"}
     if req_cols.issubset(set(survey_q.columns)):
@@ -207,16 +202,14 @@ if survey_path.exists():
 # Sidebar: Date Range (from chat.csv)
 # =========================
 st.sidebar.header("Filter Options")
-# Quick maintenance: clear cache button
+
 if st.sidebar.button("🧹 Clear cache & rerun"):
     try:
         st.cache_data.clear()
         st.cache_resource.clear()
     finally:
-        try:
-            st.rerun()
-        except Exception:
-            st.experimental_rerun()
+        try: st.rerun()
+        except Exception: st.experimental_rerun()
 
 min_date = chat_sla_df["Date/Time Opened"].dt.date.min()
 max_date = chat_sla_df["Date/Time Opened"].dt.date.max()
@@ -260,7 +253,7 @@ avg_resp_hrs  = email_sla_p["Elapsed Time (Hours)"].mean() if len(email_sla_p) e
 avg_resp_secs = avg_resp_hrs * 3600
 
 # =========================
-# Availability & Handling (Proportional split of Available_All)
+# Availability & Handling (Proportional split for overall utilization)
 # =========================
 window_start = datetime.combine(start_date, datetime.min.time())
 window_end   = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
@@ -268,9 +261,9 @@ window_end   = datetime.combine(end_date + timedelta(days=1), datetime.min.time(
 presence_win = df_presence[(df_presence["Start DT"] < window_end) &
                            (df_presence["End DT"]   > window_start)].copy()
 
-chat_only_map  = {}  # Available_Chat
-email_only_map = {}  # Available_Email_and_Web
-shared_map     = {}  # Available_All
+chat_only_map  = {}
+email_only_map = {}
+shared_map     = {}
 
 for ag, grp in presence_win.groupby("Created By: Full Name"):
     co, eo, sh = [], [], []
@@ -301,14 +294,13 @@ for ag, grp in email_df.groupby("User: Full Name"):
     ints = [x for x in ints if x]
     if ints: email_handles_map[ag] = merge_intervals(ints)
 
-# Numerators and proportional denominators
+# Numerators and proportional denominators for utilization tiles
 dept_chat_handle  = 0.0
 dept_email_handle = 0.0
 dept_chat_avail   = 0.0
 dept_email_avail  = 0.0
 
 agents = set(chat_only_map) | set(email_only_map) | set(shared_map) | set(chat_handles_map) | set(email_handles_map)
-
 for ag in agents:
     co = chat_only_map.get(ag, [])
     eo = email_only_map.get(ag, [])
@@ -460,7 +452,7 @@ st.altair_chart((chart + labels + rule + rule_lb).properties(width=700, height=3
                 use_container_width=True)
 
 # =========================
-# Customer Feedback Section
+# Customer Feedback Section (CSAT / NPS / FCR)
 # =========================
 if survey is not None:
     survey_period = survey[
@@ -472,7 +464,7 @@ if survey is not None:
         st.markdown("---")
         st.subheader("Customer Feedback")
 
-        # --- Overall KPIs ---
+        # Overall KPIs
         total_surveys = len(survey_period)
         csat_overall  = survey_period["CSAT%"].mean() if survey_period["CSAT%"].notna().any() else None
         nps_overall   = _nps_from_0_10(survey_period["NPS_raw"]) if survey_period["NPS_raw"].notna().any() else None
@@ -499,7 +491,7 @@ if survey is not None:
             get_fcr_color_pct(fcr_overall)
         )
 
-        # --- Per-channel tiles ---
+        # Per-channel tiles
         survey_period["ChanSimple"] = survey_period["Channel"].map(
             lambda x: "Email" if "Email" in str(x) else "Chat" if "Chat" in str(x) else "Other"
         )
@@ -531,7 +523,7 @@ if survey is not None:
                     get_csat_color_pct(row.CSAT_pct)
                 )
 
-        # --- CSAT & NPS Trend (dual-axis lines; cleaned) ---
+        # CSAT & NPS Trend (dual-axis)
         daily_survey = (
             survey_period
             .assign(Date=survey_period["Survey Date"].dt.normalize())
@@ -550,7 +542,6 @@ if survey is not None:
             x_enc = alt.X("Date:T", title="Period", axis=alt.Axis(format="%d %b", labelAngle=45))
             hover = alt.selection_point(on="mouseover", fields=["Date"], nearest=True, empty=False)
 
-            # Lines (only these draw axes)
             csat_line = (
                 base.mark_line(strokeWidth=3, color="#2563eb")
                 .encode(
@@ -582,7 +573,6 @@ if survey is not None:
                 )
             )
 
-            # Points (share scales, no axes)
             csat_points = (
                 base.mark_point(filled=True, color="#2563eb")
                 .encode(
@@ -611,7 +601,6 @@ if survey is not None:
                 .add_params(hover)
             )
 
-            # Zero line for NPS (no axis)
             nps_zero_rule = (
                 alt.Chart(pd.DataFrame({"zero": [0]}))
                 .mark_rule(strokeDash=[6, 4], color="#9ca3af", opacity=0.6)
@@ -647,14 +636,13 @@ if survey is not None:
             )
 
             st.altair_chart(trend, use_container_width=True)
-
     else:
         st.info("No survey responses in the selected date range.")
 else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
 
 # =========================
-# Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
+# Hourly Weighted SLA (selected day) + Combined Available Minutes + Logged-in Agents
 # =========================
 st.markdown("---")
 st.subheader("⏱️ Hourly Weighted SLA (selected day)")
@@ -691,9 +679,10 @@ def _sum_secs(ints):
 
 def compute_hourly_available_minutes_and_logged_in(sel_date: datetime.date) -> pd.DataFrame:
     """
-    Returns per-hour:
-      - Chat Avail (min), Email Avail (min) using proportional split of Available_All
-      - Logged In Agents (count of distinct agents with ANY presence segment overlapping hour)
+    Per hour:
+      - Avail (min) = sum of minutes all agents were in any 'available' presence
+                      (Available_Chat, Available_Email_and_Web, Available_All)
+      - Logged In Agents = distinct agents with ANY presence overlapping that hour
     """
     day_start = datetime.combine(sel_date, datetime.min.time())
     day_end   = day_start + timedelta(days=1)
@@ -702,55 +691,29 @@ def compute_hourly_available_minutes_and_logged_in(sel_date: datetime.date) -> p
                            (df_presence["End DT"]   > day_start)].copy()
 
     hours = pd.date_range(day_start, day_end, freq="H", inclusive="left").to_pydatetime().tolist()
-    chat_secs_per_hour   = {h: 0.0 for h in hours}
-    email_secs_per_hour  = {h: 0.0 for h in hours}
+    avail_secs_per_hour  = {h: 0.0 for h in hours}
     logged_sets_per_hour = {h: set() for h in hours}
 
     if pres_day.empty:
         return pd.DataFrame({
             "Hour": hours,
-            "Chat Avail (min)": 0.0,
-            "Email Avail (min)": 0.0,
+            "Avail (min)": 0.0,
             "Logged In Agents": 0
         })
 
-    # Proportional split ratio per agent for the day (from handled intervals)
-    items_day = df_items[(df_items["Start DT"] < day_end) &
-                         (df_items["End DT"]   > day_start)].copy()
-    ratios = {}  # agent -> chat_share (0..1)
-    if not items_day.empty:
-        items_day["s_clip"] = items_day["Start DT"].apply(lambda x: max(x, day_start))
-        items_day["e_clip"] = items_day["End DT"].apply(lambda x: min(x, day_end))
-        items_day = items_day[items_day["e_clip"] > items_day["s_clip"]].copy()
-
-        for ag, grp in items_day.groupby("User: Full Name"):
-            chat_ints, email_ints = [], []
-            for _, r in grp.iterrows():
-                seg = (r["s_clip"].to_pydatetime(), r["e_clip"].to_pydatetime())
-                if r["Service Channel: Developer Name"] == "sfdc_liveagent":
-                    chat_ints.append(seg)
-                elif r["Service Channel: Developer Name"] == "casesChannel":
-                    email_ints.append(seg)
-            ch = _sum_secs(_merge_intervals(chat_ints))
-            em = _sum_secs(_merge_intervals(email_ints))
-            tot = ch + em
-            ratios[ag] = (ch / tot) if tot > 0 else 0.5
-    default_ratio = 0.5
-
-    CHAT_STAT  = {"Available_Chat"}
-    EMAIL_STAT = {"Available_Email_and_Web"}
-    SHARED     = {"Available_All"}
+    AVAILABLE_STATUSES = {"Available_Chat", "Available_Email_and_Web", "Available_All"}
 
     # Walk each presence row; allocate overlapped seconds into hour bins
     for _, r in pres_day.iterrows():
         seg = _clip(r["Start DT"].to_pydatetime(), r["End DT"].to_pydatetime(), day_start, day_end)
         if not seg:
             continue
+
         stt, end = seg
         agent  = str(r["Created By: Full Name"])
         status = str(r["Service Presence Status: Developer Name"])
-        split  = ratios.get(agent, default_ratio)  # chat share for shared segments
 
+        # Step across each hour overlapped by this segment
         h = stt.replace(minute=0, second=0, microsecond=0)
         while h < end:
             hour_start = h
@@ -759,27 +722,21 @@ def compute_hourly_available_minutes_and_logged_in(sel_date: datetime.date) -> p
             if o:
                 o_s, o_e = o
                 dur = (o_e - o_s).total_seconds()
-                # Any presence = logged in
                 logged_sets_per_hour[hour_start].add(agent)
 
-                if status in CHAT_STAT:
-                    chat_secs_per_hour[hour_start] += dur
-                elif status in EMAIL_STAT:
-                    email_secs_per_hour[hour_start] += dur
-                elif status in SHARED:
-                    chat_secs_per_hour[hour_start]  += dur * split
-                    email_secs_per_hour[hour_start] += dur * (1.0 - split)
+                if status in AVAILABLE_STATUSES:
+                    avail_secs_per_hour[hour_start] += dur
+
             h = hour_end
 
     return pd.DataFrame({
         "Hour": hours,
-        "Chat Avail (min)":  [chat_secs_per_hour[h]  / 60.0 for h in hours],
-        "Email Avail (min)": [email_secs_per_hour[h] / 60.0 for h in hours],
-        "Logged In Agents":  [len(logged_sets_per_hour[h])   for h in hours],
+        "Avail (min)":  [avail_secs_per_hour[h] / 60.0 for h in hours],
+        "Logged In Agents": [len(logged_sets_per_hour[h]) for h in hours],
     })
 
 def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
-    """Return one row per hour: Chat/Email SLA, volumes, available minutes, logged-in agents, Weighted SLA."""
+    """Return one row per hour: Chat/Email SLA, volumes, combined available minutes, logged-in agents, Weighted SLA."""
     day_start = datetime.combine(sel_date, datetime.min.time())
     day_end   = day_start + timedelta(days=1)
 
@@ -842,7 +799,7 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
            .reset_index()
     )
 
-    # Available minutes + logged-in agents
+    # Combined available minutes + logged-in agents
     avail_df = compute_hourly_available_minutes_and_logged_in(sel_date)
     out = out.merge(avail_df, on="Hour", how="left")
 
@@ -880,8 +837,7 @@ else:
                 alt.Tooltip("Weighted SLA:Q", format=".1f"),
                 alt.Tooltip("Chat Vol:Q", title="Chat Vol", format=".0f"),
                 alt.Tooltip("Email Vol:Q", title="Email Vol", format=".0f"),
-                alt.Tooltip("Chat Avail (min):Q", title="Chat Avail (min)", format=".0f"),
-                alt.Tooltip("Email Avail (min):Q", title="Email Avail (min)", format=".0f"),
+                alt.Tooltip("Avail (min):Q", title="Available (min)", format=".0f"),
                 alt.Tooltip("Logged In Agents:Q", title="Logged In Agents", format=".0f"),
             ],
         )
@@ -911,31 +867,22 @@ else:
         )
         layers += [chat_line, email_line]
 
-    # Optional available-minute bars (right axis)
+    # Single available-minute bars (right axis)
     if show_avail:
-        bars_chat = (
+        bars_avail = (
             alt.Chart(df_hourly)
-            .mark_bar(opacity=0.25, color="#0EA5E9")
+            .mark_bar(opacity=0.28, color="#8B5CF6")  # violet
             .encode(
                 x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-                y=alt.Y("Chat Avail (min):Q",
-                        title="Available Minutes",
-                        axis=alt.Axis(orient="right"),
-                        scale=alt.Scale(nice=True)),
+                y=alt.Y(
+                    "Avail (min):Q",
+                    title="Available Minutes",
+                    axis=alt.Axis(orient="right"),
+                    scale=alt.Scale(nice=True)
+                ),
             )
         )
-        bars_email = (
-            alt.Chart(df_hourly)
-            .mark_bar(opacity=0.25, color="#EF4444")
-            .encode(
-                x=alt.X("Hour:T"),
-                y=alt.Y("Email Avail (min):Q",
-                        title="Available Minutes",
-                        axis=alt.Axis(orient="right"),
-                        scale=alt.Scale(nice=True)),
-            )
-        )
-        layers += [bars_chat, bars_email]
+        layers += [bars_avail]
 
     # Target line
     target_val = 85
@@ -996,14 +943,13 @@ else:
 
     with st.expander("View hourly table"):
         show_cols = ["Hour", "Chat SLA", "Chat Vol", "Email SLA", "Email Vol",
-                     "Chat Avail (min)", "Email Avail (min)", "Logged In Agents", "Weighted SLA"]
+                     "Avail (min)", "Logged In Agents", "Weighted SLA"]
         st.dataframe(
             df_hourly[show_cols].style.format({
                 "Chat SLA": "{:.1f}",
                 "Email SLA": "{:.1f}",
                 "Weighted SLA": "{:.1f}",
-                "Chat Avail (min)": "{:.0f}",
-                "Email Avail (min)": "{:.0f}",
+                "Avail (min)": "{:.0f}",
                 "Logged In Agents": "{:.0f}",
             }),
             use_container_width=True
