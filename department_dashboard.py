@@ -973,40 +973,46 @@ else:
         .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2, 3])\
         .configure_view(stroke="#d1d5db", fill="white")
 
-    # Separate bar chart for Logged In Agents (clean axis, no unit collision)
-    agents_chart = (
-        alt.Chart(df_hourly)
-        .mark_bar(color="#6B7280", opacity=0.6)
-        .encode(
-            x=alt.X("Hour:T", title="Hour", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-            y=alt.Y("Logged In Agents:Q", title="Logged In Agents"),
-            tooltip=[
-                alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-                alt.Tooltip("Logged In Agents:Q", format=".0f"),
-            ],
-        )
-        .properties(width=900, height=120, title="Logged In Agents per Hour")
-        .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2, 3])
-        .configure_view(stroke="#d1d5db", fill="white")
+   # --- Logged In Agents per Hour (bigger, clearer) ---
+max_agents = int((df_hourly["Logged In Agents"].max() or 0) + 1)
+
+agents_chart = (
+    alt.Chart(df_hourly)
+    .mark_bar(color="#6B7280", opacity=0.70)
+    .encode(
+        x=alt.X(
+            "Hour:T",
+            title="Hour",
+            axis=alt.Axis(format="%H:%M", labelAngle=-45, labelLimit=140)
+        ),
+        y=alt.Y(
+            "Logged In Agents:Q",
+            title="Logged In Agents",
+            scale=alt.Scale(domain=[0, max_agents])  # keeps bars tall & readable
+        ),
+        tooltip=[
+            alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
+            alt.Tooltip("Logged In Agents:Q", format=".0f"),
+        ],
     )
+    .properties(
+        width=900,
+        height=220,  # was 120 — larger for clarity
+        title="Logged In Agents per Hour"
+    )
+    .configure_axis(
+        grid=True,
+        gridColor="#e5e7eb",
+        gridDash=[2, 3]
+    )
+    .configure_view(
+        stroke="#d1d5db",
+        fill="white"
+    )
+)
 
-    st.altair_chart(combined_top, use_container_width=True)
-    st.altair_chart(agents_chart,  use_container_width=True)
+st.altair_chart(agents_chart, use_container_width=True)
 
-    with st.expander("View hourly table"):
-        show_cols = ["Hour", "Chat SLA", "Chat Vol", "Email SLA", "Email Vol",
-                     "Chat Avail (min)", "Email Avail (min)", "Logged In Agents", "Weighted SLA"]
-        st.dataframe(
-            df_hourly[show_cols].style.format({
-                "Chat SLA": "{:.1f}",
-                "Email SLA": "{:.1f}",
-                "Weighted SLA": "{:.1f}",
-                "Chat Avail (min)": "{:.0f}",
-                "Email Avail (min)": "{:.0f}",
-                "Logged In Agents": "{:.0f}",
-            }),
-            use_container_width=True
-        )
 
 
 
