@@ -142,6 +142,73 @@ def _nps_from_0_10(series: pd.Series) -> Optional[float]:
     return promoters - detractors  # -100..100
 
 # =========================
+# Wide -> Tidy shifts.csv normalizer
+# =========================
+def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert a wide shifts matrix:
+        Name | 01/06/2025 | 02/06/2025 | ... (cells like '7:00 AM - 4:00 PM')
+    into a tidy dataframe with columns:
+        Agent, Date, Shift Start (datetime), Shift End (datetime)
+
+    - Accepts '-', '–', '—' between times
+    - Skips blanks/OFF cells
+    - Handles overnight (end <= start → +1 day)
+    """
+    if df_raw is None or df_raw.empty:
+        return pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
+
+    cols = list(df_raw.columns)
+
+    # Identify date columns (headers like 01/06/2025 etc.)
+    date_cols = []
+    date_map = {}
+    for c in cols:
+        d = pd.to_datetime(c, errors="coerce", dayfirst=True)
+        if isinstance(d, pd.Timestamp) and not pd.isna(d):
+            date_cols.append(c)
+            date_map[c] = d.date()
+
+    if not date_cols:
+        return pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
+
+    # Assume first non-date column is the agent name
+    name_col = next((c for c in cols if c not in date_cols), cols[0])
+
+    long = (
+        df_raw.melt(id_vars=[name_col], value_vars=date_cols,
+                    var_name="DateStr", value_name="Range")
+             .rename(columns={name_col: "Agent"})
+    )
+    long["Date"] = long["DateStr"].map(date_map)
+    long["Range"] = long["Range"].astype(str).str.strip()
+
+    # Drop blanks / OFF / NA
+    off_mask = long["Range"].str.fullmatch(r"(?i)\s*(off|off day|offday|na|nan|-|—|–)?\s*")
+    long = long[~off_mask.fillna(True)]
+
+    # Parse time ranges like "7:00 AM - 4:00 PM" (allow -, –, —)
+    rgx = re.compile(r"^\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*[-–—]\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*$")
+
+    def _parse_range(s, d):
+        m = rgx.match(s or "")
+        if not m:
+            return (pd.NaT, pd.NaT)
+        t1, t2 = m.group(1), m.group(2)
+        start_dt = pd.to_datetime(f"{d} {t1}", errors="coerce", dayfirst=True)
+        end_dt   = pd.to_datetime(f"{d} {t2}", errors="coerce", dayfirst=True)
+        if pd.notna(start_dt) and pd.notna(end_dt) and end_dt <= start_dt:
+            end_dt = end_dt + pd.Timedelta(days=1)
+        return (start_dt, end_dt)
+
+    parsed = long.apply(lambda r: pd.Series(_parse_range(r["Range"], r["Date"])), axis=1)
+    long["Shift Start"] = pd.to_datetime(parsed[0], errors="coerce")
+    long["Shift End"]   = pd.to_datetime(parsed[1], errors="coerce")
+
+    tidy = long.dropna(subset=["Shift Start", "Shift End"])[["Agent", "Date", "Shift Start", "Shift End"]]
+    return tidy.reset_index(drop=True)
+
+# =========================
 # Load Data
 # =========================
 BASE_DIR   = Path(__file__).parent
@@ -155,7 +222,11 @@ if not chat_path.exists() or not email_path.exists():
 
 df_items     = pd.read_csv("report_items.csv",    dayfirst=True, parse_dates=["Start DT","End DT"])
 df_presence  = pd.read_csv("report_presence.csv", dayfirst=True, parse_dates=["Start DT","End DT"])
-df_shifts    = pd.read_csv("shifts.csv")
+
+# normalize shifts
+df_shifts_raw = pd.read_csv("shifts.csv")
+df_shifts     = normalize_wide_shifts(df_shifts_raw)
+
 chat_sla_df  = pd.read_csv(chat_path,  dayfirst=True, parse_dates=["Date/Time Opened"])
 email_sla_df = pd.read_csv(email_path, dayfirst=True, parse_dates=["Date/Time Opened","Completion Date"])
 
@@ -454,7 +525,7 @@ st.altair_chart((chart + labels + rule + rule_lb).properties(width=700, height=3
 # =========================
 # Customer Feedback Section (CSAT / NPS / FCR)
 # =========================
-survey = survey  # (already built if survey.csv present)
+survey = survey  # already built if survey.csv present
 if survey is not None:
     survey_period = survey[
         (survey["Survey Date"].dt.date >= start_date) &
@@ -926,11 +997,11 @@ def _to_dt(series):
 
 def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day: datetime.date) -> pd.DataFrame:
     """
-    For each agent scheduled on `day` (from shifts.csv), show:
+    For each agent scheduled on `day` (from shifts.csv normalized), show:
       - Scheduled Shift Start / End (HH:MM)  [from shifts.csv]
       - Lunch Start / End (from presence where status == busy_lunch)
       - Total Shift (scheduled overlap minus busy_lunch overlap), as mm:ss
-      - Logged-in (within scheduled window), Available (within scheduled), Adherence %, Availability %
+      - Logged-in (within scheduled), Available (within scheduled), Adherence %, Availability %
       - First Login / Last Logout (within day), Late Start / Early Finish (mins) vs scheduled
     """
     if df_shifts is None or df_shifts.empty:
@@ -941,13 +1012,13 @@ def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day
         ])
 
     cols = list(df_shifts.columns)
-    # Detect columns in shifts.csv
-    name_col  = _find_col(cols, ["Agent","User: Full Name","Full Name","Name","Created By: Full Name"], contains_all=["name"])
+    # Detect columns in normalized shifts.csv
+    name_col  = _find_col(cols, ["Agent","User: Full Name","Full Name","Name","Created By: Full Name"], contains_all=["agent","name"])
     if not name_col:
-        name_col = cols[0]
-    date_col  = _find_col(cols, ["Date","Shift Date","Scheduled Date"], contains_all=["date"])
-    start_col = _find_col(cols, ["Shift Start","Start Time","Start","Shift Start Time"], contains_all=["start"], exclude=["lunch"])
-    end_col   = _find_col(cols, ["Shift End","End Time","End","Shift End Time"], contains_all=["end"], exclude=["lunch"])
+        name_col = "Agent"
+    date_col  = _find_col(cols, ["Date"], contains_all=["date"])
+    start_col = _find_col(cols, ["Shift Start"], contains_all=["shift","start"])
+    end_col   = _find_col(cols, ["Shift End"], contains_all=["shift","end"])
 
     df = df_shifts.copy()
     df["_shift_start"] = _to_dt(df[start_col]) if start_col else pd.NaT
@@ -977,44 +1048,33 @@ def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day
     # Presence for the day
     pres_day = df_presence[(df_presence["Start DT"] < day_end) &
                            (df_presence["End DT"]   > day_start)].copy()
-    pres_day["__status_norm"] = pres_day["Service Presence Status: Developer Name"].astype(str).str.strip().str.lower().str.replace(" ", "_")
+    pres_day["__status_norm"] = pres_day["Service Presence Status: Developer Name"].astype(str)\
+                                    .str.strip().str.lower().str.replace(" ", "_")
     AVAILABLE_STATUSES = {"available_chat","available_email_and_web","available_all"}
 
     rows = []
     for _, r in df.iterrows():
         agent = str(r[name_col])
 
-        # Original schedule times for display
-        disp_start = r["_shift_start"]
-        disp_end   = r["_shift_end"]
+        s_sched = r["_shift_start"]; e_sched = r["_shift_end"]
+        if pd.isna(s_sched) and pd.isna(e_sched):
+            s_sched, e_sched = day_start, day_end
 
-        # For calculations: use schedule if present; otherwise treat as zero scheduled (no times)
-        has_sched = pd.notna(r["_shift_start"]) and pd.notna(r["_shift_end"])
-        if has_sched:
-            sched_s = max(r["_shift_start"], day_start)
-            sched_e = min(r["_shift_end"],   day_end)
-            if sched_e <= sched_s:
-                # degenerate
-                sched_secs = 0.0
-            else:
-                sched_secs = (sched_e - sched_s).total_seconds()
-        else:
-            sched_s = None
-            sched_e = None
-            sched_secs = 0.0
+        sched_clip_s = max(s_sched, day_start) if pd.notna(s_sched) else day_start
+        sched_clip_e = min(e_sched, day_end)   if pd.notna(e_sched) else day_end
+        if sched_clip_e <= sched_clip_s:
+            continue
 
-        # Agent presence rows
+        sched_secs = (sched_clip_e - sched_clip_s).total_seconds()
+
+        # Agent presence for the day
         pa = pres_day[pres_day["Created By: Full Name"].astype(str) == agent]
 
-        # Logged-in intervals (ANY presence status) within scheduled window if available, else within day
         def _clip_to_sched(s, e):
-            if sched_s is None or sched_e is None:
-                # No schedule times -> clip to day only
-                cs, ce = max(s, day_start), min(e, day_end)
-            else:
-                cs, ce = max(s, sched_s), min(e, sched_e)
+            cs, ce = max(s, sched_clip_s), min(e, sched_clip_e)
             return (cs, ce) if ce > cs else None
 
+        # Logged-in intervals (any presence)
         logged_ints = []
         for _, pr in pa.iterrows():
             seg = _clip_to_sched(pr["Start DT"].to_pydatetime(), pr["End DT"].to_pydatetime())
@@ -1022,7 +1082,7 @@ def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day
         logged_ints = merge_intervals(logged_ints)
         logged_secs = sum((e - s).total_seconds() for s, e in logged_ints)
 
-        # Available intervals (available_* statuses) within scheduled (or day if no schedule)
+        # Available intervals
         avail_ints = []
         for _, pr in pa[pa["__status_norm"].isin(AVAILABLE_STATUSES)].iterrows():
             seg = _clip_to_sched(pr["Start DT"].to_pydatetime(), pr["End DT"].to_pydatetime())
@@ -1030,7 +1090,7 @@ def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day
         avail_ints = merge_intervals(avail_ints)
         avail_secs = sum((e - s).total_seconds() for s, e in avail_ints)
 
-        # Lunch from presence busy_lunch within scheduled (or day if no schedule)
+        # Lunch from presence = busy_lunch (case-insensitive)
         lunch_rows = pa[pa["__status_norm"] == "busy_lunch"]
         lunch_ints = []
         for _, lr in lunch_rows.iterrows():
@@ -1038,14 +1098,9 @@ def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day
             if seg: lunch_ints.append(seg)
         lunch_ints = merge_intervals(lunch_ints)
         lunch_secs = sum((e - s).total_seconds() for s, e in lunch_ints)
-        if lunch_ints:
-            lunch_start = min(s for s, _ in lunch_ints)
-            lunch_end   = max(e for _, e in lunch_ints)
-        else:
-            lunch_start = None
-            lunch_end   = None
+        lunch_start = min((s for s, _ in lunch_ints), default=None)
+        lunch_end   = max((e for _, e in lunch_ints), default=None)
 
-        # Total shift = scheduled overlap minus busy_lunch
         total_shift_net_secs = max(sched_secs - lunch_secs, 0.0)
 
         # First login / last logout (within day)
@@ -1058,39 +1113,31 @@ def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day
         first_login = min((s for s, _ in all_pres_ints), default=None)
         last_logout = max((e for _, e in all_pres_ints), default=None)
 
-        # Late start & early finish (mins) vs scheduled
-        if has_sched and first_login:
-            late_start_min = max((first_login - sched_s).total_seconds() / 60.0, 0.0)
-        else:
-            late_start_min = None
-        if has_sched and last_logout:
-            early_finish_min = max((sched_e - last_logout).total_seconds() / 60.0, 0.0)
-        else:
-            early_finish_min = None
+        # Late start / early finish vs scheduled (mins)
+        late_start_min  = max(((first_login - sched_clip_s).total_seconds()/60.0), 0.0) if first_login else None
+        early_finish_min= max(((sched_clip_e - last_logout).total_seconds()/60.0), 0.0) if last_logout else None
 
-        # Adherence & Availability %
         adher_pct = (logged_secs / sched_secs * 100.0) if sched_secs > 0 else None
         avail_pct = (avail_secs  / sched_secs * 100.0) if sched_secs > 0 else None
 
         rows.append({
-            "Agent":             agent,
-            "Shift Start":       ("—" if pd.isna(disp_start) else pd.to_datetime(disp_start).strftime("%H:%M")),
-            "Lunch Start":       ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
-            "Lunch End":         ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
-            "Shift End":         ("—" if pd.isna(disp_end)   else pd.to_datetime(disp_end).strftime("%H:%M")),
-            "Total Shift":       fmt_mmss(total_shift_net_secs),
-            "Logged-in (min)":   round(logged_secs/60.0, 1) if logged_secs else 0.0,
-            "Available (min)":   round(avail_secs/60.0, 1)  if avail_secs  else 0.0,
-            "Adherence %":       (round(adher_pct, 1) if adher_pct is not None else None),
-            "Availability %":    (round(avail_pct, 1) if avail_pct is not None else None),
-            "First Login":       ("—" if first_login is None else first_login.strftime("%H:%M")),
-            "Last Logout":       ("—" if last_logout is None else last_logout.strftime("%H:%M")),
-            "Late Start (min)":  (round(late_start_min, 1) if late_start_min is not None else None),
-            "Early Finish (min)":(round(early_finish_min,1) if early_finish_min is not None else None),
+            "Agent":               agent,
+            "Shift Start":         ("—" if pd.isna(s_sched) else pd.to_datetime(s_sched).strftime("%H:%M")),
+            "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
+            "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
+            "Shift End":           ("—" if pd.isna(e_sched) else pd.to_datetime(e_sched).strftime("%H:%M")),
+            "Total Shift":         fmt_mmss(total_shift_net_secs),
+            "Logged-in (min)":     round(logged_secs/60.0, 1) if logged_secs else 0.0,
+            "Available (min)":     round(avail_secs/60.0, 1)  if avail_secs  else 0.0,
+            "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
+            "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),
+            "First Login":         ("—" if first_login is None else first_login.strftime("%H:%M")),
+            "Last Logout":         ("—" if last_logout is None else last_logout.strftime("%H:%M")),
+            "Late Start (min)":    (round(late_start_min, 1) if late_start_min is not None else None),
+            "Early Finish (min)":  (round(early_finish_min,1) if early_finish_min is not None else None),
         })
 
     out = pd.DataFrame(rows)
-    # Sort by visible shift start (missing at bottom) then agent
     sort_key = pd.to_datetime(out["Shift Start"], format="%H:%M", errors="coerce")
     out = out.assign(_sort=sort_key).sort_values(["_sort","Agent"]).drop(columns=["_sort"]).reset_index(drop=True)
     return out
