@@ -48,6 +48,14 @@ def fmt_mmss(sec):
     m, s = divmod(int(sec), 60)
     return f"{m:02}:{s:02}"
 
+def fmt_hhmm(sec):
+    """Format seconds as HH:MM, zero-padded."""
+    if sec is None or pd.isna(sec): return "–"
+    sec = int(round(sec))
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    return f"{h:02}:{m:02}"
+
 def fmt_hms(sec):
     if sec is None or pd.isna(sec): return "–"
     h, rem = divmod(int(sec), 3600)
@@ -159,7 +167,8 @@ def _norm_status_key(s: str) -> str:
     if s is None:
         return ""
     s = unicodedata.normalize("NFKD", str(s))
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = "".join(ch for ch in s if not pd.api.types.is_integer(ch) and not unicodedata.combining(ch))
+    s = unicodedata.normalize("NFKD", s)  # ensure normalization
     s = re.sub(r"[^a-z]+", "_", s.lower()).strip("_")
     return s
 
@@ -260,7 +269,7 @@ if survey_path.exists():
         parse_dates=["Survey Taker: Created Date"],
         low_memory=False
     )
-    survey_q.columns = survey_q.columns.stripped = survey_q.columns.str.strip()
+    survey_q.columns = survey_q.columns.str.strip()
 
     req_cols = {"Survey Taker: ID", "Survey Taker: Created Date",
                 "Survey Question: Survey", "Survey Question: Question Title", "Response"}
@@ -269,18 +278,6 @@ if survey_path.exists():
         is_nps  = qtitle.str.contains("recommend", na=False) | qtitle.str.contains("likely", na=False)
         is_csat = qtitle.str.contains("satisfied",  na=False)
         is_fcr  = qtitle.str.contains("resolved",   na=False)
-
-        def _leading_int(x) -> Optional[int]:
-            if pd.isna(x): return None
-            m = re.search(r"\d+", str(x))
-            return int(m.group()) if m else None
-
-        def _bool_yes_no(x) -> Optional[bool]:
-            if pd.isna(x): return None
-            s = str(x).strip().lower()
-            if s in ("yes","y","true","1"): return True
-            if s in ("no","n","false","0"): return False
-            return None
 
         survey_q["NPS_raw"]   = survey_q["Response"].where(is_nps).apply(_leading_int)
         survey_q["CSAT_1_5"]  = survey_q["Response"].where(is_csat).apply(_leading_int)
@@ -1020,7 +1017,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
     For each agent scheduled overlapping `day` (from normalized shifts.csv), show:
       - Scheduled Shift Start / End (HH:MM)
       - Lunch Start / End (from presence where status contains 'lunch')
-      - Total Shift (scheduled minutes), Logged-in/Available within scheduled,
+      - Total Shift (scheduled hh:mm), Logged-in/Available (hh:mm) within scheduled,
         Adherence %, Availability %,
       - Login / Logout (AVAILABLE statuses only, full day),
       - Late/Early mins (based on ANY presence),
@@ -1030,7 +1027,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
     if df_shifts_tidy is None or df_shifts_tidy.empty:
         return pd.DataFrame(columns=[
             "Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift",
-            "Logged-in (min)","Available (min)","Adherence %","Availability %",
+            "Logged-in (hh:mm)","Available (hh:mm)","Adherence %","Availability %",
             "Login","Logout","Late Start (min)","Early Finish (min)",
             "_shift_start_dt","_lunch_start_dt"
         ])
@@ -1047,7 +1044,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
     if sched.empty:
         return pd.DataFrame(columns=[
             "Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift",
-            "Logged-in (min)","Available (min)","Adherence %","Availability %",
+            "Logged-in (hh:mm)","Available (hh:mm)","Adherence %","Availability %",
             "Login","Logout","Late Start (min)","Early Finish (min)",
             "_shift_start_dt","_lunch_start_dt"
         ])
@@ -1136,17 +1133,17 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         rows.append({
             "Agent":               agent,
             "Shift Start":         sched_clip_s.strftime("%H:%M"),
-            "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
-            "Late Start (min)":    late_start_min if late_start_min is not None else "—",
             "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
             "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
             "Shift End":           sched_clip_e.strftime("%H:%M"),
-            "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
-            "Total Shift":         fmt_mmss(sched_secs),
-            "Logged-in (min)":     round(logged_secs/60.0, 1),
-            "Available (min)":     round(avail_secs/60.0, 1),
+            "Total Shift":         fmt_hhmm(sched_secs),          # HH:MM
+            "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),         # HH:MM
+            "Available (hh:mm)":   fmt_hhmm(avail_secs),          # HH:MM
             "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
-            "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),        
+            "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),
+            "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
+            "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
+            "Late Start (min)":    late_start_min if late_start_min is not None else "—",
             "Early Finish (min)":  early_finish_min if early_finish_min is not None else "—",
 
             # 🔒 hidden helper columns for styling (keep as datetimes)
@@ -1202,12 +1199,11 @@ else:
         )
     with right:
         st.metric("Scheduled agents", f"{len(disp):,}")
-        # Sum total shift seconds (mm:ss -> seconds)
-        def _mmss_to_sec(s):
-            if not isinstance(s, str) or ":" not in s: return 0
-            m, s2 = s.split(":")
-            return int(m)*60 + int(s2)
-        total_secs = sum(_mmss_to_sec(x) for x in disp["Total Shift"])
+        # Sum total shift seconds from HH:MM strings
+        def _hhmm_to_sec(s):
+            if not isinstance(s, str) or ":" not in s:
+                return 0
+            h, m = s.split(":")[:2]
+            return int(h)*3600 + int(m)*60
+        total_secs = sum(_hhmm_to_sec(x) for x in disp["Total Shift"])
         st.metric("Total scheduled time", fmt_hms(total_secs))
-
-
