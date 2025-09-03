@@ -4,6 +4,7 @@ import altair as alt
 from datetime import datetime, timedelta, date
 from pathlib import Path
 import re
+import unicodedata
 from typing import Optional
 
 # =========================
@@ -140,6 +141,27 @@ def _nps_from_0_10(series: pd.Series) -> Optional[float]:
     promoters  = (r >= 9).mean() * 100
     detractors = (r <= 6).mean() * 100
     return promoters - detractors  # -100..100
+
+# =========================
+# Name/Status normalizers (robust matching)
+# =========================
+def _norm_person_key(s: str) -> str:
+    """Lowercase, strip accents, keep alnum tokens, sort tokens so 'A B' == 'B A'."""
+    if s is None:
+        return ""
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    toks = re.findall(r"[a-z0-9]+", s.lower())
+    return " ".join(sorted(toks))
+
+def _norm_status_key(s: str) -> str:
+    """Lowercase, strip accents, collapse non-letters to underscores."""
+    if s is None:
+        return ""
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"[^a-z]+", "_", s.lower()).strip("_")
+    return s
 
 # =========================
 # Wide -> Tidy shifts.csv normalizer (handles your matrix file)
@@ -1017,16 +1039,18 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "First Login","Last Logout","Late Start (min)","Early Finish (min)"
         ])
 
-    # Presence overlapping the day
+    # Presence overlapping the day (normalize agent and status)
     pres_day = df_presence[(df_presence["Start DT"] < day_end) &
                            (df_presence["End DT"]   > day_start)].copy()
-    pres_day["__status_norm"] = pres_day["Service Presence Status: Developer Name"].astype(str)\
-                                    .str.strip().str.lower().str.replace(" ", "_")
+    pres_day["__status_norm"] = pres_day["Service Presence Status: Developer Name"].apply(_norm_status_key)
+    pres_day["__agent_key"]   = pres_day["Created By: Full Name"].apply(_norm_person_key)
+
     AVAILABLE_STATUSES = {"available_chat","available_email_and_web","available_all"}
 
     rows = []
     for _, r in sched.iterrows():
         agent = str(r["Agent"])
+        agent_key = _norm_person_key(agent)
 
         s_sched = r["Shift Start"]; e_sched = r["Shift End"]
         sched_clip_s = max(s_sched, day_start)
@@ -1036,8 +1060,8 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
 
         sched_secs = (sched_clip_e - sched_clip_s).total_seconds()
 
-        # Agent presence for the day
-        pa = pres_day[pres_day["Created By: Full Name"].astype(str) == agent]
+        # Agent presence for the day (case/spacing/order-insensitive)
+        pa = pres_day[pres_day["__agent_key"] == agent_key]
 
         def _clip_to_sched(s, e):
             cs, ce = max(s, sched_clip_s), min(e, sched_clip_e)
@@ -1059,7 +1083,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         avail_ints = merge_intervals(avail_ints)
         avail_secs = sum((e - s).total_seconds() for s, e in avail_ints)
 
-        # Lunch from presence = any status containing 'lunch' (e.g., Busy_Lunch)
+        # Lunch from presence = any status containing 'lunch' (e.g., Busy_Lunch / Lunch Break)
         lunch_rows = pa[pa["__status_norm"].str.contains("lunch", na=False)]
         lunch_ints = []
         for _, lr in lunch_rows.iterrows():
@@ -1105,6 +1129,8 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         })
 
     out = pd.DataFrame(rows)
+    if out.empty:
+        return out
     sort_key = pd.to_datetime(out["Shift Start"], format="%H:%M", errors="coerce")
     out = out.assign(_sort=sort_key).sort_values(["_sort","Agent"]).drop(columns=["_sort"]).reset_index(drop=True)
     return out
