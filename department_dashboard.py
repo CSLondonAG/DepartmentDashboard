@@ -62,6 +62,18 @@ def fmt_hms(sec):
     m, s   = divmod(rem, 60)
     return f"{h:02}:{m:02}:{s:02}"
 
+def fmt_minutes_clean(x):
+    """Format minutes without trailing zeros: 3.0 -> '3', 3.5 -> '3.5'."""
+    if x is None or pd.isna(x):
+        return "—"
+    try:
+        v = float(x)
+    except Exception:
+        return str(x)
+    if abs(v - round(v)) < 1e-9:
+        return str(int(round(v)))
+    return f"{v:.1f}".rstrip('0').rstrip('.')
+
 def render_custom_metric(container, title, value, tooltip, color):
     container.markdown(f"""
         <div class="metric-container" style="border-color:{color}" title="{tooltip}">
@@ -167,8 +179,7 @@ def _norm_status_key(s: str) -> str:
     if s is None:
         return ""
     s = unicodedata.normalize("NFKD", str(s))
-    s = "".join(ch for ch in s if not pd.api.types.is_integer(ch) and not unicodedata.combining(ch))
-    s = unicodedata.normalize("NFKD", s)  # ensure normalization
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
     s = re.sub(r"[^a-z]+", "_", s.lower()).strip("_")
     return s
 
@@ -1134,17 +1145,21 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "Agent":               agent,
             "Shift Start":         sched_clip_s.strftime("%H:%M"),
             "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
-            "Late Start (min)":    late_start_min if late_start_min is not None else "—",
+            "Late Start (min)":    fmt_minutes_clean(late_start_min),
             "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
             "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
             "Shift End":           sched_clip_e.strftime("%H:%M"),
             "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
-            "Early Finish (min)":  early_finish_min if early_finish_min is not None else "—",
+            "Early Finish (min)":  fmt_minutes_clean(early_finish_min),
             "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),         # HH:MM
             "Available (hh:mm)":   fmt_hhmm(avail_secs),          # HH:MM
             "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
             "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),
             
+            
+            
+            
+
             # 🔒 hidden helper columns for styling (keep as datetimes)
             "_shift_start_dt":     sched_clip_s,
             "_lunch_start_dt":     lunch_start
@@ -1198,5 +1213,4 @@ else:
         )
     with right:
         st.metric("Scheduled agents", f"{len(disp):,}")
-
-
+        
