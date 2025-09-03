@@ -1198,14 +1198,5 @@ else:
         )
     with right:
         st.metric("Scheduled agents", f"{len(disp):,}")
-        # Sum total shift seconds from HH:MM strings
-        def _hhmm_to_sec(s):
-            if not isinstance(s, str) or ":" not in s:
-                return 0
-            h, m = s.split(":")[:2]
-            return int(h)*3600 + int(m)*60
-        total_secs = sum(_hhmm_to_sec(x) for x in disp["Total Shift"])
-        st.metric("Total scheduled time", fmt_hms(total_secs))
-
 
 
