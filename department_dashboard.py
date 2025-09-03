@@ -1021,7 +1021,7 @@ else:
 # 👥 Daily Schedule Summary (selected day)
 # =========================
 st.markdown("---")
-st.subheader("👥 Daily Schedule Summary (selected day)")
+st.subheader(f"👥 Daily Schedule Summary — {end_date:%d %b %Y}")
 
 def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame, day: datetime.date) -> pd.DataFrame:
     """
@@ -1214,4 +1214,5 @@ else:
     with right:
         st.metric("Scheduled agents", f"{len(disp):,}")
         
+
 
