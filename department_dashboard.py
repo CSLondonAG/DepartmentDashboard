@@ -1134,18 +1134,18 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "Agent":               agent,
             "Shift Start":         sched_clip_s.strftime("%H:%M"),
             "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
+            "Late Start (min)":    late_start_min if late_start_min is not None else "—",
             "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
             "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
             "Shift End":           sched_clip_e.strftime("%H:%M"),
             "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
+            "Early Finish (min)":  early_finish_min if early_finish_min is not None else "—",
             "Total Shift":         fmt_hhmm(sched_secs),          # HH:MM
             "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),         # HH:MM
             "Available (hh:mm)":   fmt_hhmm(avail_secs),          # HH:MM
             "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
             "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),
-            "Late Start (min)":    late_start_min if late_start_min is not None else "—",
-            "Early Finish (min)":  early_finish_min if early_finish_min is not None else "—",
-
+            
             # 🔒 hidden helper columns for styling (keep as datetimes)
             "_shift_start_dt":     sched_clip_s,
             "_lunch_start_dt":     lunch_start
@@ -1207,4 +1207,5 @@ else:
             return int(h)*3600 + int(m)*60
         total_secs = sum(_hhmm_to_sec(x) for x in disp["Total Shift"])
         st.metric("Total scheduled time", fmt_hms(total_secs))
+
 
