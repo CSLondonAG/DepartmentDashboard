@@ -172,10 +172,6 @@ def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
         Name | 01/06/2025 | 02/06/2025 | ... (cells like '7:00 AM - 4:00 PM')
     into a tidy dataframe with columns:
         Agent, Date, Shift Start (datetime), Shift End (datetime)
-
-    - Accepts '-', '–', '—' between times
-    - Skips blanks/OFF cells
-    - Handles overnight (end <= start → +1 day)
     """
     if df_raw is None or df_raw.empty:
         return pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
@@ -217,7 +213,6 @@ def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
         if not m:
             return (pd.NaT, pd.NaT)
         t1, t2 = m.group(1), m.group(2)
-        # Explicit format to avoid dayfirst ambiguity warnings
         start_dt = pd.to_datetime(f"{d} {t1}", format="%Y-%m-%d %I:%M %p", errors="coerce")
         end_dt   = pd.to_datetime(f"{d} {t2}", format="%Y-%m-%d %I:%M %p", errors="coerce")
         if pd.notna(start_dt) and pd.notna(end_dt) and end_dt <= start_dt:
@@ -265,7 +260,7 @@ if survey_path.exists():
         parse_dates=["Survey Taker: Created Date"],
         low_memory=False
     )
-    survey_q.columns = survey_q.columns.str.strip()
+    survey_q.columns = survey_q.columns.stripped = survey_q.columns.str.strip()
 
     req_cols = {"Survey Taker: ID", "Survey Taker: Created Date",
                 "Survey Question: Survey", "Survey Question: Question Title", "Response"}
@@ -274,6 +269,18 @@ if survey_path.exists():
         is_nps  = qtitle.str.contains("recommend", na=False) | qtitle.str.contains("likely", na=False)
         is_csat = qtitle.str.contains("satisfied",  na=False)
         is_fcr  = qtitle.str.contains("resolved",   na=False)
+
+        def _leading_int(x) -> Optional[int]:
+            if pd.isna(x): return None
+            m = re.search(r"\d+", str(x))
+            return int(m.group()) if m else None
+
+        def _bool_yes_no(x) -> Optional[bool]:
+            if pd.isna(x): return None
+            s = str(x).strip().lower()
+            if s in ("yes","y","true","1"): return True
+            if s in ("no","n","false","0"): return False
+            return None
 
         survey_q["NPS_raw"]   = survey_q["Response"].where(is_nps).apply(_leading_int)
         survey_q["CSAT_1_5"]  = survey_q["Response"].where(is_csat).apply(_leading_int)
@@ -1014,17 +1021,17 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
       - Scheduled Shift Start / End (HH:MM)
       - Lunch Start / End (from presence where status contains 'lunch')
       - Total Shift (scheduled minutes), Logged-in/Available within scheduled,
-        Adherence %, Availability %, First Login / Last Logout, Late/Early mins.
-
-      Adds hidden helpers:
+        Adherence %, Availability %,
+      - Login / Logout (AVAILABLE statuses only, full day),
+      - Late/Early mins (based on ANY presence),
+        plus hidden helpers for styling:
         _shift_start_dt (datetime), _lunch_start_dt (datetime)
-      so we can style lunch outside 3–5 hours from shift start.
     """
     if df_shifts_tidy is None or df_shifts_tidy.empty:
         return pd.DataFrame(columns=[
             "Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift",
             "Logged-in (min)","Available (min)","Adherence %","Availability %",
-            "First Login","Last Logout","Late Start (min)","Early Finish (min)",
+            "Login","Logout","Late Start (min)","Early Finish (min)",
             "_shift_start_dt","_lunch_start_dt"
         ])
 
@@ -1041,7 +1048,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         return pd.DataFrame(columns=[
             "Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift",
             "Logged-in (min)","Available (min)","Adherence %","Availability %",
-            "First Login","Last Logout","Late Start (min)","Early Finish (min)",
+            "Login","Logout","Late Start (min)","Early Finish (min)",
             "_shift_start_dt","_lunch_start_dt"
         ])
 
@@ -1066,14 +1073,14 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
 
         sched_secs = (sched_clip_e - sched_clip_s).total_seconds()
 
-        # Agent presence for the day (case/spacing/order-insensitive)
+        # Agent presence for the day
         pa = pres_day[pres_day["__agent_key"] == agent_key]
 
         def _clip_to_sched(s, e):
             cs, ce = max(s, sched_clip_s), min(e, sched_clip_e)
             return (cs, ce) if ce > cs else None
 
-        # Logged-in intervals (any presence)
+        # Logged-in intervals (ANY presence) — for adherence and late/early
         logged_ints = []
         for _, pr in pa.iterrows():
             seg = _clip_to_sched(pr["Start DT"].to_pydatetime(), pr["End DT"].to_pydatetime())
@@ -1081,7 +1088,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         logged_ints = merge_intervals(logged_ints)
         logged_secs = sum((e - s).total_seconds() for s, e in logged_ints)
 
-        # Available intervals
+        # Available intervals within scheduled (for availability %)
         avail_ints = []
         for _, pr in pa[pa["__status_norm"].isin(AVAILABLE_STATUSES)].iterrows():
             seg = _clip_to_sched(pr["Start DT"].to_pydatetime(), pr["End DT"].to_pydatetime())
@@ -1089,7 +1096,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         avail_ints = merge_intervals(avail_ints)
         avail_secs = sum((e - s).total_seconds() for s, e in avail_ints)
 
-        # Lunch from presence = any status containing 'lunch' (e.g., Busy_Lunch / Lunch Break)
+        # Lunch from presence = any status containing 'lunch' (within scheduled window)
         lunch_rows = pa[pa["__status_norm"].str.contains("lunch", na=False)]
         lunch_ints = []
         for _, lr in lunch_rows.iterrows():
@@ -1098,21 +1105,30 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         lunch_ints = merge_intervals(lunch_ints)
         lunch_start = min((s for s, _ in lunch_ints), default=None)
         lunch_end   = max((e for _, e in lunch_ints), default=None)
-        # lunch_mins  = round(((lunch_end - lunch_start).total_seconds()/60.0), 1) if (lunch_start and lunch_end) else 0.0
 
-        # First login / last logout across the day
+        # Login/Logout from AVAILABLE statuses over the full day (not clipped to schedule)
+        avail_day_ints = []
+        for _, pr in pa[pa["__status_norm"].isin(AVAILABLE_STATUSES)].iterrows():
+            cs, ce = max(pr["Start DT"], day_start), min(pr["End DT"], day_end)
+            if ce > cs:
+                avail_day_ints.append((cs.to_pydatetime(), ce.to_pydatetime()))
+        avail_day_ints = merge_intervals(avail_day_ints)
+        login_avail  = min((s for s, _ in avail_day_ints), default=None)
+        logout_avail = max((e for _, e in avail_day_ints), default=None)
+
+        # First/Last presence across the day (ANY presence) for late/early mins
         all_pres_ints = []
         for _, pr in pa.iterrows():
             cs, ce = max(pr["Start DT"], day_start), min(pr["End DT"], day_end)
             if ce > cs:
                 all_pres_ints.append((cs.to_pydatetime(), ce.to_pydatetime()))
         all_pres_ints = merge_intervals(all_pres_ints)
-        first_login = min((s for s, _ in all_pres_ints), default=None)
-        last_logout = max((e for _, e in all_pres_ints), default=None)
+        first_login_any = min((s for s, _ in all_pres_ints), default=None)
+        last_logout_any = max((e for _, e in all_pres_ints), default=None)
 
-        # Late start / early finish vs scheduled (mins)
-        late_start_min   = round(max(((first_login - sched_clip_s).total_seconds()/60.0), 0.0), 1) if first_login else None
-        early_finish_min = round(max(((sched_clip_e - last_logout).total_seconds()/60.0), 0.0), 1)  if last_logout else None
+        # Late start / early finish vs scheduled (mins) using ANY presence
+        late_start_min   = round(max(((first_login_any - sched_clip_s).total_seconds()/60.0), 0.0), 1) if first_login_any else None
+        early_finish_min = round(max(((sched_clip_e - last_logout_any).total_seconds()/60.0), 0.0), 1)  if last_logout_any else None
 
         adher_pct = (logged_secs / sched_secs * 100.0) if sched_secs > 0 else None
         avail_pct = (avail_secs  / sched_secs * 100.0) if sched_secs > 0 else None
@@ -1128,8 +1144,8 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "Available (min)":     round(avail_secs/60.0, 1),
             "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
             "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),
-            "First Login":         ("—" if first_login is None else first_login.strftime("%H:%M")),
-            "Last Logout":         ("—" if last_logout is None else last_logout.strftime("%H:%M")),
+            "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
+            "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
             "Late Start (min)":    late_start_min if late_start_min is not None else "—",
             "Early Finish (min)":  early_finish_min if early_finish_min is not None else "—",
 
