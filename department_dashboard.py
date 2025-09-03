@@ -693,7 +693,7 @@ hourly_date = st.date_input(
 
 def _clamp01(x):
     if pd.isna(x): return 0.0
-    return max(0.0, min(1.0, float(x))))
+    return max(0.0, min(1.0, float(x)))
 
 def _merge_intervals(ints):
     if not ints: return []
@@ -1152,3 +1152,4 @@ else:
             return int(m)*60 + int(s2)
         total_secs = sum(_mmss_to_sec(x) for x in schedule_df["Total Shift"])
         st.metric("Total scheduled time", fmt_hms(total_secs))
+
