@@ -32,10 +32,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =========================
-# SLA calibration constants
+# SLA calibration constants (as agreed)
 # =========================
-CHAT_RESCALE_K       = 0.4167  # Chat: (chat_raw / 0.4167) * 80
-EMAIL_RESCALE_K      = 0.50    # Email: (email_raw / 0.50) * 80
+CHAT_RESCALE_K       = 0.4167  # Chat: (raw / 0.4167) * 80
+EMAIL_RESCALE_K      = 0.50    # Email: (raw / 0.50) * 80
 SLA_SCALE            = 80.0
 CHAT_TARGET_WAIT_MIN = 1.0     # “no penalty” wait threshold in minutes
 
@@ -142,7 +142,7 @@ def _nps_from_0_10(series: pd.Series) -> Optional[float]:
     return promoters - detractors  # -100..100
 
 # =========================
-# Wide -> Tidy shifts.csv normalizer
+# Wide -> Tidy shifts.csv normalizer (handles your matrix file)
 # =========================
 def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
@@ -223,7 +223,7 @@ if not chat_path.exists() or not email_path.exists():
 df_items     = pd.read_csv("report_items.csv",    dayfirst=True, parse_dates=["Start DT","End DT"])
 df_presence  = pd.read_csv("report_presence.csv", dayfirst=True, parse_dates=["Start DT","End DT"])
 
-# normalize shifts
+# normalize wide shifts → tidy
 df_shifts_raw = pd.read_csv("shifts.csv")
 df_shifts     = normalize_wide_shifts(df_shifts_raw)
 
@@ -252,7 +252,7 @@ if survey_path.exists():
         is_csat = qtitle.str.contains("satisfied",  na=False)
         is_fcr  = qtitle.str.contains("resolved",   na=False)
 
-        survey_q["NPS_raw"]   = survey_q["Response"].where(is_nps).apply(_leading_int)
+        survey_q["NPS_raw"]   = survey_q["Response"].where(is_csat | is_nps).apply(_leading_int)  # numeric if present
         survey_q["CSAT_1_5"]  = survey_q["Response"].where(is_csat).apply(_leading_int)
         survey_q["FCR_bool"]  = survey_q["Response"].where(is_fcr).apply(_bool_yes_no)
         survey_q["Channel"]   = survey_q["Survey Question: Survey"].str.extract(r"(Email|Chat)", expand=False).fillna("Other")
@@ -525,7 +525,6 @@ st.altair_chart((chart + labels + rule + rule_lb).properties(width=700, height=3
 # =========================
 # Customer Feedback Section (CSAT / NPS / FCR)
 # =========================
-survey = survey  # already built if survey.csv present
 if survey is not None:
     survey_period = survey[
         (survey["Survey Date"].dt.date >= start_date) &
@@ -680,7 +679,7 @@ else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
 
 # =========================
-# Hourly Weighted SLA (selected day) + Combined Available Minutes + Logged-in Agents
+# Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
 # =========================
 st.markdown("---")
 st.subheader("⏱️ Hourly Weighted SLA (selected day)")
@@ -694,7 +693,7 @@ hourly_date = st.date_input(
 
 def _clamp01(x):
     if pd.isna(x): return 0.0
-    return max(0.0, min(1.0, float(x)))
+    return max(0.0, min(1.0, float(x))))
 
 def _merge_intervals(ints):
     if not ints: return []
@@ -917,7 +916,7 @@ else:
 
     st.altair_chart(combined_top, use_container_width=True)
 
-    # --- Logged In Agents per Hour (bigger, clearer) ---
+    # --- Logged In Agents per Hour (larger) ---
     max_agents_val = pd.to_numeric(df_hourly["Logged In Agents"], errors="coerce").max()
     max_agents = int((0 if pd.isna(max_agents_val) else max_agents_val) + 1)
 
@@ -973,13 +972,12 @@ else:
         )
 
 # =========================
-# 👥 Daily Schedule Summary (selected day)
+# 👥 Daily Schedule Summary (selected day) — uses normalized shifts + lunch from presence
 # =========================
 st.markdown("---")
 st.subheader("👥 Daily Schedule Summary (selected day)")
 
 def _find_col(cols, candidates, contains_all=None, exclude=None):
-    """Find first matching column by exact or 'contains all substrings' (case-insensitive)."""
     cl = [c.lower() for c in cols]
     for cand in candidates:
         if cand.lower() in cl:
@@ -997,12 +995,11 @@ def _to_dt(series):
 
 def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day: datetime.date) -> pd.DataFrame:
     """
-    For each agent scheduled on `day` (from shifts.csv normalized), show:
-      - Scheduled Shift Start / End (HH:MM)  [from shifts.csv]
-      - Lunch Start / End (from presence where status == busy_lunch)
-      - Total Shift (scheduled overlap minus busy_lunch overlap), as mm:ss
-      - Logged-in (within scheduled), Available (within scheduled), Adherence %, Availability %
-      - First Login / Last Logout (within day), Late Start / Early Finish (mins) vs scheduled
+    For each agent scheduled on `day` (from normalized shifts.csv), show:
+      - Scheduled Shift Start / End (HH:MM)
+      - Lunch Start / End (from presence where status contains 'lunch')
+      - Total Shift (scheduled minutes), Logged-in/Available within scheduled,
+        Adherence %, Availability %, First Login / Last Logout, Late/Early mins.
     """
     if df_shifts is None or df_shifts.empty:
         return pd.DataFrame(columns=[
@@ -1012,10 +1009,7 @@ def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day
         ])
 
     cols = list(df_shifts.columns)
-    # Detect columns in normalized shifts.csv
-    name_col  = _find_col(cols, ["Agent","User: Full Name","Full Name","Name","Created By: Full Name"], contains_all=["agent","name"])
-    if not name_col:
-        name_col = "Agent"
+    name_col  = _find_col(cols, ["Agent","User: Full Name","Full Name","Name","Created By: Full Name"], contains_all=["agent","name"]) or "Agent"
     date_col  = _find_col(cols, ["Date"], contains_all=["date"])
     start_col = _find_col(cols, ["Shift Start"], contains_all=["shift","start"])
     end_col   = _find_col(cols, ["Shift End"], contains_all=["shift","end"])
@@ -1090,18 +1084,17 @@ def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day
         avail_ints = merge_intervals(avail_ints)
         avail_secs = sum((e - s).total_seconds() for s, e in avail_ints)
 
-        # Lunch from presence = busy_lunch (case-insensitive)
-        lunch_rows = pa[pa["__status_norm"] == "busy_lunch"]
+        # Lunch from presence = *contains* lunch
+        lunch_rows = pa[pa["__status_norm"].str.contains("lunch", na=False)]
         lunch_ints = []
         for _, lr in lunch_rows.iterrows():
             seg = _clip_to_sched(lr["Start DT"].to_pydatetime(), lr["End DT"].to_pydatetime())
             if seg: lunch_ints.append(seg)
         lunch_ints = merge_intervals(lunch_ints)
-        lunch_secs = sum((e - s).total_seconds() for s, e in lunch_ints)
         lunch_start = min((s for s, _ in lunch_ints), default=None)
         lunch_end   = max((e for _, e in lunch_ints), default=None)
 
-        total_shift_net_secs = max(sched_secs - lunch_secs, 0.0)
+        total_shift_net_secs = sched_secs  # rostered minutes; lunch is shown separately
 
         # First login / last logout (within day)
         all_pres_ints = []
@@ -1158,4 +1151,4 @@ else:
             m, s2 = s.split(":")
             return int(m)*60 + int(s2)
         total_secs = sum(_mmss_to_sec(x) for x in schedule_df["Total Shift"])
-        st.metric("Total scheduled time (net of lunch)", fmt_hms(total_secs))
+        st.metric("Total scheduled time", fmt_hms(total_secs))
