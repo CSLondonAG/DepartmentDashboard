@@ -1137,6 +1137,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "Agent":               agent,
             "Shift Start":         sched_clip_s.strftime("%H:%M"),
             "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
+            "Late Start (min)":    late_start_min if late_start_min is not None else "—",
             "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
             "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
             "Shift End":           sched_clip_e.strftime("%H:%M"),
@@ -1145,8 +1146,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "Logged-in (min)":     round(logged_secs/60.0, 1),
             "Available (min)":     round(avail_secs/60.0, 1),
             "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
-            "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),       
-            "Late Start (min)":    late_start_min if late_start_min is not None else "—",
+            "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),        
             "Early Finish (min)":  early_finish_min if early_finish_min is not None else "—",
 
             # 🔒 hidden helper columns for styling (keep as datetimes)
@@ -1209,4 +1209,5 @@ else:
             return int(m)*60 + int(s2)
         total_secs = sum(_mmss_to_sec(x) for x in disp["Total Shift"])
         st.metric("Total scheduled time", fmt_hms(total_secs))
+
 
