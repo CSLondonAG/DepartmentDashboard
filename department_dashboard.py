@@ -1140,7 +1140,6 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "Shift End":           sched_clip_e.strftime("%H:%M"),
             "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
             "Early Finish (min)":  early_finish_min if early_finish_min is not None else "—",
-            "Total Shift":         fmt_hhmm(sched_secs),          # HH:MM
             "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),         # HH:MM
             "Available (hh:mm)":   fmt_hhmm(avail_secs),          # HH:MM
             "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
@@ -1207,5 +1206,6 @@ else:
             return int(h)*3600 + int(m)*60
         total_secs = sum(_hhmm_to_sec(x) for x in disp["Total Shift"])
         st.metric("Total scheduled time", fmt_hms(total_secs))
+
 
 
