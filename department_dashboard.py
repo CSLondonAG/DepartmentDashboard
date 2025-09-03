@@ -1015,12 +1015,17 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
       - Lunch Start / End (from presence where status contains 'lunch')
       - Total Shift (scheduled minutes), Logged-in/Available within scheduled,
         Adherence %, Availability %, First Login / Last Logout, Late/Early mins.
+
+      Adds hidden helpers:
+        _shift_start_dt (datetime), _lunch_start_dt (datetime)
+      so we can style lunch outside 3–5 hours from shift start.
     """
     if df_shifts_tidy is None or df_shifts_tidy.empty:
         return pd.DataFrame(columns=[
             "Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift",
             "Logged-in (min)","Available (min)","Adherence %","Availability %",
-            "First Login","Last Logout","Late Start (min)","Early Finish (min)"
+            "First Login","Last Logout","Late Start (min)","Early Finish (min)",
+            "_shift_start_dt","_lunch_start_dt"
         ])
 
     day_start = datetime.combine(day, datetime.min.time())
@@ -1036,7 +1041,8 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         return pd.DataFrame(columns=[
             "Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift",
             "Logged-in (min)","Available (min)","Adherence %","Availability %",
-            "First Login","Last Logout","Late Start (min)","Early Finish (min)"
+            "First Login","Last Logout","Late Start (min)","Early Finish (min)",
+            "_shift_start_dt","_lunch_start_dt"
         ])
 
     # Presence overlapping the day (normalize agent and status)
@@ -1092,7 +1098,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         lunch_ints = merge_intervals(lunch_ints)
         lunch_start = min((s for s, _ in lunch_ints), default=None)
         lunch_end   = max((e for _, e in lunch_ints), default=None)
-        lunch_mins  = round(((lunch_end - lunch_start).total_seconds()/60.0), 1) if (lunch_start and lunch_end) else 0.0
+        # lunch_mins  = round(((lunch_end - lunch_start).total_seconds()/60.0), 1) if (lunch_start and lunch_end) else 0.0
 
         # First login / last logout across the day
         all_pres_ints = []
@@ -1126,6 +1132,10 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "Last Logout":         ("—" if last_logout is None else last_logout.strftime("%H:%M")),
             "Late Start (min)":    late_start_min if late_start_min is not None else "—",
             "Early Finish (min)":  early_finish_min if early_finish_min is not None else "—",
+
+            # 🔒 hidden helper columns for styling (keep as datetimes)
+            "_shift_start_dt":     sched_clip_s,
+            "_lunch_start_dt":     lunch_start
         })
 
     out = pd.DataFrame(rows)
@@ -1140,15 +1150,46 @@ schedule_df = build_daily_schedule(df_shifts, df_presence, end_date)
 if schedule_df.empty:
     st.info(f"No scheduled agents found for {end_date:%d %b %Y}.")
 else:
+    # Compute lunch-window violations using hidden datetime helpers
+    df = schedule_df.copy()
+
+    # Hours delta from shift start to lunch start (NaN if no lunch)
+    delta_hours = (
+        (pd.to_datetime(df["_lunch_start_dt"]) - pd.to_datetime(df["_shift_start_dt"]))
+        .dt.total_seconds() / 3600
+    )
+
+    # Violation: lunch < 3h OR > 5h from shift start (only when lunch exists)
+    viol_idx = df.index[delta_hours.notna() & ((delta_hours < 3.0) | (delta_hours > 5.0))]
+
+    # Drop helper columns from what we display
+    display_cols = [c for c in df.columns if c not in {"_shift_start_dt", "_lunch_start_dt"}]
+    disp = df[display_cols].copy()
+
+    # Row-wise styling: make Lunch cells red when violated
+    lunch_cols = {"Lunch Start", "Lunch End"}
+    def _style_row(row):
+        is_violation = row.name in viol_idx
+        styles = []
+        for col in disp.columns:
+            if is_violation and col in lunch_cols:
+                styles.append("color: red; font-weight: 600;")
+            else:
+                styles.append("")
+        return styles
+
     left, right = st.columns([4,1])
     with left:
-        st.dataframe(schedule_df, use_container_width=True)
+        st.dataframe(
+            disp.style.apply(_style_row, axis=1),
+            use_container_width=True
+        )
     with right:
-        st.metric("Scheduled agents", f"{len(schedule_df):,}")
+        st.metric("Scheduled agents", f"{len(disp):,}")
         # Sum total shift seconds (mm:ss -> seconds)
         def _mmss_to_sec(s):
             if not isinstance(s, str) or ":" not in s: return 0
             m, s2 = s.split(":")
             return int(m)*60 + int(s2)
-        total_secs = sum(_mmss_to_sec(x) for x in schedule_df["Total Shift"])
+        total_secs = sum(_mmss_to_sec(x) for x in disp["Total Shift"])
         st.metric("Total scheduled time", fmt_hms(total_secs))
