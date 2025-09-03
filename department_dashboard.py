@@ -195,8 +195,9 @@ def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
         if not m:
             return (pd.NaT, pd.NaT)
         t1, t2 = m.group(1), m.group(2)
-        start_dt = pd.to_datetime(f"{d} {t1}", errors="coerce", dayfirst=True)
-        end_dt   = pd.to_datetime(f"{d} {t2}", errors="coerce", dayfirst=True)
+        # Explicit format to avoid dayfirst ambiguity warnings
+        start_dt = pd.to_datetime(f"{d} {t1}", format="%Y-%m-%d %I:%M %p", errors="coerce")
+        end_dt   = pd.to_datetime(f"{d} {t2}", format="%Y-%m-%d %I:%M %p", errors="coerce")
         if pd.notna(start_dt) and pd.notna(end_dt) and end_dt <= start_dt:
             end_dt = end_dt + pd.Timedelta(days=1)
         return (start_dt, end_dt)
@@ -252,7 +253,7 @@ if survey_path.exists():
         is_csat = qtitle.str.contains("satisfied",  na=False)
         is_fcr  = qtitle.str.contains("resolved",   na=False)
 
-        survey_q["NPS_raw"]   = survey_q["Response"].where(is_csat | is_nps).apply(_leading_int)  # numeric if present
+        survey_q["NPS_raw"]   = survey_q["Response"].where(is_nps).apply(_leading_int)
         survey_q["CSAT_1_5"]  = survey_q["Response"].where(is_csat).apply(_leading_int)
         survey_q["FCR_bool"]  = survey_q["Response"].where(is_fcr).apply(_bool_yes_no)
         survey_q["Channel"]   = survey_q["Survey Question: Survey"].str.extract(r"(Email|Chat)", expand=False).fillna("Other")
@@ -519,8 +520,7 @@ rule   = alt.Chart(pd.DataFrame({"y":[85]})).mark_rule(color="red", strokeDash=[
 rule_lb= alt.Chart(pd.DataFrame({"y":[85]})).mark_text(align="left", color="red", dy=-8)\
             .encode(y="y:Q", text=alt.value("Target: 85%"))
 
-st.altair_chart((chart + labels + rule + rule_lb).properties(width=700, height=350),
-                use_container_width=True)
+st.altair_chart((chart + labels + rule + rule_lb).properties(width=700, height=350), use_container_width=True)
 
 # =========================
 # Customer Feedback Section (CSAT / NPS / FCR)
@@ -692,7 +692,8 @@ hourly_date = st.date_input(
 )
 
 def _clamp01(x):
-    if pd.isna(x): return 0.0
+    if pd.isna(x):
+        return 0.0
     return max(0.0, min(1.0, float(x)))
 
 def _merge_intervals(ints):
@@ -726,7 +727,7 @@ def compute_hourly_available_minutes_and_logged_in(sel_date: datetime.date) -> p
     pres_day = df_presence[(df_presence["Start DT"] < day_end) &
                            (df_presence["End DT"]   > day_start)].copy()
 
-    hours = pd.date_range(day_start, day_end, freq="H", inclusive="left").to_pydatetime().tolist()
+    hours = pd.date_range(day_start, day_end, freq="h", inclusive="left").to_pydatetime().tolist()
     avail_secs_per_hour  = {h: 0.0 for h in hours}
     logged_sets_per_hour = {h: set() for h in hours}
 
@@ -768,12 +769,12 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
                             (chat_sla_df["Date/Time Opened"] <  day_end)].copy()
     email_day = email_sla_df[(email_sla_df["Date/Time Opened"] >= day_start) &
                              (email_sla_df["Date/Time Opened"] <  day_end)].copy()
-    chat_day["Hour"]  = chat_day["Date/Time Opened"].dt.floor("H")
-    email_day["Hour"] = email_day["Date/Time Opened"].dt.floor("H")
+    chat_day["Hour"]  = chat_day["Date/Time Opened"].dt.floor("h")
+    email_day["Hour"] = email_day["Date/Time Opened"].dt.floor("h")
 
     items_day = df_items[(df_items["Start DT"] >= day_start) &
                          (df_items["Start DT"] <  day_end)].copy()
-    items_day["Hour"] = items_day["Start DT"].dt.floor("H")
+    items_day["Hour"] = items_day["Start DT"].dt.floor("h")
 
     chat_vol_hour = (
         items_day[items_day["Service Channel: Developer Name"] == "sfdc_liveagent"]
@@ -784,7 +785,7 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
         .groupby("Hour").size().rename("Email Vol")
     )
 
-    hours = pd.date_range(day_start, day_end, freq="H", inclusive="left")
+    hours = pd.date_range(day_start, day_end, freq="h", inclusive="left")
     out = pd.DataFrame({"Hour": hours})
 
     def _chat_sla_for_group(g: pd.DataFrame) -> float:
@@ -798,7 +799,11 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
         raw = 0.5 * frac_60 - 0.3 * excess_wait - 0.2 * abandon_frac
         return max(0.0, min(100.0, (raw / CHAT_RESCALE_K) * SLA_SCALE))
 
-    chat_hour_sla = chat_day.groupby("Hour").apply(_chat_sla_for_group).rename("Chat SLA")
+    chat_hour_sla = (
+        chat_day.groupby("Hour")
+        .apply(_chat_sla_for_group, include_groups=False)
+        .rename("Chat SLA")
+    )
 
     def _email_sla_for_group(g: pd.DataFrame) -> float:
         if g.empty: return None
@@ -809,7 +814,11 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
         raw = 0.6 * frac_le_1hr - 0.4 * excess
         return max(0.0, min(100.0, (raw / EMAIL_RESCALE_K) * SLA_SCALE))
 
-    email_hour_sla = email_day.groupby("Hour").apply(_email_sla_for_group).rename("Email SLA")
+    email_hour_sla = (
+        email_day.groupby("Hour")
+        .apply(_email_sla_for_group, include_groups=False)
+        .rename("Email SLA")
+    )
 
     out = (
         out.set_index("Hour")
@@ -1099,57 +1108,4 @@ def build_daily_schedule(df_shifts: pd.DataFrame, df_presence: pd.DataFrame, day
         # First login / last logout (within day)
         all_pres_ints = []
         for _, pr in pa.iterrows():
-            cs, ce = max(pr["Start DT"], day_start), min(pr["End DT"], day_end)
-            if ce > cs:
-                all_pres_ints.append((cs.to_pydatetime(), ce.to_pydatetime()))
-        all_pres_ints = merge_intervals(all_pres_ints)
-        first_login = min((s for s, _ in all_pres_ints), default=None)
-        last_logout = max((e for _, e in all_pres_ints), default=None)
-
-        # Late start / early finish vs scheduled (mins)
-        late_start_min  = max(((first_login - sched_clip_s).total_seconds()/60.0), 0.0) if first_login else None
-        early_finish_min= max(((sched_clip_e - last_logout).total_seconds()/60.0), 0.0) if last_logout else None
-
-        adher_pct = (logged_secs / sched_secs * 100.0) if sched_secs > 0 else None
-        avail_pct = (avail_secs  / sched_secs * 100.0) if sched_secs > 0 else None
-
-        rows.append({
-            "Agent":               agent,
-            "Shift Start":         ("—" if pd.isna(s_sched) else pd.to_datetime(s_sched).strftime("%H:%M")),
-            "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
-            "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
-            "Shift End":           ("—" if pd.isna(e_sched) else pd.to_datetime(e_sched).strftime("%H:%M")),
-            "Total Shift":         fmt_mmss(total_shift_net_secs),
-            "Logged-in (min)":     round(logged_secs/60.0, 1) if logged_secs else 0.0,
-            "Available (min)":     round(avail_secs/60.0, 1)  if avail_secs  else 0.0,
-            "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
-            "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),
-            "First Login":         ("—" if first_login is None else first_login.strftime("%H:%M")),
-            "Last Logout":         ("—" if last_logout is None else last_logout.strftime("%H:%M")),
-            "Late Start (min)":    (round(late_start_min, 1) if late_start_min is not None else None),
-            "Early Finish (min)":  (round(early_finish_min,1) if early_finish_min is not None else None),
-        })
-
-    out = pd.DataFrame(rows)
-    sort_key = pd.to_datetime(out["Shift Start"], format="%H:%M", errors="coerce")
-    out = out.assign(_sort=sort_key).sort_values(["_sort","Agent"]).drop(columns=["_sort"]).reset_index(drop=True)
-    return out
-
-schedule_df = build_daily_schedule(df_shifts, df_presence, hourly_date)
-
-if schedule_df.empty:
-    st.info(f"No scheduled agents found for {hourly_date:%d %b %Y}.")
-else:
-    left, right = st.columns([4,1])
-    with left:
-        st.dataframe(schedule_df, use_container_width=True)
-    with right:
-        st.metric("Scheduled agents", f"{len(schedule_df):,}")
-        # Sum total shift seconds (mm:ss -> seconds)
-        def _mmss_to_sec(s):
-            if not isinstance(s, str) or ":" not in s: return 0
-            m, s2 = s.split(":")
-            return int(m)*60 + int(s2)
-        total_secs = sum(_mmss_to_sec(x) for x in schedule_df["Total Shift"])
-        st.metric("Total scheduled time", fmt_hms(total_secs))
-
+            cs, ce = max(pr["
