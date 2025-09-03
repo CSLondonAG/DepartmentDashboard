@@ -1145,12 +1145,12 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "Agent":               agent,
             "Shift Start":         sched_clip_s.strftime("%H:%M"),
             "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
-            "Late Start (min)":    fmt_minutes_clean(late_start_min),
+            "Late (min)":          fmt_minutes_clean(late_start_min),
             "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
             "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
             "Shift End":           sched_clip_e.strftime("%H:%M"),
             "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
-            "Early Finish (min)":  fmt_minutes_clean(early_finish_min),
+            "Early (min)":         fmt_minutes_clean(early_finish_min),
             "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),         # HH:MM
             "Available (hh:mm)":   fmt_hhmm(avail_secs),          # HH:MM
             "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
@@ -1214,3 +1214,4 @@ else:
     with right:
         st.metric("Scheduled agents", f"{len(disp):,}")
         
+
