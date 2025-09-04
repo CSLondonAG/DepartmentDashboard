@@ -95,7 +95,7 @@ def get_sla_score_color(score):
     elif score >= 70: return "#FFC107"
     else: return "#F44336"
 
-# --- Survey color helpers ---
+# Survey color helpers
 def get_csat_color_pct(v):
     if v is None or pd.isna(v): return "#9E9E9E"
     return "#F44336" if v < 70 else "#4CAF50"
@@ -163,7 +163,7 @@ def _nps_from_0_10(series: pd.Series) -> Optional[float]:
     return promoters - detractors  # -100..100
 
 # =========================
-# Name/Status normalizers (robust matching)
+# Name/Status normalizers
 # =========================
 def _norm_person_key(s: str) -> str:
     """Lowercase, strip accents, keep alnum tokens, sort tokens so 'A B' == 'B A'."""
@@ -184,21 +184,21 @@ def _norm_status_key(s: str) -> str:
     return s
 
 # =========================
-# Wide -> Tidy shifts.csv normalizer (handles your matrix file)
+# Wide -> Tidy shifts.csv normalizer (matrix to tidy)
 # =========================
 def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
     Convert a wide shifts matrix:
         Name | 01/06/2025 | 02/06/2025 | ... (cells like '7:00 AM - 4:00 PM')
-    into a tidy dataframe with columns:
-        Agent, Date, Shift Start (datetime), Shift End (datetime)
+    into a tidy dataframe:
+        Agent | Date | Shift Start | Shift End
     """
     if df_raw is None or df_raw.empty:
         return pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
 
     cols = list(df_raw.columns)
 
-    # Identify date columns (headers like 01/06/2025 etc.)
+    # Identify date columns
     date_cols = []
     date_map = {}
     for c in cols:
@@ -221,11 +221,9 @@ def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
     long["Date"] = long["DateStr"].map(date_map)
     long["Range"] = long["Range"].astype(str).str.strip()
 
-    # Drop blanks / OFF / NA
     off_mask = long["Range"].str.fullmatch(r"(?i)\s*(off|off day|offday|na|nan|-|—|–)?\s*")
     long = long[~off_mask.fillna(True)]
 
-    # Parse time ranges like "7:00 AM - 4:00 PM" (allow -, –, —)
     rgx = re.compile(r"^\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*[-–—]\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*$")
 
     def _parse_range(s, d):
@@ -598,6 +596,7 @@ if survey is not None:
             get_fcr_color_pct(fcr_overall)
         )
 
+        # ---------- FIXED: day-level x-axis (no duplicate labels) ----------
         daily_survey = (
             survey_period
             .assign(Date=survey_period["Survey Date"].dt.normalize())
@@ -607,13 +606,23 @@ if survey is not None:
                 NPS=("NPS_raw", _nps_from_0_10),
                 Surveys=("CSAT%","size")
             )
-        ).sort_values("Date")
+            .sort_values("Date")
+            .drop_duplicates(subset=["Date"])
+        )
 
         if not daily_survey.empty:
             st.subheader("CSAT & NPS Trend Analysis")
 
             base = alt.Chart(daily_survey)
-            x_enc = alt.X("Date:T", title="Period", axis=alt.Axis(format="%d %b", labelAngle=45))
+
+            # Shared x-encoding at DAY granularity
+            x_enc = alt.X(
+                "yearmonthdate(Date):T",  # <- lock to day
+                title="Date",
+                axis=alt.Axis(format="%d %b", labelAngle=45),
+                scale=alt.Scale(nice="day")
+            )
+
             hover = alt.selection_point(on="mouseover", fields=["Date"], nearest=True, empty=False)
 
             csat_line = (
@@ -622,7 +631,7 @@ if survey is not None:
                     x=x_enc,
                     y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
                     tooltip=[
-                        alt.Tooltip("Date:T", title="Period", format="%d %b"),
+                        alt.Tooltip("Date:T", title="Date", format="%d %b"),
                         alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
                         alt.Tooltip("Surveys:Q", title="Surveys", format=".0f"),
                     ],
@@ -640,7 +649,7 @@ if survey is not None:
                         scale=alt.Scale(domain=[-100, 100]),
                     ),
                     tooltip=[
-                        alt.Tooltip("Date:T", title="Period", format="%d %b"),
+                        alt.Tooltip("Date:T", title="Date", format="%d %b"),
                         alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
                         alt.Tooltip("Surveys:Q", title="Surveys", format=".0f"),
                     ],
@@ -654,7 +663,7 @@ if survey is not None:
                     y=alt.Y("CSAT_pct:Q", axis=None, scale=alt.Scale(domain=[0, 100])),
                     size=alt.condition(hover, alt.value(120), alt.value(60)),
                     tooltip=[
-                        alt.Tooltip("Date:T", title="Period", format="%d %b"),
+                        alt.Tooltip("Date:T", title="Date", format="%d %b"),
                         alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
                     ],
                 )
@@ -668,7 +677,7 @@ if survey is not None:
                     y=alt.Y("NPS:Q", axis=None, scale=alt.Scale(domain=[-100, 100])),
                     size=alt.condition(hover, alt.value(120), alt.value(60)),
                     tooltip=[
-                        alt.Tooltip("Date:T", title="Period", format="%d %b"),
+                        alt.Tooltip("Date:T", title="Date", format="%d %b"),
                         alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
                     ],
                 )
@@ -1018,7 +1027,7 @@ else:
         )
 
 # =========================
-# 👥 Daily Schedule Summary (selected day)
+# 👥 Daily Schedule Summary (end_date)
 # =========================
 st.markdown("---")
 st.subheader(f"👥 Daily Schedule Summary — {end_date:%d %b %Y}")
@@ -1104,7 +1113,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         avail_ints = merge_intervals(avail_ints)
         avail_secs = sum((e - s).total_seconds() for s, e in avail_ints)
 
-        # Lunch from presence = any status containing 'lunch' (within scheduled window)
+        # Lunch from presence = any status containing 'lunch'
         lunch_rows = pa[pa["__status_norm"].str.contains("lunch", na=False)]
         lunch_ints = []
         for _, lr in lunch_rows.iterrows():
@@ -1144,23 +1153,20 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         rows.append({
             "Agent":               agent,
             "Shift Start":         sched_clip_s.strftime("%H:%M"),
-            "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
-            "Late (min)":          fmt_minutes_clean(late_start_min),
             "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
             "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
             "Shift End":           sched_clip_e.strftime("%H:%M"),
-            "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
-            "Early (min)":         fmt_minutes_clean(early_finish_min),
+            "Total Shift":         fmt_hhmm(sched_secs),          # HH:MM
             "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),         # HH:MM
             "Available (hh:mm)":   fmt_hhmm(avail_secs),          # HH:MM
             "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
             "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),
-            
-            
-            
-            
+            "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
+            "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
+            "Late Start (min)":    fmt_minutes_clean(late_start_min),
+            "Early Finish (min)":  fmt_minutes_clean(early_finish_min),
 
-            # 🔒 hidden helper columns for styling (keep as datetimes)
+            # hidden helper columns for styling
             "_shift_start_dt":     sched_clip_s,
             "_lunch_start_dt":     lunch_start
         })
@@ -1213,6 +1219,11 @@ else:
         )
     with right:
         st.metric("Scheduled agents", f"{len(disp):,}")
-        
-
-
+        # Sum total shift seconds from HH:MM strings
+        def _hhmm_to_sec(s):
+            if not isinstance(s, str) or ":" not in s:
+                return 0
+            h, m = s.split(":")[:2]
+            return int(h)*3600 + int(m)*60
+        total_secs = sum(_hhmm_to_sec(x) for x in disp["Total Shift"])
+        st.metric("Total scheduled time", fmt_hms(total_secs))
