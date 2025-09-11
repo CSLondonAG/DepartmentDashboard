@@ -3453,6 +3453,39 @@
 8
 9
 10 - Very Likely >","Premier Bet Chat EN","How likely are you to recommend Premier Bet to a friend or colleague?"
+"0009201","10/09/2025","0 - < Very Unlikely","Single Select--Vertical","a0eTm000000pjnt","0 - < Very Unlikely
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 - Very Likely >","Premier Bet Chat EN","How likely are you to recommend Premier Bet to a friend or colleague?"
+"0009202","10/09/2025","0 - < Very Unlikely","Single Select--Vertical","a0eTm000000pkgj","0 - < Very Unlikely
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 - Very Likely >","Premier Bet Chat EN","How likely are you to recommend Premier Bet to a friend or colleague?"
+"0009213","10/09/2025","0 - < Very Unlikely","Single Select--Vertical","a0eTm000000ppQH","0 - < Very Unlikely
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 - Very Likely >","Mercury Bet Chat EN","How likely would you to to recommend Mercury Bet to a friend or colleague?"
 "0007166","27/07/2025","1","Single Select--Vertical","a0eTm000000f7vC","0 - < Very Unlikely
 1
 2
@@ -6871,6 +6904,26 @@
 3
 4
 5 - Very Satisfied >","Premier Bet Chat EN","How satisfied were you with the Customer Service you received today?"
+"0009201","10/09/2025","1 - <Not Satisfied","Single Select--Vertical","a0eTm000000pjnt","1 - <Not Satisfied
+2
+3
+4
+5 - Very Satisfied >","Premier Bet Chat EN","How satisfied were you with the Customer Service you received today?"
+"0009207","10/09/2025","1 - <Not Satisfied","Single Select--Vertical","a0eTm000000pnhq","1 - <Not Satisfied
+2
+3
+4
+5 - Very Satisfied >","Premierbet Email EN","How satisfied were you with the Customer Service you received today?"
+"0009213","10/09/2025","1 - <Not Satisfied","Single Select--Vertical","a0eTm000000ppQH","1 - <Not Satisfied
+2
+3
+4
+5 - Very Satisfied >","Mercury Bet Chat EN","How satisfied were you with the Customer Service you received today?"
+"0009221","11/09/2025","1 - <Not Satisfied","Single Select--Vertical","a0eTm000000puIF","1 - <Not Satisfied
+2
+3
+4
+5 - Very Satisfied >","Premierbet Email EN","How satisfied were you with the Customer Service you received today?"
 "0007094","24/07/2025","10 - Very Likely >","Single Select--Vertical","a0eTm000000edDx","0 - < Very Unlikely
 1
 2
@@ -11095,17 +11148,6 @@
 8
 9
 10 - Very Likely >","Premier Bet Chat EN","How likely are you to recommend Premier Bet to a friend or colleague?"
-"0009173","09/09/2025","10 - Very Likely >","Single Select--Vertical","a0eTm000000pUbx","0 - < Very Unlikely
-1
-2
-3
-4
-5
-6
-7
-8
-9
-10 - Very Likely >","Premier Bet Chat EN","How likely are you to recommend Premier Bet to a friend or colleague?"
 "0009189","10/09/2025","10 - Very Likely >","Single Select--Vertical","a0eTm000000pfHF","0 - < Very Unlikely
 1
 2
@@ -11117,6 +11159,72 @@
 8
 9
 10 - Very Likely >","Premierbet Email EN","How likely are you to recommend Premier Bet to a friend or colleague?"
+"0009206","10/09/2025","10 - Very Likely >","Single Select--Vertical","a0eTm000000plxl","0 - < Very Unlikely
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 - Very Likely >","Premier Bet Chat EN","How likely are you to recommend Premier Bet to a friend or colleague?"
+"0009207","10/09/2025","10 - Very Likely >","Single Select--Vertical","a0eTm000000pnhq","0 - < Very Unlikely
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 - Very Likely >","Premierbet Email EN","How likely are you to recommend Premier Bet to a friend or colleague?"
+"0009216","10/09/2025","10 - Very Likely >","Single Select--Vertical","a0eTm000000ppmr","0 - < Very Unlikely
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 - Very Likely >","Premier Bet Chat EN","How likely are you to recommend Premier Bet to a friend or colleague?"
+"0009215","10/09/2025","10 - Very Likely >","Single Select--Vertical","a0eTm000000ppdB","0 - < Very Unlikely
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 - Very Likely >","Mercury Bet Chat EN","How likely would you to to recommend Mercury Bet to a friend or colleague?"
+"0009221","11/09/2025","10 - Very Likely >","Single Select--Vertical","a0eTm000000puIF","0 - < Very Unlikely
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 - Very Likely >","Premierbet Email EN","How likely are you to recommend Premier Bet to a friend or colleague?"
+"0009225","11/09/2025","10 - Very Likely >","Single Select--Vertical","a0eTm000000pymv","0 - < Very Unlikely
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 - Very Likely >","Premier Bet Chat EN","How likely are you to recommend Premier Bet to a friend or colleague?"
 "0007092","24/07/2025","2","Single Select--Vertical","a0eTm000000dtsf","0 - < Very Unlikely
 1
 2
@@ -15308,16 +15416,41 @@
 3
 4
 5 - Very Satisfied >","Premier Bet Chat EN","How satisfied were you with the Customer Service you received today?"
-"0009173","09/09/2025","5 - Very Satisfied >","Single Select--Vertical","a0eTm000000pUbx","1 - <Not Satisfied
-2
-3
-4
-5 - Very Satisfied >","Premier Bet Chat EN","How satisfied were you with the Customer Service you received today?"
 "0009189","10/09/2025","5 - Very Satisfied >","Single Select--Vertical","a0eTm000000pfHF","1 - <Not Satisfied
 2
 3
 4
 5 - Very Satisfied >","Premierbet Email EN","How satisfied were you with the Customer Service you received today?"
+"0009202","10/09/2025","5 - Very Satisfied >","Single Select--Vertical","a0eTm000000pkgj","1 - <Not Satisfied
+2
+3
+4
+5 - Very Satisfied >","Premier Bet Chat EN","How satisfied were you with the Customer Service you received today?"
+"0009206","10/09/2025","5 - Very Satisfied >","Single Select--Vertical","a0eTm000000plxl","1 - <Not Satisfied
+2
+3
+4
+5 - Very Satisfied >","Premier Bet Chat EN","How satisfied were you with the Customer Service you received today?"
+"0009216","10/09/2025","5 - Very Satisfied >","Single Select--Vertical","a0eTm000000ppmr","1 - <Not Satisfied
+2
+3
+4
+5 - Very Satisfied >","Premier Bet Chat EN","How satisfied were you with the Customer Service you received today?"
+"0009215","10/09/2025","5 - Very Satisfied >","Single Select--Vertical","a0eTm000000ppdB","1 - <Not Satisfied
+2
+3
+4
+5 - Very Satisfied >","Mercury Bet Chat EN","How satisfied were you with the Customer Service you received today?"
+"0009222","11/09/2025","5 - Very Satisfied >","Single Select--Vertical","a0eTm000000pxu5","1 - <Not Satisfied
+2
+3
+4
+5 - Very Satisfied >","Premier Bet Chat EN","How satisfied were you with the Customer Service you received today?"
+"0009225","11/09/2025","5 - Very Satisfied >","Single Select--Vertical","a0eTm000000pymv","1 - <Not Satisfied
+2
+3
+4
+5 - Very Satisfied >","Premier Bet Chat EN","How satisfied were you with the Customer Service you received today?"
 "0007119","25/07/2025","6","Single Select--Vertical","a0eTm000000evNl","0 - < Very Unlikely
 1
 2
@@ -16099,6 +16232,17 @@
 8
 9
 10 - Very Likely >","Premierbet Email EN","How likely are you to recommend Premier Bet to a friend or colleague?"
+"0009222","11/09/2025","8","Single Select--Vertical","a0eTm000000pxu5","0 - < Very Unlikely
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 - Very Likely >","Premier Bet Chat EN","How likely are you to recommend Premier Bet to a friend or colleague?"
 "0007135","26/07/2025","9","Single Select--Vertical","a0eTm000000f1kv","0 - < Very Unlikely
 1
 2
@@ -17891,6 +18035,12 @@ No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the ag
 No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
 "0009197","10/09/2025","No","Single Select--Vertical","a0eTm000000phan","Yes
 No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
+"0009206","10/09/2025","No","Single Select--Vertical","a0eTm000000plxl","Yes
+No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
+"0009213","10/09/2025","No","Single Select--Vertical","a0eTm000000ppQH","Yes
+No","Mercury Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
+"0009221","11/09/2025","No","Single Select--Vertical","a0eTm000000puIF","Yes
+No","Premierbet Email EN","Was the issue reported in the email resolved by the agent?"
 "0007094","24/07/2025","Yes","Single Select--Vertical","a0eTm000000edDx","Yes
 No","Premierbet Email EN","Was the issue reported in the email resolved by the agent?"
 "0007100","25/07/2025","Yes","Single Select--Vertical","a0eTm000000eqvx","Yes
@@ -18549,11 +18699,23 @@ No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the ag
 No","Premierbet Email EN","Was the issue reported in the email resolved by the agent?"
 "0009172","09/09/2025","Yes","Single Select--Vertical","a0eTm000000pUaL","Yes
 No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
-"0009173","09/09/2025","Yes","Single Select--Vertical","a0eTm000000pUbx","Yes
-No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
 "0009188","10/09/2025","Yes","Single Select--Vertical","a0eTm000000pfAn","Yes
 No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
 "0009189","10/09/2025","Yes","Single Select--Vertical","a0eTm000000pfHF","Yes
 No","Premierbet Email EN","Was the issue reported in the email resolved by the agent?"
 "0009194","10/09/2025","Yes","Single Select--Vertical","a0eTm000000pgzh","Yes
 No","Premierbet Email EN","Was the issue reported in the email resolved by the agent?"
+"0009201","10/09/2025","Yes","Single Select--Vertical","a0eTm000000pjnt","Yes
+No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
+"0009202","10/09/2025","Yes","Single Select--Vertical","a0eTm000000pkgj","Yes
+No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
+"0009207","10/09/2025","Yes","Single Select--Vertical","a0eTm000000pnhq","Yes
+No","Premierbet Email EN","Was the issue reported in the email resolved by the agent?"
+"0009216","10/09/2025","Yes","Single Select--Vertical","a0eTm000000ppmr","Yes
+No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
+"0009215","10/09/2025","Yes","Single Select--Vertical","a0eTm000000ppdB","Yes
+No","Mercury Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
+"0009222","11/09/2025","Yes","Single Select--Vertical","a0eTm000000pxu5","Yes
+No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
+"0009225","11/09/2025","Yes","Single Select--Vertical","a0eTm000000pymv","Yes
+No","Premier Bet Chat EN","Was the issue reported in the chat resolved by the agent?"
