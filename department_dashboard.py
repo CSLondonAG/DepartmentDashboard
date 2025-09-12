@@ -49,7 +49,6 @@ def fmt_mmss(sec):
     return f"{m:02}:{s:02}"
 
 def fmt_hhmm(sec):
-    """Format seconds as HH:MM, zero-padded."""
     if sec is None or pd.isna(sec): return "–"
     sec = int(round(sec))
     h = sec // 3600
@@ -63,9 +62,7 @@ def fmt_hms(sec):
     return f"{h:02}:{m:02}:{s:02}"
 
 def fmt_minutes_clean(x):
-    """Format minutes without trailing zeros: 3.0 -> '3', 3.5 -> '3.5'."""
-    if x is None or pd.isna(x):
-        return "—"
+    if x is None or pd.isna(x): return "—"
     try:
         v = float(x)
     except Exception:
@@ -95,7 +92,6 @@ def get_sla_score_color(score):
     elif score >= 70: return "#FFC107"
     else: return "#F44336"
 
-# Survey color helpers
 def get_csat_color_pct(v):
     if v is None or pd.isna(v): return "#9E9E9E"
     return "#F44336" if v < 70 else "#4CAF50"
@@ -142,7 +138,7 @@ def intersect_sum(h_ints, a_ints):
         else:       j += 1
     return tot
 
-# Survey helpers (question-level -> survey-level)
+# Survey helpers
 def _leading_int(x) -> Optional[int]:
     if pd.isna(x): return None
     m = re.search(r"\d+", str(x))
@@ -160,57 +156,38 @@ def _nps_from_0_10(series: pd.Series) -> Optional[float]:
     if r.empty: return None
     promoters  = (r >= 9).mean() * 100
     detractors = (r <= 6).mean() * 100
-    return promoters - detractors  # -100..100
+    return promoters - detractors
 
-# =========================
-# Name/Status normalizers
-# =========================
+# Normalizers
 def _norm_person_key(s: str) -> str:
-    """Lowercase, strip accents, keep alnum tokens, sort tokens so 'A B' == 'B A'."""
-    if s is None:
-        return ""
+    if s is None: return ""
     s = unicodedata.normalize("NFKD", str(s))
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     toks = re.findall(r"[a-z0-9]+", s.lower())
     return " ".join(sorted(toks))
 
 def _norm_status_key(s: str) -> str:
-    """Lowercase, strip accents, collapse non-letters to underscores."""
-    if s is None:
-        return ""
+    if s is None: return ""
     s = unicodedata.normalize("NFKD", str(s))
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     s = re.sub(r"[^a-z]+", "_", s.lower()).strip("_")
     return s
 
-# =========================
-# Wide -> Tidy shifts.csv normalizer (matrix to tidy)
-# =========================
+# Wide -> Tidy shifts.csv
 def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert a wide shifts matrix:
-        Name | 01/06/2025 | 02/06/2025 | ... (cells like '7:00 AM - 4:00 PM')
-    into a tidy dataframe:
-        Agent | Date | Shift Start | Shift End
-    """
     if df_raw is None or df_raw.empty:
         return pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
 
     cols = list(df_raw.columns)
-
-    # Identify date columns
-    date_cols = []
-    date_map = {}
+    date_cols, date_map = [], {}
     for c in cols:
         d = pd.to_datetime(c, errors="coerce", dayfirst=True)
         if isinstance(d, pd.Timestamp) and not pd.isna(d):
             date_cols.append(c)
             date_map[c] = d.date()
-
     if not date_cols:
         return pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
 
-    # Assume first non-date column is the agent name
     name_col = next((c for c in cols if c not in date_cols), cols[0])
 
     long = (
@@ -259,7 +236,6 @@ if not chat_path.exists() or not email_path.exists():
 df_items     = pd.read_csv("report_items.csv",    dayfirst=True, parse_dates=["Start DT","End DT"])
 df_presence  = pd.read_csv("report_presence.csv", dayfirst=True, parse_dates=["Start DT","End DT"])
 
-# normalize wide shifts → tidy
 df_shifts_raw = pd.read_csv("shifts.csv")
 df_shifts     = normalize_wide_shifts(df_shifts_raw)
 
@@ -269,7 +245,7 @@ email_sla_df = pd.read_csv(email_path, dayfirst=True, parse_dates=["Date/Time Op
 for df in (df_items, df_presence, df_shifts, chat_sla_df, email_sla_df):
     df.columns = df.columns.str.strip()
 
-# Optional survey (question-level)
+# Optional survey
 survey = None
 if survey_path.exists():
     survey_q = pd.read_csv(
@@ -279,7 +255,6 @@ if survey_path.exists():
         low_memory=False
     )
     survey_q.columns = survey_q.columns.str.strip()
-
     req_cols = {"Survey Taker: ID", "Survey Taker: Created Date",
                 "Survey Question: Survey", "Survey Question: Question Title", "Response"}
     if req_cols.issubset(set(survey_q.columns)):
@@ -306,7 +281,7 @@ if survey_path.exists():
         survey["Survey Date"] = pd.to_datetime(survey["Survey Date"], errors="coerce")
 
 # =========================
-# Sidebar: Date Range (from chat.csv)
+# Sidebar
 # =========================
 st.sidebar.header("Filter Options")
 
@@ -360,7 +335,7 @@ avg_resp_hrs  = email_sla_p["Elapsed Time (Hours)"].mean() if len(email_sla_p) e
 avg_resp_secs = avg_resp_hrs * 3600
 
 # =========================
-# Availability & Handling (Proportional split for overall utilization tiles)
+# Availability & Handling (Proportional split)
 # =========================
 window_start = datetime.combine(start_date, datetime.min.time())
 window_end   = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
@@ -389,7 +364,6 @@ for ag, grp in presence_win.groupby("Created By: Full Name"):
     if eo: email_only_map[ag] = merge_intervals(eo)
     if sh: shared_map[ag]     = merge_intervals(sh)
 
-# Handling intervals per agent (clipped to window)
 chat_handles_map, email_handles_map = {}, {}
 for ag, grp in chat_df.groupby("User: Full Name"):
     ints = [clip_to_window(s, e, window_start, window_end) for s, e in zip(grp["Start DT"], grp["End DT"])]
@@ -401,7 +375,6 @@ for ag, grp in email_df.groupby("User: Full Name"):
     ints = [x for x in ints if x]
     if ints: email_handles_map[ag] = merge_intervals(ints)
 
-# Numerators and proportional denominators for utilization tiles
 dept_chat_handle  = 0.0
 dept_email_handle = 0.0
 dept_chat_avail   = 0.0
@@ -445,17 +418,16 @@ chat_util  = (dept_chat_handle  / dept_chat_avail)  if dept_chat_avail  else 0
 email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
 
 # =========================
-# Build per-day SLA & volumes (one row per day)
+# Per-day SLA & volumes
 # =========================
 daily = []
 for d in pd.date_range(start_date, end_date):
     dd = d.normalize()
 
-    # --- Chat SLA ---
     cd = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == dd.date()]
-    cw = cd[cd["Wait Time"].notna()]  # answered chats with wait times
+    cw = cd[cd["Wait Time"].notna()]
 
-    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cd)) if len(cd) else 0.0  # fraction 0–1
+    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cd)) if len(cd) else 0.0
     avg_wait_min    = (cw["Wait Time"].mean() / 60.0) if len(cw) else 0.0
     abandon_frac    = ((cd["Abandoned After"] > 20).sum() / len(cd)) if len(cd) else 0.0
 
@@ -463,7 +435,6 @@ for d in pd.date_range(start_date, end_date):
     chat_raw = 0.5 * frac_answer_60s - 0.3 * excess_wait_min - 0.2 * abandon_frac
     sla_c    = max(0.0, min(100.0, (chat_raw / CHAT_RESCALE_K) * SLA_SCALE))
 
-    # --- Email SLA ---
     ed = email_sla_p[email_sla_p["Date/Time Opened"].dt.date == dd.date()]
     frac_le_1hr = ((ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed)) if len(ed) else 0.0
     avg_resp_hr = (ed["Elapsed Time (Hours)"].mean()) if len(ed) else 0.0
@@ -481,15 +452,12 @@ for d in pd.date_range(start_date, end_date):
     })
 
 df_daily = pd.DataFrame(daily)
-
-# Weighted SLA per day
 df_daily["Weighted SLA"] = (
     df_daily["Chat SLA"] * df_daily["Chat Vol"] +
     df_daily["Email SLA"] * df_daily["Email Vol"]
 ) / (df_daily["Chat Vol"] + df_daily["Email Vol"])
 df_daily["Weighted SLA"] = df_daily["Weighted SLA"].fillna(0)
 
-# Summary SLA Scores
 chat_weighted  = (df_daily["Chat SLA"]  * df_daily["Chat Vol"]).sum()  / df_daily["Chat Vol"].sum()  if df_daily["Chat Vol"].sum()  else 0
 email_weighted = (df_daily["Email SLA"] * df_daily["Email Vol"]).sum() / df_daily["Email Vol"].sum() if df_daily["Email Vol"].sum() else 0
 total_vol      = (df_daily["Chat Vol"] + df_daily["Email Vol"]).sum()
@@ -502,7 +470,6 @@ st.title("📊 Department Performance Dashboard")
 st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 st.markdown("---")
 
-# Core Metrics
 st.subheader("Core Metrics")
 c1, c2, c3, c4 = st.columns(4)
 render_custom_metric(c1, "💬 Total Chats",            chat_total,           "Total chat interactions",          "#4CAF50")
@@ -510,7 +477,6 @@ render_custom_metric(c2, "✉️ Total Emails",           email_total,          
 render_custom_metric(c3, "⏳ Avg Chat Handle Time",    fmt_mmss(chat_aht),   "Average chat handle time",         "#4CAF50")
 render_custom_metric(c4, "⏳ Avg Email Handle Time",   fmt_mmss(email_aht),  "Average email handle time",        "#4CAF50")
 
-# Operational Metrics
 st.markdown("---")
 st.subheader("Operational Metrics")
 m1, m2, m3 = st.columns(3)
@@ -518,7 +484,6 @@ render_custom_metric(m1, "📈 Chat Utilization",     f"{chat_util:.1%}",     "H
 render_custom_metric(m2, "📈 Email Utilization",    f"{email_util:.1%}",    "Handled∩Available / proportional availability", get_utilization_color(email_util))
 render_custom_metric(m3, "⏱️ Avg Email Resp Time",  fmt_hms(avg_resp_secs), "Average email response time",           get_email_resp_time_color(avg_resp_secs))
 
-# SLA Score Summary
 st.markdown("---")
 st.subheader("🎯 SLA Score Summary")
 s1, s2, s3 = st.columns(3)
@@ -536,29 +501,26 @@ tick_dates = df_daily["Date"].tolist()
 x_min = datetime.combine(start_date, datetime.min.time()) - timedelta(days=0.5)
 x_max = datetime.combine(end_date,   datetime.max.time()) + timedelta(days=0.5)
 
-chart = (
+trend_chart = (
     alt.Chart(df_daily)
     .mark_line(point=True, color="#2F80ED")
     .encode(
-        x=alt.X(
-            "Date:T",
-            title="Date",
-            axis=alt.Axis(format="%d %b", labelAngle=-45, values=tick_dates),
-            scale=alt.Scale(domain=[x_min, x_max])
-        ),
+        x=alt.X("Date:T", title="Date",
+                axis=alt.Axis(format="%d %b", labelAngle=-45, values=tick_dates),
+                scale=alt.Scale(domain=[x_min, x_max])),
         y=alt.Y("Weighted SLA:Q", title="Weighted SLA Score", scale=alt.Scale(domain=[0,105])),
         tooltip=[alt.Tooltip("Date:T", format="%d %b"), alt.Tooltip("Weighted SLA:Q", format=".1f")]
     )
 )
-labels = chart.mark_text(dy=-10, color="#2F80ED").encode(text=alt.Text("Weighted SLA:Q", format=".1f"))
+labels = trend_chart.mark_text(dy=-10, color="#2F80ED").encode(text=alt.Text("Weighted SLA:Q", format=".1f"))
 rule   = alt.Chart(pd.DataFrame({"y":[85]})).mark_rule(color="red", strokeDash=[5,5]).encode(y="y:Q")
 rule_lb= alt.Chart(pd.DataFrame({"y":[85]})).mark_text(align="left", color="red", dy=-8)\
             .encode(y="y:Q", text=alt.value("Target: 85%"))
-
-st.altair_chart((chart + labels + rule + rule_lb).properties(width=700, height=350), use_container_width=True)
+st.altair_chart((trend_chart + labels + rule + rule_lb).properties(width=700, height=350),
+                use_container_width=True)
 
 # =========================
-# Customer Feedback Section (CSAT / NPS / FCR)
+# Customer Feedback (CSAT/NPS/FCR) + CSAT&NPS Trend (day-level axis)
 # =========================
 if survey is not None:
     survey_period = survey[
@@ -577,26 +539,19 @@ if survey is not None:
 
         k1, k2, k3, k4 = st.columns(4)
         render_custom_metric(k1, "🗳️ Surveys", f"{total_surveys:,}", "Total surveys in range", "#4CAF50")
-        render_custom_metric(
-            k2, "😊 CSAT (avg %)",
-            f"{csat_overall:.1f}%" if csat_overall is not None else "–",
-            "Average CSAT normalized to 0–100%",
-            get_csat_color_pct(csat_overall)
-        )
-        render_custom_metric(
-            k3, "⭐ NPS",
-            f"{nps_overall:.1f}" if nps_overall is not None else "–",
-            "NPS: %Promoters − %Detractors",
-            get_nps_color(nps_overall)
-        )
-        render_custom_metric(
-            k4, "🎯 FCR",
-            f"{fcr_overall:.1f}%" if fcr_overall is not None else "–",
-            "First Contact Resolution rate",
-            get_fcr_color_pct(fcr_overall)
-        )
+        render_custom_metric(k2, "😊 CSAT (avg %)",
+                             f"{csat_overall:.1f}%" if csat_overall is not None else "–",
+                             "Average CSAT normalized to 0–100%",
+                             get_csat_color_pct(csat_overall))
+        render_custom_metric(k3, "⭐ NPS",
+                             f"{nps_overall:.1f}" if nps_overall is not None else "–",
+                             "NPS: %Promoters − %Detractors",
+                             get_nps_color(nps_overall))
+        render_custom_metric(k4, "🎯 FCR",
+                             f"{fcr_overall:.1f}%" if fcr_overall is not None else "–",
+                             "First Contact Resolution rate",
+                             get_fcr_color_pct(fcr_overall))
 
-        # ---------- FIXED: day-level x-axis (no duplicate labels) ----------
         daily_survey = (
             survey_period
             .assign(Date=survey_period["Survey Date"].dt.normalize())
@@ -614,110 +569,60 @@ if survey is not None:
             st.subheader("CSAT & NPS Trend Analysis")
 
             base = alt.Chart(daily_survey)
-
-            # Shared x-encoding at DAY granularity
             x_enc = alt.X(
-                "yearmonthdate(Date):T",  # <- lock to day
+                "yearmonthdate(Date):T",
                 title="Date",
                 axis=alt.Axis(format="%d %b", labelAngle=45),
                 scale=alt.Scale(nice="day")
             )
-
             hover = alt.selection_point(on="mouseover", fields=["Date"], nearest=True, empty=False)
 
-            csat_line = (
-                base.mark_line(strokeWidth=3, color="#2563eb")
-                .encode(
-                    x=x_enc,
-                    y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
-                    tooltip=[
-                        alt.Tooltip("Date:T", title="Date", format="%d %b"),
-                        alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
-                        alt.Tooltip("Surveys:Q", title="Surveys", format=".0f"),
-                    ],
-                )
+            csat_line = base.mark_line(strokeWidth=3, color="#2563eb").encode(
+                x=x_enc,
+                y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
+                tooltip=[alt.Tooltip("Date:T", title="Date", format="%d %b"),
+                         alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
+                         alt.Tooltip("Surveys:Q", title="Surveys", format=".0f")]
             )
+            csat_points = base.mark_point(filled=True, color="#2563eb").encode(
+                x=x_enc,
+                y=alt.Y("CSAT_pct:Q", axis=None, scale=alt.Scale(domain=[0,100])),
+                size=alt.condition(hover, alt.value(120), alt.value(60)),
+                tooltip=[alt.Tooltip("Date:T", title="Date", format="%d %b"),
+                         alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f")]
+            ).add_params(hover)
 
-            nps_line = (
-                base.mark_line(strokeWidth=3, color="#dc2626", strokeDash=[5, 5])
-                .encode(
-                    x=x_enc,
-                    y=alt.Y(
-                        "NPS:Q",
-                        title="NPS Score",
+            nps_line = base.mark_line(strokeWidth=3, color="#dc2626", strokeDash=[5, 5]).encode(
+                x=x_enc,
+                y=alt.Y("NPS:Q", title="NPS Score",
                         axis=alt.Axis(orient="right"),
-                        scale=alt.Scale(domain=[-100, 100]),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("Date:T", title="Date", format="%d %b"),
-                        alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
-                        alt.Tooltip("Surveys:Q", title="Surveys", format=".0f"),
-                    ],
-                )
+                        scale=alt.Scale(domain=[-100, 100])),
+                tooltip=[alt.Tooltip("Date:T", title="Date", format="%d %b"),
+                         alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
+                         alt.Tooltip("Surveys:Q", title="Surveys", format=".0f")]
             )
+            nps_points = base.mark_point(filled=True, color="#dc2626", shape="square").encode(
+                x=x_enc,
+                y=alt.Y("NPS:Q", axis=None, scale=alt.Scale(domain=[-100,100])),
+                size=alt.condition(hover, alt.value(120), alt.value(60)),
+                tooltip=[alt.Tooltip("Date:T", title="Date", format="%d %b"),
+                         alt.Tooltip("NPS:Q", title="NPS Score", format=".0f")]
+            ).add_params(hover)
+            nps_zero_rule = alt.Chart(pd.DataFrame({"zero":[0]})).mark_rule(
+                strokeDash=[6,4], color="#9ca3af", opacity=0.6
+            ).encode(y=alt.Y("zero:Q", axis=None, scale=alt.Scale(domain=[-100,100])))
 
-            csat_points = (
-                base.mark_point(filled=True, color="#2563eb")
-                .encode(
-                    x=x_enc,
-                    y=alt.Y("CSAT_pct:Q", axis=None, scale=alt.Scale(domain=[0, 100])),
-                    size=alt.condition(hover, alt.value(120), alt.value(60)),
-                    tooltip=[
-                        alt.Tooltip("Date:T", title="Date", format="%d %b"),
-                        alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
-                    ],
-                )
-                .add_params(hover)
-            )
-
-            nps_points = (
-                base.mark_point(filled=True, color="#dc2626", shape="square")
-                .encode(
-                    x=x_enc,
-                    y=alt.Y("NPS:Q", axis=None, scale=alt.Scale(domain=[-100, 100])),
-                    size=alt.condition(hover, alt.value(120), alt.value(60)),
-                    tooltip=[
-                        alt.Tooltip("Date:T", title="Date", format="%d %b"),
-                        alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
-                    ],
-                )
-                .add_params(hover)
-            )
-
-            nps_zero_rule = (
-                alt.Chart(pd.DataFrame({"zero": [0]}))
-                .mark_rule(strokeDash=[6, 4], color="#9ca3af", opacity=0.6)
-                .encode(y=alt.Y("zero:Q", axis=None, scale=alt.Scale(domain=[-100, 100])))
-            )
-
-            trend = (
-                alt.layer(csat_line, nps_line, csat_points, nps_points, nps_zero_rule)
-                .resolve_scale(y="independent")
-                .properties(
-                    width=800,
-                    height=400,
-                    title=alt.TitleParams(
-                        text="CSAT & NPS Trend Analysis",
-                        font="Arial",
-                        fontSize=18,
-                        anchor="start",
-                        color="#111827",
-                    ),
-                )
-                .configure_axis(
-                    grid=True,
-                    gridColor="#e5e7eb",
-                    gridDash=[2, 3],
-                    labelFont="Arial",
-                    titleFont="Arial",
-                    labelColor="#374151",
-                    titleColor="#111827",
-                )
-                .configure_view(stroke="#d1d5db", fill="white")
-                .configure_legend(orient="top-right", titleFont="Arial", labelFont="Arial")
+            trend = alt.layer(csat_line, nps_line, csat_points, nps_points, nps_zero_rule)\
+                .resolve_scale(y="independent")\
+                .properties(width=800, height=400, title=alt.TitleParams(
+                    text="CSAT & NPS Trend Analysis", font="Arial", fontSize=18, anchor="start", color="#111827"
+                ))\
+                .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2,3],
+                                labelFont="Arial", titleFont="Arial",
+                                labelColor="#374151", titleColor="#111827")\
+                .configure_view(stroke="#d1d5db", fill="white")\
+                .configure_legend(orient="top-right", titleFont="Arial", labelFont="Arial")\
                 .interactive()
-            )
-
             st.altair_chart(trend, use_container_width=True)
     else:
         st.info("No survey responses in the selected date range.")
@@ -725,7 +630,7 @@ else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
 
 # =========================
-# Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
+# Hourly Weighted SLA (selected day)
 # =========================
 st.markdown("---")
 st.subheader("⏱️ Hourly Weighted SLA (selected day)")
@@ -738,8 +643,7 @@ hourly_date = st.date_input(
 )
 
 def _clamp01(x):
-    if pd.isna(x):
-        return 0.0
+    if pd.isna(x): return 0.0
     return max(0.0, min(1.0, float(x)))
 
 def _merge_intervals(ints):
@@ -761,12 +665,6 @@ def _sum_secs(ints):
     return sum((e - s).total_seconds() for s, e in ints)
 
 def compute_hourly_available_minutes_and_logged_in(sel_date: datetime.date) -> pd.DataFrame:
-    """
-    Per hour:
-      - Avail (min) = sum of minutes all agents were in any 'available' presence
-                      (Available_Chat, Available_Email_and_Web, Available_All)
-      - Logged In Agents = distinct agents with ANY presence overlapping that hour
-    """
     day_start = datetime.combine(sel_date, datetime.min.time())
     day_end   = day_start + timedelta(days=1)
 
@@ -896,13 +794,15 @@ else:
     show_breakdown = st.checkbox("Show Chat & Email lines", value=False)
     show_avail     = st.checkbox("Overlay available minutes (bars)", value=True)
 
-    # Weighted SLA line
+    # -------- Two-axis composition (fix) --------
+    # Left axis owner: Weighted SLA (and optional Chat/Email lines share it without axes)
     weighted_line = (
         alt.Chart(df_hourly)
         .mark_line(point=True, color="#2F80ED")
         .encode(
             x=alt.X("Hour:T", title="Hour", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-            y=alt.Y("Weighted SLA:Q", title="Weighted SLA", scale=alt.Scale(domain=[0, 105])),
+            y=alt.Y("Weighted SLA:Q", title="Weighted SLA",
+                    scale=alt.Scale(domain=[0, 105]), axis=alt.Axis(orient="left")),
             tooltip=[
                 alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
                 alt.Tooltip("Weighted SLA:Q", format=".1f"),
@@ -913,65 +813,62 @@ else:
             ],
         )
     )
+    left_layers = [weighted_line]
 
-    layers = [weighted_line]
-
-    # Optional channel SLA lines
     if show_breakdown:
         chat_line = (
             alt.Chart(df_hourly)
             .mark_line(point=True, color="#0EA5E9")
             .encode(
                 x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-                y=alt.Y("Chat SLA:Q", title=None, scale=alt.Scale(domain=[0, 105])),
-                tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Chat SLA:Q", format=".1f")],
+                y=alt.Y("Chat SLA:Q", title=None, axis=None, scale=alt.Scale(domain=[0,105])),
+                tooltip=[alt.Tooltip("Hour:T", format="%H:%M"),
+                         alt.Tooltip("Chat SLA:Q", format=".1f")],
             )
         )
         email_line = (
             alt.Chart(df_hourly)
-            .mark_line(point=True, color="#EF4444", strokeDash=[5, 3])
+            .mark_line(point=True, color="#EF4444", strokeDash=[5,3])
             .encode(
                 x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-                y=alt.Y("Email SLA:Q", title=None, scale=alt.Scale(domain=[0, 105])),
-                tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Email SLA:Q", format=".1f")],
+                y=alt.Y("Email SLA:Q", title=None, axis=None, scale=alt.Scale(domain=[0,105])),
+                tooltip=[alt.Tooltip("Hour:T", format="%H:%M"),
+                         alt.Tooltip("Email SLA:Q", format=".1f")],
             )
         )
-        layers += [chat_line, email_line]
+        left_layers += [chat_line, email_line]
 
-    # Single available-minute bars (right axis)
-    if show_avail:
-        bars_avail = (
-            alt.Chart(df_hourly)
-            .mark_bar(opacity=0.28, color="#8B5CF6")  # violet
-            .encode(
-                x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-                y=alt.Y(
-                    "Avail (min):Q",
-                    title="Available Minutes",
-                    axis=alt.Axis(orient="right"),
-                    scale=alt.Scale(nice=True)
-                ),
-            )
-        )
-        layers += [bars_avail]
-
-    # Target line
     target_val = 85
-    rule = alt.Chart(pd.DataFrame({"y": [target_val]})).mark_rule(color="red", strokeDash=[5, 5]).encode(y="y:Q")
-    rule_lb = (
-        alt.Chart(pd.DataFrame({"y": [target_val]}))
-        .mark_text(align="left", dy=-8, color="red")
+    rule = alt.Chart(pd.DataFrame({"y":[target_val]})).mark_rule(color="red", strokeDash=[5,5]).encode(y="y:Q")
+    rule_lb = alt.Chart(pd.DataFrame({"y":[target_val]})).mark_text(align="left", dy=-8, color="red")\
         .encode(y="y:Q", text=alt.value(f"Target: {target_val}%"))
-    )
+    left_chart = alt.layer(*left_layers, rule, rule_lb).resolve_scale(y="shared")
 
-    combined_top = alt.layer(*layers, rule, rule_lb).resolve_scale(y="independent")\
-        .properties(width=900, height=360, title=f"Hourly Weighted SLA — {hourly_date:%d %b %Y}")\
-        .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2, 3])\
+    # Right axis owner: Available minutes bars
+    right_chart = (
+        alt.Chart(df_hourly)
+        .mark_bar(opacity=0.28, color="#8B5CF6")
+        .encode(
+            x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
+            y=alt.Y("Avail (min):Q", title="Available Minutes",
+                    axis=alt.Axis(orient="right"), scale=alt.Scale(nice=True)),
+            tooltip=[alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
+                     alt.Tooltip("Avail (min):Q", title="Available (min)", format=".0f")],
+        )
+    ) if show_avail else None
+
+    if right_chart is not None:
+        combined_top = alt.layer(left_chart, right_chart).resolve_scale(y="independent")
+    else:
+        combined_top = left_chart
+
+    combined_top = combined_top.properties(width=900, height=360, title=f"Hourly Weighted SLA — {hourly_date:%d %b %Y}")\
+        .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2,3])\
         .configure_view(stroke="#d1d5db", fill="white")
 
     st.altair_chart(combined_top, use_container_width=True)
 
-    # --- Logged In Agents per Hour (larger) ---
+    # Logged-in agents (separate big chart)
     max_agents_val = pd.to_numeric(df_hourly["Logged In Agents"], errors="coerce").max()
     max_agents = int((0 if pd.isna(max_agents_val) else max_agents_val) + 1)
 
@@ -979,42 +876,19 @@ else:
         alt.Chart(df_hourly)
         .mark_bar(color="#6B7280", opacity=0.70)
         .encode(
-            x=alt.X(
-                "Hour:T",
-                title="Hour",
-                axis=alt.Axis(format="%H:%M", labelAngle=-45, labelLimit=140)
-            ),
-            y=alt.Y(
-                "Logged In Agents:Q",
-                title="Logged In Agents",
-                scale=alt.Scale(domain=[0, max_agents])
-            ),
-            tooltip=[
-                alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-                alt.Tooltip("Logged In Agents:Q", format=".0f"),
-            ],
+            x=alt.X("Hour:T", title="Hour", axis=alt.Axis(format="%H:%M", labelAngle=-45, labelLimit=140)),
+            y=alt.Y("Logged In Agents:Q", title="Logged In Agents", scale=alt.Scale(domain=[0, max_agents])),
+            tooltip=[alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
+                     alt.Tooltip("Logged In Agents:Q", format=".0f")],
         )
-        .properties(
-            width=900,
-            height=220,
-            title="Logged In Agents per Hour"
-        )
-        .configure_axis(
-            grid=True,
-            gridColor="#e5e7eb",
-            gridDash=[2, 3]
-        )
-        .configure_view(
-            stroke="#d1d5db",
-            fill="white"
-        )
+        .properties(width=900, height=220, title="Logged In Agents per Hour")
+        .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2,3])
+        .configure_view(stroke="#d1d5db", fill="white")
     )
-
     st.altair_chart(agents_chart, use_container_width=True)
 
     with st.expander("View hourly table"):
-        show_cols = ["Hour", "Chat SLA", "Chat Vol", "Email SLA", "Email Vol",
-                     "Avail (min)", "Logged In Agents", "Weighted SLA"]
+        show_cols = ["Hour","Chat SLA","Chat Vol","Email SLA","Email Vol","Avail (min)","Logged In Agents","Weighted SLA"]
         st.dataframe(
             df_hourly[show_cols].style.format({
                 "Chat SLA": "{:.1f}",
@@ -1033,17 +907,6 @@ st.markdown("---")
 st.subheader(f"👥 Daily Schedule Summary — {end_date:%d %b %Y}")
 
 def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame, day: datetime.date) -> pd.DataFrame:
-    """
-    For each agent scheduled overlapping `day` (from normalized shifts.csv), show:
-      - Scheduled Shift Start / End (HH:MM)
-      - Lunch Start / End (from presence where status contains 'lunch')
-      - Total Shift (scheduled hh:mm), Logged-in/Available (hh:mm) within scheduled,
-        Adherence %, Availability %,
-      - Login / Logout (AVAILABLE statuses only, full day),
-      - Late/Early mins (based on ANY presence),
-        plus hidden helpers for styling:
-        _shift_start_dt (datetime), _lunch_start_dt (datetime)
-    """
     if df_shifts_tidy is None or df_shifts_tidy.empty:
         return pd.DataFrame(columns=[
             "Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift",
@@ -1055,7 +918,6 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
     day_start = datetime.combine(day, datetime.min.time())
     day_end   = day_start + timedelta(days=1)
 
-    # Consider any shift that overlaps the selected day
     sched = df_shifts_tidy[
         (df_shifts_tidy["Shift Start"] < day_end) &
         (df_shifts_tidy["Shift End"]   > day_start)
@@ -1069,7 +931,6 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "_shift_start_dt","_lunch_start_dt"
         ])
 
-    # Presence overlapping the day (normalize agent and status)
     pres_day = df_presence[(df_presence["Start DT"] < day_end) &
                            (df_presence["End DT"]   > day_start)].copy()
     pres_day["__status_norm"] = pres_day["Service Presence Status: Developer Name"].apply(_norm_status_key)
@@ -1090,14 +951,12 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
 
         sched_secs = (sched_clip_e - sched_clip_s).total_seconds()
 
-        # Agent presence for the day
         pa = pres_day[pres_day["__agent_key"] == agent_key]
 
         def _clip_to_sched(s, e):
             cs, ce = max(s, sched_clip_s), min(e, sched_clip_e)
             return (cs, ce) if ce > cs else None
 
-        # Logged-in intervals (ANY presence) — for adherence and late/early
         logged_ints = []
         for _, pr in pa.iterrows():
             seg = _clip_to_sched(pr["Start DT"].to_pydatetime(), pr["End DT"].to_pydatetime())
@@ -1105,7 +964,6 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         logged_ints = merge_intervals(logged_ints)
         logged_secs = sum((e - s).total_seconds() for s, e in logged_ints)
 
-        # Available intervals within scheduled (for availability %)
         avail_ints = []
         for _, pr in pa[pa["__status_norm"].isin(AVAILABLE_STATUSES)].iterrows():
             seg = _clip_to_sched(pr["Start DT"].to_pydatetime(), pr["End DT"].to_pydatetime())
@@ -1113,7 +971,6 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         avail_ints = merge_intervals(avail_ints)
         avail_secs = sum((e - s).total_seconds() for s, e in avail_ints)
 
-        # Lunch from presence = any status containing 'lunch'
         lunch_rows = pa[pa["__status_norm"].str.contains("lunch", na=False)]
         lunch_ints = []
         for _, lr in lunch_rows.iterrows():
@@ -1123,7 +980,6 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         lunch_start = min((s for s, _ in lunch_ints), default=None)
         lunch_end   = max((e for _, e in lunch_ints), default=None)
 
-        # Login/Logout from AVAILABLE statuses over the full day (not clipped to schedule)
         avail_day_ints = []
         for _, pr in pa[pa["__status_norm"].isin(AVAILABLE_STATUSES)].iterrows():
             cs, ce = max(pr["Start DT"], day_start), min(pr["End DT"], day_end)
@@ -1133,7 +989,6 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         login_avail  = min((s for s, _ in avail_day_ints), default=None)
         logout_avail = max((e for _, e in avail_day_ints), default=None)
 
-        # First/Last presence across the day (ANY presence) for late/early mins
         all_pres_ints = []
         for _, pr in pa.iterrows():
             cs, ce = max(pr["Start DT"], day_start), min(pr["End DT"], day_end)
@@ -1143,7 +998,6 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         first_login_any = min((s for s, _ in all_pres_ints), default=None)
         last_logout_any = max((e for _, e in all_pres_ints), default=None)
 
-        # Late start / early finish vs scheduled (mins) using ANY presence
         late_start_min   = round(max(((first_login_any - sched_clip_s).total_seconds()/60.0), 0.0), 1) if first_login_any else None
         early_finish_min = round(max(((sched_clip_e - last_logout_any).total_seconds()/60.0), 0.0), 1)  if last_logout_any else None
 
@@ -1156,17 +1010,15 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
             "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
             "Shift End":           sched_clip_e.strftime("%H:%M"),
-            "Total Shift":         fmt_hhmm(sched_secs),          # HH:MM
-            "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),         # HH:MM
-            "Available (hh:mm)":   fmt_hhmm(avail_secs),          # HH:MM
+            "Total Shift":         fmt_hhmm(sched_secs),
+            "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),
+            "Available (hh:mm)":   fmt_hhmm(avail_secs),
             "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
             "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),
             "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
-            "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
+            "Logout":              ("—" if logout_avail is not None else logout_avail.strftime("%H:%M")),
             "Late Start (min)":    fmt_minutes_clean(late_start_min),
             "Early Finish (min)":  fmt_minutes_clean(early_finish_min),
-
-            # hidden helper columns for styling
             "_shift_start_dt":     sched_clip_s,
             "_lunch_start_dt":     lunch_start
         })
@@ -1183,24 +1035,16 @@ schedule_df = build_daily_schedule(df_shifts, df_presence, end_date)
 if schedule_df.empty:
     st.info(f"No scheduled agents found for {end_date:%d %b %Y}.")
 else:
-    # Compute lunch-window violations using hidden datetime helpers
     df = schedule_df.copy()
-
-    # Hours delta from shift start to lunch start (NaN if no lunch)
     delta_hours = (
         (pd.to_datetime(df["_lunch_start_dt"]) - pd.to_datetime(df["_shift_start_dt"]))
         .dt.total_seconds() / 3600
     )
-
-    # Violation: lunch < 3h OR > 5h from shift start (only when lunch exists)
     viol_idx = df.index[delta_hours.notna() & ((delta_hours < 3.0) | (delta_hours > 5.0))]
-
-    # Drop helper columns from what we display
     display_cols = [c for c in df.columns if c not in {"_shift_start_dt", "_lunch_start_dt"}]
     disp = df[display_cols].copy()
-
-    # Row-wise styling: make Lunch cells red when violated
     lunch_cols = {"Lunch Start", "Lunch End"}
+
     def _style_row(row):
         is_violation = row.name in viol_idx
         styles = []
@@ -1213,13 +1057,9 @@ else:
 
     left, right = st.columns([4,1])
     with left:
-        st.dataframe(
-            disp.style.apply(_style_row, axis=1),
-            use_container_width=True
-        )
+        st.dataframe(disp.style.apply(_style_row, axis=1), use_container_width=True)
     with right:
         st.metric("Scheduled agents", f"{len(disp):,}")
-        # Sum total shift seconds from HH:MM strings
         def _hhmm_to_sec(s):
             if not isinstance(s, str) or ":" not in s:
                 return 0
