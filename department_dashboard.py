@@ -915,6 +915,8 @@ else:
             counts["Country"] = pd.Categorical(counts["Country"], categories=order, ordered=True)
         except Exception:
             pass
+            country_order = ['Sierra Leone', 'Malawi', 'Zimbabwe', 'Namibia', 'Uganda', 'Liberia', 
+                 'Mali', 'Angola', 'Unknown', 'Cameroon', 'Gabon']
 
         top_n = st.sidebar.slider("Pie chart: top countries", min_value=3, max_value=12, value=8, step=1)
         if len(counts) > top_n:
