@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import unicodedata
 from typing import Optional
+import datetime as _dt
 
 # =========================
 # Page Config & Styling
@@ -61,6 +62,9 @@ def fmt_hms(sec):
     m, s   = divmod(rem, 60)
     return f"{h:02}:{m:02}:{s:02}"
 
+def fmt_hhmm_dt(dt):
+    return "—" if dt is None or (isinstance(dt, float) and pd.isna(dt)) else dt.strftime("%H:%M")
+
 def fmt_minutes_clean(x):
     if x is None or pd.isna(x): return "—"
     try:
@@ -92,6 +96,7 @@ def get_sla_score_color(score):
     elif score >= 70: return "#FFC107"
     else: return "#F44336"
 
+# Survey color helpers
 def get_csat_color_pct(v):
     if v is None or pd.isna(v): return "#9E9E9E"
     return "#F44336" if v < 70 else "#4CAF50"
@@ -138,7 +143,7 @@ def intersect_sum(h_ints, a_ints):
         else:       j += 1
     return tot
 
-# Survey helpers
+# Survey helpers (question-level -> survey-level)
 def _leading_int(x) -> Optional[int]:
     if pd.isna(x): return None
     m = re.search(r"\d+", str(x))
@@ -156,38 +161,55 @@ def _nps_from_0_10(series: pd.Series) -> Optional[float]:
     if r.empty: return None
     promoters  = (r >= 9).mean() * 100
     detractors = (r <= 6).mean() * 100
-    return promoters - detractors
+    return promoters - detractors  # -100..100
 
-# Normalizers
+# =========================
+# Name/Status normalizers
+# =========================
 def _norm_person_key(s: str) -> str:
-    if s is None: return ""
+    """Lowercase, strip accents, keep alnum tokens, sort tokens so 'A B' == 'B A'."""
+    if s is None:
+        return ""
     s = unicodedata.normalize("NFKD", str(s))
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     toks = re.findall(r"[a-z0-9]+", s.lower())
     return " ".join(sorted(toks))
 
 def _norm_status_key(s: str) -> str:
-    if s is None: return ""
+    """Lowercase, strip accents, collapse non-letters to underscores."""
+    if s is None:
+        return ""
     s = unicodedata.normalize("NFKD", str(s))
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     s = re.sub(r"[^a-z]+", "_", s.lower()).strip("_")
     return s
 
-# Wide -> Tidy shifts.csv
+# =========================
+# Wide -> Tidy shifts.csv normalizer (matrix to tidy)
+# =========================
 def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert a wide shifts matrix into a tidy dataframe with:
+        Agent | Date | Shift Start | Shift End
+    """
     if df_raw is None or df_raw.empty:
         return pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
 
     cols = list(df_raw.columns)
-    date_cols, date_map = [], {}
+
+    # Identify date columns
+    date_cols = []
+    date_map = {}
     for c in cols:
         d = pd.to_datetime(c, errors="coerce", dayfirst=True)
         if isinstance(d, pd.Timestamp) and not pd.isna(d):
             date_cols.append(c)
             date_map[c] = d.date()
+
     if not date_cols:
         return pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
 
+    # Assume first non-date column is the agent name
     name_col = next((c for c in cols if c not in date_cols), cols[0])
 
     long = (
@@ -222,79 +244,86 @@ def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
     return tidy.reset_index(drop=True)
 
 # =========================
-# Load Data
+# File paths (case-insensitive) + cache-busting
 # =========================
-BASE_DIR   = Path(__file__).parent
-chat_path  = BASE_DIR / "chat.csv"
-email_path = BASE_DIR / "email.csv"
-survey_path= BASE_DIR / "survey.csv"
+BASE_DIR = Path(__file__).parent
 
-if not chat_path.exists() or not email_path.exists():
-    st.error("Please place chat.csv and email.csv beside this script.")
+def resolve_path_case_insensitive(filename: str) -> Path:
+    """Return a Path to a file in BASE_DIR matching filename, case-insensitively."""
+    p = BASE_DIR / filename
+    if p.exists():
+        return p
+    low = filename.lower()
+    for child in BASE_DIR.iterdir():
+        if child.is_file() and child.name.lower() == low:
+            return child
+    return p  # may not exist; caller should check
+
+def file_signature(p: Path):
+    """Tuple that changes when the file changes (mtime, size)."""
+    stat = p.stat()
+    return (int(stat.st_mtime), int(stat.st_size))
+
+@st.cache_data(show_spinner=False)
+def load_csv_cached(path_str: str, sig: tuple, **read_kwargs):
+    # sig is unused inside; it's only to bust the cache when the file changes
+    return pd.read_csv(path_str, **read_kwargs)
+
+# Resolve data files
+chat_path   = resolve_path_case_insensitive("chat.csv")
+email_path  = resolve_path_case_insensitive("email.csv")
+survey_path = resolve_path_case_insensitive("survey.csv")
+items_path  = resolve_path_case_insensitive("report_items.csv")
+pres_path   = resolve_path_case_insensitive("report_presence.csv")
+shifts_path = resolve_path_case_insensitive("shifts.csv")
+
+missing = [p.name for p in (chat_path, email_path, items_path, pres_path, shifts_path) if not p.exists()]
+if missing:
+    st.error(f"Missing required files in the app folder: {', '.join(missing)}")
     st.stop()
 
-df_items     = pd.read_csv("report_items.csv",    dayfirst=True, parse_dates=["Start DT","End DT"])
-df_presence  = pd.read_csv("report_presence.csv", dayfirst=True, parse_dates=["Start DT","End DT"])
-
-df_shifts_raw = pd.read_csv("shifts.csv")
-df_shifts     = normalize_wide_shifts(df_shifts_raw)
-
-chat_sla_df  = pd.read_csv(chat_path,  dayfirst=True, parse_dates=["Date/Time Opened"])
-email_sla_df = pd.read_csv(email_path, dayfirst=True, parse_dates=["Date/Time Opened","Completion Date"])
-
-for df in (df_items, df_presence, df_shifts, chat_sla_df, email_sla_df):
-    df.columns = df.columns.str.strip()
-
-# Optional survey
-survey = None
-if survey_path.exists():
-    survey_q = pd.read_csv(
-        survey_path,
-        dayfirst=True,
-        parse_dates=["Survey Taker: Created Date"],
-        low_memory=False
-    )
-    survey_q.columns = survey_q.columns.str.strip()
-    req_cols = {"Survey Taker: ID", "Survey Taker: Created Date",
-                "Survey Question: Survey", "Survey Question: Question Title", "Response"}
-    if req_cols.issubset(set(survey_q.columns)):
-        qtitle = survey_q["Survey Question: Question Title"].str.lower()
-        is_nps  = qtitle.str.contains("recommend", na=False) | qtitle.str.contains("likely", na=False)
-        is_csat = qtitle.str.contains("satisfied",  na=False)
-        is_fcr  = qtitle.str.contains("resolved",   na=False)
-
-        survey_q["NPS_raw"]   = survey_q["Response"].where(is_nps).apply(_leading_int)
-        survey_q["CSAT_1_5"]  = survey_q["Response"].where(is_csat).apply(_leading_int)
-        survey_q["FCR_bool"]  = survey_q["Response"].where(is_fcr).apply(_bool_yes_no)
-        survey_q["Channel"]   = survey_q["Survey Question: Survey"].str.extract(r"(Email|Chat)", expand=False).fillna("Other")
-
-        agg = {
-            "Survey Taker: Created Date": "min",
-            "Channel":   lambda s: s.dropna().iloc[0] if s.dropna().any() else "Other",
-            "NPS_raw":   lambda s: pd.to_numeric(s, errors="coerce").dropna().max() if pd.to_numeric(s, errors="coerce").notna().any() else None,
-            "CSAT_1_5":  lambda s: pd.to_numeric(s, errors="coerce").dropna().max() if pd.to_numeric(s, errors="coerce").notna().any() else None,
-            "FCR_bool":  lambda s: s.dropna().iloc[0] if s.dropna().any() else None,
-        }
-        survey = survey_q.groupby("Survey Taker: ID", as_index=False).agg(agg)
-        survey = survey.rename(columns={"Survey Taker: Created Date": "Survey Date"})
-        survey["CSAT%"] = ((survey["CSAT_1_5"] - 1) / 4.0 * 100.0).clip(0, 100)
-        survey["Survey Date"] = pd.to_datetime(survey["Survey Date"], errors="coerce")
+# Manual refresh control
+st.sidebar.markdown("---")
+if st.sidebar.button("🔄 Reload data now"):
+    st.cache_data.clear()
+    st.rerun()
 
 # =========================
-# Sidebar
+# Load Data (cached, cache-busted)
+# =========================
+df_items     = load_csv_cached(str(items_path),  file_signature(items_path),  dayfirst=True, parse_dates=["Start DT","End DT"])
+df_presence  = load_csv_cached(str(pres_path),   file_signature(pres_path),   dayfirst=True, parse_dates=["Start DT","End DT"])
+df_shifts_raw= load_csv_cached(str(shifts_path), file_signature(shifts_path))
+chat_sla_df  = load_csv_cached(str(chat_path),   file_signature(chat_path),   dayfirst=True, parse_dates=["Date/Time Opened"])
+email_sla_df = load_csv_cached(str(email_path),  file_signature(email_path),  dayfirst=True, parse_dates=["Date/Time Opened","Completion Date"])
+
+# Optional survey (question-level)
+survey = None
+if survey_path.exists():
+    survey_q = load_csv_cached(str(survey_path), file_signature(survey_path),
+                               dayfirst=True, parse_dates=["Survey Taker: Created Date"], low_memory=False)
+    survey_q.columns = survey_q.columns.str.strip()
+
+# Normalize columns
+for df in (df_items, df_presence, df_shifts_raw, chat_sla_df, email_sla_df):
+    df.columns = df.columns.str.strip()
+
+# Re-coerce critical datetime columns (defensive)
+for df_ in (df_items, df_presence):
+    for col in ("Start DT", "End DT"):
+        df_[col] = pd.to_datetime(df_[col], errors="coerce", dayfirst=True, utc=False)
+
+# Normalize shifts
+df_shifts = normalize_wide_shifts(df_shifts_raw)
+
+# =========================
+# Sidebar: Date Range (from chat.csv)
 # =========================
 st.sidebar.header("Filter Options")
 
-if st.sidebar.button("🧹 Clear cache & rerun"):
-    try:
-        st.cache_data.clear()
-        st.cache_resource.clear()
-    finally:
-        try: st.rerun()
-        except Exception: st.experimental_rerun()
-
 min_date = chat_sla_df["Date/Time Opened"].dt.date.min()
 max_date = chat_sla_df["Date/Time Opened"].dt.date.max()
+
 start_date = st.sidebar.date_input("Start Date", value=max_date - timedelta(days=6),
                                    min_value=min_date, max_value=max_date)
 end_date   = st.sidebar.date_input("End Date",   value=max_date,
@@ -303,13 +332,38 @@ if start_date > end_date:
     st.sidebar.error("Start must be on or before End")
     st.stop()
 
+# Show which files were loaded (helpful on Cloud)
+def fmt_sig(p: Path):
+    mtime = _dt.datetime.fromtimestamp(p.stat().st_mtime)
+    return f"{p.name} • {p.stat().st_size:,} bytes • {mtime:%Y-%m-%d %H:%M:%S}"
+
+with st.expander("ℹ️ Data files loaded"):
+    lines = [
+        f"• {fmt_sig(chat_path)}",
+        f"• {fmt_sig(email_path)}",
+        f"• {fmt_sig(items_path)}",
+        f"• {fmt_sig(pres_path)}",
+        f"• {fmt_sig(shifts_path)}",
+    ]
+    if survey_path.exists():
+        lines.append(f"• {fmt_sig(survey_path)}")
+    st.write("\n".join(lines))
+
 # =========================
-# Core Metrics: Volume & AHT (report_items)
+# Core Metrics: Volume & AHT (report_items) — robust time filtering
 # =========================
-mask      = ((df_items["Start DT"].dt.date >= start_date) &
-             (df_items["Start DT"].dt.date <= end_date))
-df_period = df_items[mask].copy()
-df_period["Duration_sec"] = (df_period["End DT"] - df_period["Start DT"]).dt.total_seconds()
+ts_start = pd.Timestamp(start_date)  # inclusive
+ts_end   = pd.Timestamp(end_date) + pd.Timedelta(days=1)  # exclusive
+
+mask = (df_items["Start DT"] >= ts_start) & (df_items["Start DT"] < ts_end)
+df_period = df_items.loc[mask].copy()
+
+# Safe duration calculation
+df_period = df_period.dropna(subset=["Start DT", "End DT"])
+start_dt = pd.to_datetime(df_period["Start DT"], errors="coerce")
+end_dt   = pd.to_datetime(df_period["End DT"],   errors="coerce")
+dur_td = end_dt - start_dt
+df_period["Duration_sec"] = dur_td.dt.total_seconds()
 
 chat_df   = df_period[df_period["Service Channel: Developer Name"] == "sfdc_liveagent"]
 email_df  = df_period[df_period["Service Channel: Developer Name"] == "casesChannel"]
@@ -335,7 +389,7 @@ avg_resp_hrs  = email_sla_p["Elapsed Time (Hours)"].mean() if len(email_sla_p) e
 avg_resp_secs = avg_resp_hrs * 3600
 
 # =========================
-# Availability & Handling (Proportional split)
+# Availability & Handling (Proportional split for overall utilization tiles)
 # =========================
 window_start = datetime.combine(start_date, datetime.min.time())
 window_end   = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
@@ -364,6 +418,7 @@ for ag, grp in presence_win.groupby("Created By: Full Name"):
     if eo: email_only_map[ag] = merge_intervals(eo)
     if sh: shared_map[ag]     = merge_intervals(sh)
 
+# Handling intervals per agent (clipped to window)
 chat_handles_map, email_handles_map = {}, {}
 for ag, grp in chat_df.groupby("User: Full Name"):
     ints = [clip_to_window(s, e, window_start, window_end) for s, e in zip(grp["Start DT"], grp["End DT"])]
@@ -375,6 +430,7 @@ for ag, grp in email_df.groupby("User: Full Name"):
     ints = [x for x in ints if x]
     if ints: email_handles_map[ag] = merge_intervals(ints)
 
+# Numerators and proportional denominators for utilization tiles
 dept_chat_handle  = 0.0
 dept_email_handle = 0.0
 dept_chat_avail   = 0.0
@@ -418,16 +474,17 @@ chat_util  = (dept_chat_handle  / dept_chat_avail)  if dept_chat_avail  else 0
 email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
 
 # =========================
-# Per-day SLA & volumes
+# Build per-day SLA & volumes (one row per day)
 # =========================
 daily = []
 for d in pd.date_range(start_date, end_date):
     dd = d.normalize()
 
+    # --- Chat SLA ---
     cd = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == dd.date()]
-    cw = cd[cd["Wait Time"].notna()]
+    cw = cd[cd["Wait Time"].notna()]  # answered chats with wait times
 
-    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cd)) if len(cd) else 0.0
+    frac_answer_60s = ((cw["Wait Time"] <= 60).sum() / len(cd)) if len(cd) else 0.0  # fraction 0–1
     avg_wait_min    = (cw["Wait Time"].mean() / 60.0) if len(cw) else 0.0
     abandon_frac    = ((cd["Abandoned After"] > 20).sum() / len(cd)) if len(cd) else 0.0
 
@@ -435,6 +492,7 @@ for d in pd.date_range(start_date, end_date):
     chat_raw = 0.5 * frac_answer_60s - 0.3 * excess_wait_min - 0.2 * abandon_frac
     sla_c    = max(0.0, min(100.0, (chat_raw / CHAT_RESCALE_K) * SLA_SCALE))
 
+    # --- Email SLA ---
     ed = email_sla_p[email_sla_p["Date/Time Opened"].dt.date == dd.date()]
     frac_le_1hr = ((ed["Elapsed Time (Hours)"] <= 1).sum() / len(ed)) if len(ed) else 0.0
     avg_resp_hr = (ed["Elapsed Time (Hours)"].mean()) if len(ed) else 0.0
@@ -452,12 +510,15 @@ for d in pd.date_range(start_date, end_date):
     })
 
 df_daily = pd.DataFrame(daily)
+
+# Weighted SLA per day
 df_daily["Weighted SLA"] = (
     df_daily["Chat SLA"] * df_daily["Chat Vol"] +
     df_daily["Email SLA"] * df_daily["Email Vol"]
 ) / (df_daily["Chat Vol"] + df_daily["Email Vol"])
 df_daily["Weighted SLA"] = df_daily["Weighted SLA"].fillna(0)
 
+# Summary SLA Scores
 chat_weighted  = (df_daily["Chat SLA"]  * df_daily["Chat Vol"]).sum()  / df_daily["Chat Vol"].sum()  if df_daily["Chat Vol"].sum()  else 0
 email_weighted = (df_daily["Email SLA"] * df_daily["Email Vol"]).sum() / df_daily["Email Vol"].sum() if df_daily["Email Vol"].sum() else 0
 total_vol      = (df_daily["Chat Vol"] + df_daily["Email Vol"]).sum()
@@ -470,6 +531,7 @@ st.title("📊 Department Performance Dashboard")
 st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 st.markdown("---")
 
+# Core Metrics
 st.subheader("Core Metrics")
 c1, c2, c3, c4 = st.columns(4)
 render_custom_metric(c1, "💬 Total Chats",            chat_total,           "Total chat interactions",          "#4CAF50")
@@ -477,6 +539,7 @@ render_custom_metric(c2, "✉️ Total Emails",           email_total,          
 render_custom_metric(c3, "⏳ Avg Chat Handle Time",    fmt_mmss(chat_aht),   "Average chat handle time",         "#4CAF50")
 render_custom_metric(c4, "⏳ Avg Email Handle Time",   fmt_mmss(email_aht),  "Average email handle time",        "#4CAF50")
 
+# Operational Metrics
 st.markdown("---")
 st.subheader("Operational Metrics")
 m1, m2, m3 = st.columns(3)
@@ -484,6 +547,7 @@ render_custom_metric(m1, "📈 Chat Utilization",     f"{chat_util:.1%}",     "H
 render_custom_metric(m2, "📈 Email Utilization",    f"{email_util:.1%}",    "Handled∩Available / proportional availability", get_utilization_color(email_util))
 render_custom_metric(m3, "⏱️ Avg Email Resp Time",  fmt_hms(avg_resp_secs), "Average email response time",           get_email_resp_time_color(avg_resp_secs))
 
+# SLA Score Summary
 st.markdown("---")
 st.subheader("🎯 SLA Score Summary")
 s1, s2, s3 = st.columns(3)
@@ -520,9 +584,32 @@ st.altair_chart((trend_chart + labels + rule + rule_lb).properties(width=700, he
                 use_container_width=True)
 
 # =========================
-# Customer Feedback (CSAT/NPS/FCR) + CSAT&NPS Trend (day-level axis)
+# Customer Feedback Section (CSAT / NPS / FCR)
 # =========================
-if survey is not None:
+if survey_path.exists():
+    # Prepare survey records if they exist
+    qtitle = survey_q["Survey Question: Question Title"].str.lower()
+    is_nps  = qtitle.str.contains("recommend", na=False) | qtitle.str.contains("likely", na=False)
+    is_csat = qtitle.str.contains("satisfied",  na=False)
+    is_fcr  = qtitle.str.contains("resolved",   na=False)
+
+    survey_q["NPS_raw"]   = survey_q["Response"].where(is_nps).apply(_leading_int)
+    survey_q["CSAT_1_5"]  = survey_q["Response"].where(is_csat).apply(_leading_int)
+    survey_q["FCR_bool"]  = survey_q["Response"].where(is_fcr).apply(_bool_yes_no)
+    survey_q["Channel"]   = survey_q["Survey Question: Survey"].str.extract(r"(Email|Chat)", expand=False).fillna("Other")
+
+    agg = {
+        "Survey Taker: Created Date": "min",
+        "Channel":   lambda s: s.dropna().iloc[0] if s.dropna().any() else "Other",
+        "NPS_raw":   lambda s: pd.to_numeric(s, errors="coerce").dropna().max() if pd.to_numeric(s, errors="coerce").notna().any() else None,
+        "CSAT_1_5":  lambda s: pd.to_numeric(s, errors="coerce").dropna().max() if pd.to_numeric(s, errors="coerce").notna().any() else None,
+        "FCR_bool":  lambda s: s.dropna().iloc[0] if s.dropna().any() else None,
+    }
+    survey = survey_q.groupby("Survey Taker: ID", as_index=False).agg(agg)
+    survey = survey.rename(columns={"Survey Taker: Created Date": "Survey Date"})
+    survey["CSAT%"] = ((survey["CSAT_1_5"] - 1) / 4.0 * 100.0).clip(0, 100)
+    survey["Survey Date"] = pd.to_datetime(survey["Survey Date"], errors="coerce")
+
     survey_period = survey[
         (survey["Survey Date"].dt.date >= start_date) &
         (survey["Survey Date"].dt.date <= end_date)
@@ -539,19 +626,26 @@ if survey is not None:
 
         k1, k2, k3, k4 = st.columns(4)
         render_custom_metric(k1, "🗳️ Surveys", f"{total_surveys:,}", "Total surveys in range", "#4CAF50")
-        render_custom_metric(k2, "😊 CSAT (avg %)",
-                             f"{csat_overall:.1f}%" if csat_overall is not None else "–",
-                             "Average CSAT normalized to 0–100%",
-                             get_csat_color_pct(csat_overall))
-        render_custom_metric(k3, "⭐ NPS",
-                             f"{nps_overall:.1f}" if nps_overall is not None else "–",
-                             "NPS: %Promoters − %Detractors",
-                             get_nps_color(nps_overall))
-        render_custom_metric(k4, "🎯 FCR",
-                             f"{fcr_overall:.1f}%" if fcr_overall is not None else "–",
-                             "First Contact Resolution rate",
-                             get_fcr_color_pct(fcr_overall))
+        render_custom_metric(
+            k2, "😊 CSAT (avg %)",
+            f"{csat_overall:.1f}%" if csat_overall is not None else "–",
+            "Average CSAT normalized to 0–100%",
+            get_csat_color_pct(csat_overall)
+        )
+        render_custom_metric(
+            k3, "⭐ NPS",
+            f"{nps_overall:.1f}" if nps_overall is not None else "–",
+            "NPS: %Promoters − %Detractors",
+            get_nps_color(nps_overall)
+        )
+        render_custom_metric(
+            k4, "🎯 FCR",
+            f"{fcr_overall:.1f}%" if fcr_overall is not None else "–",
+            "First Contact Resolution rate",
+            get_fcr_color_pct(fcr_overall)
+        )
 
+        # ---------- CSAT & NPS Trend: day-level x-axis ----------
         daily_survey = (
             survey_period
             .assign(Date=survey_period["Survey Date"].dt.normalize())
@@ -630,7 +724,84 @@ else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
 
 # =========================
-# Hourly Weighted SLA (selected day)
+# 🌍 Chats by Country (volume)
+# =========================
+st.markdown("---")
+st.subheader("🌍 Chats by Country (volume)")
+
+def _detect_country_col(df: pd.DataFrame) -> Optional[str]:
+    cols = [c for c in df.columns if "country" in c.lower()]
+    if not cols:
+        cols = [c for c in df.columns if "geo" in c.lower()]
+    return cols[0] if cols else None
+
+country_col = _detect_country_col(chat_sla_df)
+if not country_col:
+    st.info("No country column found in chat.csv (e.g., 'Country', 'Visitor Country').")
+else:
+    chat_country = chat_sla_df[
+        (chat_sla_df["Date/Time Opened"].dt.date >= start_date) &
+        (chat_sla_df["Date/Time Opened"].dt.date <= end_date)
+    ].copy()
+
+    chat_country[country_col] = (
+        chat_country[country_col]
+        .astype(str).str.strip()
+        .replace({"": None, "nan": None, "none": None, "None": None})
+        .fillna("Unknown").str.title()
+    )
+
+    counts = (
+        chat_country.groupby(country_col, dropna=False)
+        .size()
+        .reset_index(name="Chats")
+        .sort_values("Chats", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    top_n = st.sidebar.slider("Pie chart: top countries", min_value=3, max_value=12, value=8, step=1)
+    if len(counts) > top_n:
+        top = counts.head(top_n)
+        others_total = counts["Chats"].iloc[top_n:].sum()
+        counts = pd.concat(
+            [top, pd.DataFrame({country_col: ["Other"], "Chats": [others_total]})],
+            ignore_index=True
+        )
+
+    total_chats = int(counts["Chats"].sum()) if len(counts) else 0
+    counts["Share"] = counts["Chats"] / total_chats if total_chats else 0.0
+
+    pie = (
+        alt.Chart(counts)
+        .mark_arc(outerRadius=140, innerRadius=60)
+        .encode(
+            theta=alt.Theta("Chats:Q", stack=True),
+            color=alt.Color(f"{country_col}:N", legend=alt.Legend(title="Country")),
+            tooltip=[
+                alt.Tooltip(f"{country_col}:N", title="Country"),
+                alt.Tooltip("Chats:Q", title="Chats", format=","),
+                alt.Tooltip("Share:Q", title="Share", format=".1%")
+            ],
+        )
+        .properties(width=480, height=360, title="Chat Volume by Country")
+    )
+    labels = (
+        alt.Chart(counts)
+        .mark_text(radius=105, size=11)
+        .encode(theta=alt.Theta("Chats:Q", stack=True),
+                text=alt.Text("Chats:Q", format=","))
+    )
+    st.altair_chart(pie + labels, use_container_width=True)
+
+    with st.expander("View country breakdown table"):
+        st.dataframe(
+            counts.rename(columns={country_col: "Country"})[["Country", "Chats", "Share"]]
+                  .style.format({"Chats": "{:,}", "Share": "{:.1%}"}),
+            use_container_width=True
+        )
+
+# =========================
+# ⏱️ Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
 # =========================
 st.markdown("---")
 st.subheader("⏱️ Hourly Weighted SLA (selected day)")
@@ -643,7 +814,8 @@ hourly_date = st.date_input(
 )
 
 def _clamp01(x):
-    if pd.isna(x): return 0.0
+    if pd.isna(x):
+        return 0.0
     return max(0.0, min(1.0, float(x)))
 
 def _merge_intervals(ints):
@@ -794,7 +966,7 @@ else:
     show_breakdown = st.checkbox("Show Chat & Email lines", value=False)
     show_avail     = st.checkbox("Overlay available minutes (bars)", value=True)
 
-    # -------- Two-axis composition (fix) --------
+    # -------- Two-axis composition --------
     # Left axis owner: Weighted SLA (and optional Chat/Email lines share it without axes)
     weighted_line = (
         alt.Chart(df_hourly)
@@ -907,6 +1079,16 @@ st.markdown("---")
 st.subheader(f"👥 Daily Schedule Summary — {end_date:%d %b %Y}")
 
 def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame, day: datetime.date) -> pd.DataFrame:
+    """
+    For each agent scheduled overlapping `day` (from normalized shifts.csv), show:
+      - Scheduled Shift Start / End (HH:MM)
+      - Lunch Start / End (from presence where status contains 'lunch')
+      - Total Shift (scheduled hh:mm), Logged-in/Available (hh:mm) within scheduled,
+        Adherence %, Availability %,
+      - Login / Logout (AVAILABLE statuses only, full day),
+      - Late/Early mins (based on ANY presence),
+      plus hidden helpers for styling.
+    """
     if df_shifts_tidy is None or df_shifts_tidy.empty:
         return pd.DataFrame(columns=[
             "Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift",
@@ -918,6 +1100,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
     day_start = datetime.combine(day, datetime.min.time())
     day_end   = day_start + timedelta(days=1)
 
+    # Consider any shift that overlaps the selected day
     sched = df_shifts_tidy[
         (df_shifts_tidy["Shift Start"] < day_end) &
         (df_shifts_tidy["Shift End"]   > day_start)
@@ -931,6 +1114,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "_shift_start_dt","_lunch_start_dt"
         ])
 
+    # Presence overlapping the day (normalize agent and status)
     pres_day = df_presence[(df_presence["Start DT"] < day_end) &
                            (df_presence["End DT"]   > day_start)].copy()
     pres_day["__status_norm"] = pres_day["Service Presence Status: Developer Name"].apply(_norm_status_key)
@@ -951,12 +1135,14 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
 
         sched_secs = (sched_clip_e - sched_clip_s).total_seconds()
 
+        # Agent presence for the day
         pa = pres_day[pres_day["__agent_key"] == agent_key]
 
         def _clip_to_sched(s, e):
             cs, ce = max(s, sched_clip_s), min(e, sched_clip_e)
             return (cs, ce) if ce > cs else None
 
+        # Logged-in intervals (ANY presence) — for adherence and late/early
         logged_ints = []
         for _, pr in pa.iterrows():
             seg = _clip_to_sched(pr["Start DT"].to_pydatetime(), pr["End DT"].to_pydatetime())
@@ -964,6 +1150,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         logged_ints = merge_intervals(logged_ints)
         logged_secs = sum((e - s).total_seconds() for s, e in logged_ints)
 
+        # Available intervals within scheduled (for availability %)
         avail_ints = []
         for _, pr in pa[pa["__status_norm"].isin(AVAILABLE_STATUSES)].iterrows():
             seg = _clip_to_sched(pr["Start DT"].to_pydatetime(), pr["End DT"].to_pydatetime())
@@ -971,6 +1158,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         avail_ints = merge_intervals(avail_ints)
         avail_secs = sum((e - s).total_seconds() for s, e in avail_ints)
 
+        # Lunch from presence = any status containing 'lunch'
         lunch_rows = pa[pa["__status_norm"].str.contains("lunch", na=False)]
         lunch_ints = []
         for _, lr in lunch_rows.iterrows():
@@ -980,6 +1168,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         lunch_start = min((s for s, _ in lunch_ints), default=None)
         lunch_end   = max((e for _, e in lunch_ints), default=None)
 
+        # Login/Logout from AVAILABLE statuses over the full day (not clipped to schedule)
         avail_day_ints = []
         for _, pr in pa[pa["__status_norm"].isin(AVAILABLE_STATUSES)].iterrows():
             cs, ce = max(pr["Start DT"], day_start), min(pr["End DT"], day_end)
@@ -989,6 +1178,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         login_avail  = min((s for s, _ in avail_day_ints), default=None)
         logout_avail = max((e for _, e in avail_day_ints), default=None)
 
+        # First/Last presence across the day (ANY presence) for late/early mins
         all_pres_ints = []
         for _, pr in pa.iterrows():
             cs, ce = max(pr["Start DT"], day_start), min(pr["End DT"], day_end)
@@ -998,6 +1188,7 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
         first_login_any = min((s for s, _ in all_pres_ints), default=None)
         last_logout_any = max((e for _, e in all_pres_ints), default=None)
 
+        # Late start / early finish vs scheduled (mins) using ANY presence
         late_start_min   = round(max(((first_login_any - sched_clip_s).total_seconds()/60.0), 0.0), 1) if first_login_any else None
         early_finish_min = round(max(((sched_clip_e - last_logout_any).total_seconds()/60.0), 0.0), 1)  if last_logout_any else None
 
@@ -1010,16 +1201,17 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
             "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
             "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
             "Shift End":           sched_clip_e.strftime("%H:%M"),
-            "Total Shift":         fmt_hhmm(sched_secs),
-            "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),
-            "Available (hh:mm)":   fmt_hhmm(avail_secs),
+            "Total Shift":         fmt_hhmm(sched_secs),          # HH:MM
+            "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),         # HH:MM
+            "Available (hh:mm)":   fmt_hhmm(avail_secs),          # HH:MM
             "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
             "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),
-            "Login":               ("—" if login_avail  is None else login_avail.strftime("%H:%M")),
-            "Logout":              ("—" if logout_avail is None else logout_avail.strftime("%H:%M")),
-
+            "Login":               fmt_hhmm_dt(login_avail),
+            "Logout":              fmt_hhmm_dt(logout_avail),
             "Late Start (min)":    fmt_minutes_clean(late_start_min),
             "Early Finish (min)":  fmt_minutes_clean(early_finish_min),
+
+            # hidden helper columns for styling
             "_shift_start_dt":     sched_clip_s,
             "_lunch_start_dt":     lunch_start
         })
@@ -1036,16 +1228,24 @@ schedule_df = build_daily_schedule(df_shifts, df_presence, end_date)
 if schedule_df.empty:
     st.info(f"No scheduled agents found for {end_date:%d %b %Y}.")
 else:
+    # Compute lunch-window violations using hidden datetime helpers
     df = schedule_df.copy()
+
+    # Hours delta from shift start to lunch start (NaN if no lunch)
     delta_hours = (
         (pd.to_datetime(df["_lunch_start_dt"]) - pd.to_datetime(df["_shift_start_dt"]))
         .dt.total_seconds() / 3600
     )
+
+    # Violation: lunch < 3h OR > 5h from shift start (only when lunch exists)
     viol_idx = df.index[delta_hours.notna() & ((delta_hours < 3.0) | (delta_hours > 5.0))]
+
+    # Drop helper columns from what we display
     display_cols = [c for c in df.columns if c not in {"_shift_start_dt", "_lunch_start_dt"}]
     disp = df[display_cols].copy()
-    lunch_cols = {"Lunch Start", "Lunch End"}
 
+    # Row-wise styling: make Lunch cells red when violated
+    lunch_cols = {"Lunch Start", "Lunch End"}
     def _style_row(row):
         is_violation = row.name in viol_idx
         styles = []
@@ -1058,9 +1258,13 @@ else:
 
     left, right = st.columns([4,1])
     with left:
-        st.dataframe(disp.style.apply(_style_row, axis=1), use_container_width=True)
+        st.dataframe(
+            disp.style.apply(_style_row, axis=1),
+            use_container_width=True
+        )
     with right:
         st.metric("Scheduled agents", f"{len(disp):,}")
+        # Sum total shift seconds from HH:MM strings
         def _hhmm_to_sec(s):
             if not isinstance(s, str) or ":" not in s:
                 return 0
@@ -1068,4 +1272,3 @@ else:
             return int(h)*3600 + int(m)*60
         total_secs = sum(_hhmm_to_sec(x) for x in disp["Total Shift"])
         st.metric("Total scheduled time", fmt_hms(total_secs))
-
