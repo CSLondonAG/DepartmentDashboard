@@ -1,7 +1,3 @@
-# =========================================================
-# DEPARTMENT PERFORMANCE DASHBOARD
-# =========================================================
-# =========================================================
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,29 +5,50 @@ import altair as alt
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
-st.set_page_config(page_title="Department Performance Dashboard", layout="wide")
-st.title("Department Peformance Dashboard")
-st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
-st.divider()
 
-mask=(items_df["Start DT"].dt.date>=start_date)&(items_df["Start DT"].dt.date<=end_date)
-period=items_df.loc[mask].copy()
-if not period.empty:
-    period["Duration_sec"]=(period["End DT"]-period["Start DT"]).dt.total_seconds()
-    chat_items=period[period["Service Channel: Developer Name"]=="sfdc_liveagent"]
-    email_items=period[period["Service Channel: Developer Name"]=="casesChannel"]
-    chat_total,email_total=len(chat_items),len(email_items)
-    chat_aht,email_aht=chat_items["Duration_sec"].mean(),email_items["Duration_sec"].mean()
-else:
-    chat_total=email_total=0
-    chat_aht=email_aht=np.nan
+# --- Streamlit Page Config ---
+st.set_page_config(
+    page_title="Department Performance Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-c1,c2,c3,c4=st.columns(4)
-for c,title,val in zip([c1,c2,c3,c4],
-    ["Total Chats","Total Emails","Avg Chat AHT","Avg Email AHT"],
-    [chat_total,email_total,fmt_mmss(chat_aht),fmt_mmss(email_aht)]):
-    c.markdown(f"<div class='kpi-card'><div class='kpi-title'>{title}</div>"
-               f"<div class='kpi-value'>{val}</div></div>",unsafe_allow_html=True)
+# --- Load Base Files ---
+BASE_DIR = Path(__file__).parent
+
+def load_csv(filename, parse_dates=None):
+    path = BASE_DIR / filename
+    if not path.exists():
+        st.error(f"❌ Missing required file: {filename}")
+        st.stop()
+    return pd.read_csv(path, parse_dates=parse_dates, dayfirst=True)
+
+# Load minimum data first (chat + email are mandatory)
+chat_df  = load_csv("chat.csv", parse_dates=["Date/Time Opened"])
+email_df = load_csv("email.csv", parse_dates=["Date/Time Opened", "Completion Date"])
+
+# --- Sidebar Date Filter ---
+st.sidebar.header("📅 Filter Options")
+
+min_date = chat_df["Date/Time Opened"].dt.date.min()
+max_date = chat_df["Date/Time Opened"].dt.date.max()
+
+start_date = st.sidebar.date_input(
+    "Start Date",
+    value=max_date - timedelta(days=6),
+    min_value=min_date,
+    max_value=max_date
+)
+end_date = st.sidebar.date_input(
+    "End Date",
+    value=max_date,
+    min_value=min_date,
+    max_value=max_date
+)
+
+if start_date > end_date:
+    st.sidebar.error("Start date must be before or equal to end date.")
+    st.stop
 
 # =========================================================
 # SLA CALCULATIONS
@@ -307,5 +324,6 @@ if not counts.empty:
     st.altair_chart(pie,width="stretch")
 else:
     st.info("No chat country data for this range.")
+
 
 
