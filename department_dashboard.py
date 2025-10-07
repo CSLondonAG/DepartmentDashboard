@@ -233,17 +233,33 @@ if not chat_path.exists() or not email_path.exists():
     st.error("Please place chat.csv and email.csv beside this script.")
     st.stop()
 
-df_items     = pd.read_csv("report_items.csv",    dayfirst=True, parse_dates=["Start DT","End DT"])
-df_presence  = pd.read_csv("report_presence.csv", dayfirst=True, parse_dates=["Start DT","End DT"])
+# Load and standardize date columns to 'datetime64[ns]'
+df_items     = pd.read_csv("report_items.csv",    dayfirst=True)
+df_presence  = pd.read_csv("report_presence.csv", dayfirst=True)
+chat_sla_df  = pd.read_csv(chat_path,  dayfirst=True)
+email_sla_df = pd.read_csv(email_path, dayfirst=True)
+
+for df in (df_items, df_presence, chat_sla_df, email_sla_df):
+    df.columns = df.columns.str.strip()
+
+# Explicitly convert all necessary date columns to the correct type to prevent ndarray/DatetimeArray conflicts
+date_cols_items     = ["Start DT", "End DT"]
+date_cols_presence  = ["Start DT", "End DT"]
+date_cols_chat      = ["Date/Time Opened"]
+date_cols_email     = ["Date/Time Opened", "Completion Date"]
+
+for col in date_cols_items:
+    df_items[col] = pd.to_datetime(df_items[col], dayfirst=True, errors="coerce")
+for col in date_cols_presence:
+    df_presence[col] = pd.to_datetime(df_presence[col], dayfirst=True, errors="coerce")
+for col in date_cols_chat:
+    chat_sla_df[col] = pd.to_datetime(chat_sla_df[col], dayfirst=True, errors="coerce")
+for col in date_cols_email:
+    email_sla_df[col] = pd.to_datetime(email_sla_df[col], dayfirst=True, errors="coerce")
+
 
 df_shifts_raw = pd.read_csv("shifts.csv")
 df_shifts     = normalize_wide_shifts(df_shifts_raw)
-
-chat_sla_df  = pd.read_csv(chat_path,  dayfirst=True, parse_dates=["Date/Time Opened"])
-email_sla_df = pd.read_csv(email_path, dayfirst=True, parse_dates=["Date/Time Opened","Completion Date"])
-
-for df in (df_items, df_presence, df_shifts, chat_sla_df, email_sla_df):
-    df.columns = df.columns.str.strip()
 
 # Optional survey
 survey = None
@@ -251,10 +267,11 @@ if survey_path.exists():
     survey_q = pd.read_csv(
         survey_path,
         dayfirst=True,
-        parse_dates=["Survey Taker: Created Date"],
         low_memory=False
     )
     survey_q.columns = survey_q.columns.str.strip()
+    survey_q["Survey Taker: Created Date"] = pd.to_datetime(survey_q["Survey Taker: Created Date"], dayfirst=True, errors="coerce")
+    
     req_cols = {"Survey Taker: ID", "Survey Taker: Created Date",
                 "Survey Question: Survey", "Survey Question: Question Title", "Response"}
     if req_cols.issubset(set(survey_q.columns)):
@@ -309,7 +326,13 @@ if start_date > end_date:
 mask      = ((df_items["Start DT"].dt.date >= start_date) &
              (df_items["Start DT"].dt.date <= end_date))
 df_period = df_items[mask].copy()
-df_period["Duration_sec"] = (df_period["End DT"] - df_period["Start DT"]).dt.total_seconds()
+
+# *** FIX: Force explicit conversion to datetime64[ns] to avoid TypeError ***
+df_period["Duration_sec"] = (
+    df_period["End DT"].astype('datetime64[ns]') - 
+    df_period["Start DT"].astype('datetime64[ns]')
+).dt.total_seconds()
+
 
 chat_df   = df_period[df_period["Service Channel: Developer Name"] == "sfdc_liveagent"]
 email_df  = df_period[df_period["Service Channel: Developer Name"] == "casesChannel"]
@@ -1044,8 +1067,7 @@ if schedule_df.empty:
 else:
     df = schedule_df.copy()
     
-    # *** FIX: Explicitly convert both sides to DatetimeSeries objects 
-    # right before subtraction to ensure type compatibility and resolve the TypeError. ***
+    # *** PREVIOUS FIX (Kept here for completeness but the main issue was on line 312 now) ***
     lunch_dt  = pd.to_datetime(df["_lunch_start_dt"], errors="coerce")
     shift_dt = pd.to_datetime(df["_shift_start_dt"], errors="coerce")
     
