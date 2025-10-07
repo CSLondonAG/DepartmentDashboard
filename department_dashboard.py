@@ -9,7 +9,8 @@ import altair as alt
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
-st.set_page_config(page_title="📊 Department Performance Dashboard", layout="wide")
+st.set_page_config(page_title="Department Performance Dashboard", layout="wide")
+st.title("Department Peformance Dashboard")
 st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 st.divider()
 
@@ -306,4 +307,5 @@ if not counts.empty:
     st.altair_chart(pie,width="stretch")
 else:
     st.info("No chat country data for this range.")
+
 
