@@ -35,6 +35,34 @@ def merge_intervals(intervals):
 
 import pandas as pd
 import altair as alt
+
+# === Interval helpers for accurate utilisation ===
+def coalesce_intervals(iv):
+    if not iv: return []
+    iv = [(pd.to_datetime(s), pd.to_datetime(e)) for s, e in iv if pd.notna(s) and pd.notna(e) and e > s]
+    iv.sort(key=lambda x: x[0])
+    merged = [list(iv[0])]
+    for s,e in iv[1:]:
+        if s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [tuple(x) for x in merged]
+
+def interval_seconds(iv):
+    return float(sum((e - s).total_seconds() for s, e in iv))
+
+def total_overlap(a, b):
+    a = coalesce_intervals(a); b = coalesce_intervals(b)
+    i=j=0; sec=0.0
+    while i < len(a) and j < len(b):
+        s1,e1 = a[i]; s2,e2 = b[j]
+        s=max(s1,s2); e=min(e1,e2)
+        if e > s:
+            sec += (e-s).total_seconds()
+        if e1 <= e2: i += 1
+        else: j += 1
+    return sec
 from datetime import datetime, timedelta, date
 from pathlib import Path
 import re
@@ -504,7 +532,53 @@ for ag in agents:
     dept_chat_avail   += chat_av
     dept_email_avail  += email_av
 
-chat_util  = (dept_chat_handle  / dept_chat_avail)  if dept_chat_avail  else 0
+
+# --- Accurate chat utilisation (overlap-based) ---
+# Build availability intervals by agent from presence DataFrame (assuming pres_df avail_by_agent exists)
+# Expect pres_df has Created By: Full Name and Start DT / End DT and Status columns
+try:
+    avail_by_agent = {}
+    for agent, g in pres_df.groupby("Created By: Full Name"):
+        rows = []
+        for _,r in g.iterrows():
+            st_dt = pd.to_datetime(r.get("Start DT"), errors="coerce")
+            en_dt = pd.to_datetime(r.get("End DT"), errors="coerce")
+            status = str(r.get("Status") or r.get("Presence Status") or "").strip().lower()
+            if pd.isna(st_dt) or pd.isna(en_dt) or en_dt <= st_dt:
+                continue
+            if status in ("available_chat","available all","available_all","available-all","available all channels"):
+                rows.append((st_dt, en_dt, status))
+            elif status in ("available_all","available all","available all channels"):
+                rows.append((st_dt, en_dt, status))
+        if rows:
+            # Split rows into chat-capable sets: Available_Chat OR Available_All
+            chat_cap = [(s,e) for (s,e,stt) in rows if "chat" in stt or "available all" in stt or "available_all" in stt]
+            avail_by_agent[agent] = coalesce_intervals(chat_cap)
+except Exception as _e:
+    avail_by_agent = {}
+
+# Build handled chat intervals by agent from df_period (items)
+chat_handle_by_agent = {}
+try:
+    period = df_period[df_period["Service Channel: Developer Name"]==CHAT_DEVNAME]
+    for agent, g in period.groupby("User: Full Name"):
+        intervals = list(zip(pd.to_datetime(g["Start DT"], errors="coerce"), pd.to_datetime(g["End DT"], errors="coerce")))
+        intervals = [(s,e) for s,e in intervals if pd.notna(s) and pd.notna(e) and e > s]
+        chat_handle_by_agent[agent] = coalesce_intervals(intervals)
+except Exception:
+    chat_handle_by_agent = {}
+
+dept_chat_cap = 0.0
+dept_chat_work_incap = 0.0
+
+agents = set(list(avail_by_agent.keys()) + list(chat_handle_by_agent.keys()))
+for ag in agents:
+    av = avail_by_agent.get(ag, [])
+    hd = chat_handle_by_agent.get(ag, [])
+    dept_chat_cap += interval_seconds(av)
+    dept_chat_work_incap += total_overlap(hd, av)
+
+chat_util = (dept_chat_work_incap / dept_chat_cap) if dept_chat_cap else 0.0
 email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
 
 # =========================
@@ -615,7 +689,7 @@ rule   = alt.Chart(pd.DataFrame({"y":[85]})).mark_rule(color="red", strokeDash=[
 rule_lb= alt.Chart(pd.DataFrame({"y":[85]})).mark_text(align="left", color="red", dy=-8)\
             .encode(y="y:Q", text=alt.value("Target: 85%"))
 st.altair_chart((trend_chart + labels + rule + rule_lb).properties(width=700, height=350),
-                use_container_width=True)
+                width='stretch')
 
 # =========================
 # Customer Feedback Section (CSAT / NPS / FCR)
@@ -751,7 +825,7 @@ if survey_path.exists():
                 .configure_view(stroke="#d1d5db", fill="white")\
                 .configure_legend(orient="top-right", titleFont="Arial", labelFont="Arial")\
                 .interactive()
-            st.altair_chart(trend, use_container_width=True)
+            st.altair_chart(trend, width='stretch')
     else:
         st.info("No survey responses in the selected date range.")
 else:
@@ -825,13 +899,13 @@ else:
         .encode(theta=alt.Theta("Chats:Q", stack=True),
                 text=alt.Text("Chats:Q", format=","))
     )
-    st.altair_chart(pie + labels, use_container_width=True)
+    st.altair_chart(pie + labels, width='stretch')
 
     with st.expander("View country breakdown table"):
         st.dataframe(
             counts.rename(columns={country_col: "Country"})[["Country", "Chats", "Share"]]
                   .style.format({"Chats": "{:,}", "Share": "{:.1%}"}),
-            use_container_width=True
+            width='stretch'
         )
 
 # =========================
@@ -1072,7 +1146,7 @@ else:
         .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2,3])\
         .configure_view(stroke="#d1d5db", fill="white")
 
-    st.altair_chart(combined_top, use_container_width=True)
+    st.altair_chart(combined_top, width='stretch')
 
     # Logged-in agents (separate big chart)
     max_agents_val = pd.to_numeric(df_hourly["Logged In Agents"], errors="coerce").max()
@@ -1091,7 +1165,7 @@ else:
         .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2,3])
         .configure_view(stroke="#d1d5db", fill="white")
     )
-    st.altair_chart(agents_chart, use_container_width=True)
+    st.altair_chart(agents_chart, width='stretch')
 
     with st.expander("View hourly table"):
         show_cols = ["Hour","Chat SLA","Chat Vol","Email SLA","Email Vol","Avail (min)","Logged In Agents","Weighted SLA"]
@@ -1103,7 +1177,7 @@ else:
                 "Avail (min)": "{:.0f}",
                 "Logged In Agents": "{:.0f}",
             }),
-            use_container_width=True
+            width='stretch'
         )
 
 # =========================
@@ -1294,7 +1368,7 @@ else:
     with left:
         st.dataframe(
             disp.style.apply(_style_row, axis=1),
-            use_container_width=True
+            width='stretch'
         )
     with right:
         st.metric("Scheduled agents", f"{len(disp):,}")
