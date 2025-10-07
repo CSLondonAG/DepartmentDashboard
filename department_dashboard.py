@@ -470,26 +470,8 @@ for ag in agents:
     dept_chat_avail   += chat_av
     dept_email_avail  += email_av
 
-
-# --- Accurate chat utilisation (overlap-based) ---
-# Compute department chat-capable availability as union of Available_Chat ∪ Available_All,
-# and numerator as overlap between chat handling and that availability. This guarantees <= 100% without clamping.
-_chat_cap_total = 0.0
-_chat_work_inside = 0.0
-_all_agents_for_chat = set(chat_only_map) | set(shared_map) | set(chat_handles_map)
-for _ag in _all_agents_for_chat:
-    _avail_iv = merge_intervals(chat_only_map.get(_ag, []) + shared_map.get(_ag, []))
-    if _avail_iv:
-        _chat_cap_total += sum_secs(_avail_iv)
-        _handle_iv = chat_handles_map.get(_ag, [])
-        if _handle_iv:
-            _chat_work_inside += intersect_sum(_handle_iv, _avail_iv)
-
-chat_util  = (_chat_work_inside / _chat_cap_total) if _chat_cap_total else 0.0
-
-# Keep email utilisation as previously computed from proportional availability
-email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0.0
-
+chat_util  = (dept_chat_handle  / dept_chat_avail)  if dept_chat_avail  else 0
+email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
 
 # =========================
 # Build per-day SLA & volumes (one row per day)
@@ -747,77 +729,127 @@ else:
 st.markdown("---")
 st.subheader("🌍 Chats by Country (volume)")
 
-def _detect_country_col(df: pd.DataFrame) -> Optional[str]:
-    cols = [c for c in df.columns if "country" in c.lower()]
-    if not cols:
-        cols = [c for c in df.columns if "geo" in c.lower()]
-    return cols[0] if cols else None
+DEVNAME_COL = "Chat Button: Developer Name"
 
-country_col = _detect_country_col(chat_sla_df)
-if not country_col:
-    st.info("No country column found in chat.csv (e.g., 'Country', 'Visitor Country').")
+def _country_from_devname(devname: str) -> str:
+    if not isinstance(devname, str):
+        return "Unknown"
+    s = devname.strip()
+    if not s:
+        return "Unknown"
+    # Normalize separators and remove generic words
+    s_norm = re.sub(r"[\-_./|]+", " ", s).lower()
+    stop = { "website","web","center","centre","support","service","services",
+             "customer","cs","live","chat","button","btn","queue","portal",
+             "mobile","app","online","site","vip","en","pt","fr","eng","por" }
+    tokens = [t for t in re.split(r"\s+", s_norm) if t and t not in stop]
+    s_clean = " ".join(tokens)
+
+    # Map of canonical country names to alias patterns
+    country_aliases = {
+        "Angola": ["angola","ao"],
+        "Botswana": ["botswana","bw"],
+        "Cameroon": ["cameroon","cm"],
+        "Congo (DRC)": ["congo drc","drc","dr congo","democratic republic of congo","rdc"],
+        "Côte d’Ivoire": ["cote d'ivoire","côte d’ivoire","ivory coast","ci"],
+        "Ghana": ["ghana","gh"],
+        "Kenya": ["kenya","ke"],
+        "Malawi": ["malawi","mw"],
+        "Mozambique": ["mozambique","mz","mocambique","moçambique"],
+        "Nigeria": ["nigeria","ng"],
+        "Rwanda": ["rwanda","rw"],
+        "Sierra Leone": ["sierra leone","sl"],
+        "South Africa": ["south africa","sa"],
+        "Tanzania": ["tanzania","tz"],
+        "Uganda": ["uganda","ug"],
+        "Zambia": ["zambia","zm"],
+        "Zimbabwe": ["zimbabwe","zw"],
+        "Eswatini": ["eswatini","swaziland","sz"],
+        "Lesotho": ["lesotho","ls"],
+        "São Tomé and Príncipe": ["sao tome","são tomé","sao tome and principe","stp"],
+        "Gabon": ["gabon","ga"],
+        "Liberia": ["liberia","lr"],
+        "Senegal": ["senegal","sn"],
+        "Burkina Faso": ["burkina","burkina faso","bf"],
+        "Mali": ["mali","ml"],
+        "Benin": ["benin","bj"],
+        "Niger": ["niger","ne"],
+        "Guinea": ["guinea","gn"],
+        "Guinea-Bissau": ["guinea bissau","gw"],
+        "The Gambia": ["gambia","gm"],
+        "Namibia": ["namibia","na"],
+        "Ethiopia": ["ethiopia","et"],
+        "Somalia": ["somalia","so"],
+        "Morocco": ["morocco","ma"],
+        "Tunisia": ["tunisia","tn"],
+        "Algeria": ["algeria","dz"]
+    }
+
+    # Prefer longest alias match to avoid false positives
+    best = None
+    for canon, aliases in country_aliases.items():
+        for alias in sorted(aliases, key=len, reverse=True):
+            if re.search(r"(?:^|\b)"+re.escape(alias)+r"(?:\b|$)", s_clean):
+                if best is None or len(alias) > len(best[1]):
+                    best = (canon, alias)
+                    break
+    return best[0] if best else "Unknown"
+
+if DEVNAME_COL not in chat_sla_df.columns:
+    st.info("Column 'Chat Button: Developer Name' was not found in chat data. Add it to enable the country pie chart.")
 else:
-    chat_country = chat_sla_df[
+    # filter to selected date range (based on Opened timestamp)
+    _df = chat_sla_df[
         (chat_sla_df["Date/Time Opened"].dt.date >= start_date) &
         (chat_sla_df["Date/Time Opened"].dt.date <= end_date)
     ].copy()
 
-    chat_country[country_col] = (
-        chat_country[country_col]
-        .astype(str).str.strip()
-        .replace({"": None, "nan": None, "none": None, "None": None})
-        .fillna("Unknown").str.title()
-    )
+    # derive country from developer name
+    _df["Country"] = _df[DEVNAME_COL].apply(_country_from_devname)
 
     counts = (
-        chat_country.groupby(country_col, dropna=False)
-        .size()
-        .reset_index(name="Chats")
-        .sort_values("Chats", ascending=False)
-        .reset_index(drop=True)
+        _df.groupby("Country", dropna=False)
+           .size()
+           .reset_index(name="Chats")
+           .sort_values("Chats", ascending=False)
+           .reset_index(drop=True)
     )
 
-    top_n = st.sidebar.slider("Pie chart: top countries", min_value=3, max_value=12, value=8, step=1)
-    if len(counts) > top_n:
-        top = counts.head(top_n)
-        others_total = counts["Chats"].iloc[top_n:].sum()
-        counts = pd.concat(
-            [top, pd.DataFrame({country_col: ["Other"], "Chats": [others_total]})],
-            ignore_index=True
+    if counts.empty or counts["Chats"].sum() == 0:
+        st.info("No chats available in the selected period to display by country.")
+    else:
+        counts["Country"] = counts["Country"].str.title()
+
+        top_n = st.sidebar.slider("Pie chart: top countries", min_value=3, max_value=12, value=8, step=1)
+        if len(counts) > top_n:
+            top = counts.head(top_n)
+            others_total = counts["Chats"].iloc[top_n:].sum()
+            counts = pd.concat([top, pd.DataFrame({"Country": ["Other"], "Chats": [others_total]})], ignore_index=True)
+
+        total_chats = int(counts["Chats"].sum())
+        counts["Share"] = counts["Chats"] / total_chats
+
+        pie = (
+            alt.Chart(counts)
+            .mark_arc(outerRadius=140, innerRadius=60)
+            .encode(
+                theta=alt.Theta("Chats:Q", stack=True),
+                color=alt.Color("Country:N", legend=alt.Legend(title="Country")),
+                tooltip=[
+                    alt.Tooltip("Country:N", title="Country"),
+                    alt.Tooltip("Chats:Q", title="Chats", format=","),
+                    alt.Tooltip("Share:Q", title="Share", format=".1%")
+                ],
+            )
+            .properties(width=480, height=360, title="Chat Volume by Country (from Chat Button)")
         )
-
-    total_chats = int(counts["Chats"].sum()) if len(counts) else 0
-    counts["Share"] = counts["Chats"] / total_chats if total_chats else 0.0
-
-    pie = (
-        alt.Chart(counts)
-        .mark_arc(outerRadius=140, innerRadius=60)
-        .encode(
-            theta=alt.Theta("Chats:Q", stack=True),
-            color=alt.Color(f"{country_col}:N", legend=alt.Legend(title="Country")),
-            tooltip=[
-                alt.Tooltip(f"{country_col}:N", title="Country"),
-                alt.Tooltip("Chats:Q", title="Chats", format=","),
-                alt.Tooltip("Share:Q", title="Share", format=".1%")
-            ],
+        labels = (
+            alt.Chart(counts)
+            .mark_text(radius=105, size=11)
+            .encode(theta=alt.Theta("Chats:Q", stack=True),
+                    text=alt.Text("Chats:Q", format=","))
         )
-        .properties(width=480, height=360, title="Chat Volume by Country")
-    )
-    labels = (
-        alt.Chart(counts)
-        .mark_text(radius=105, size=11)
-        .encode(theta=alt.Theta("Chats:Q", stack=True),
-                text=alt.Text("Chats:Q", format=","))
-    )
-    st.altair_chart(pie + labels, use_container_width=True)
-
-    with st.expander("View country breakdown table"):
-        st.dataframe(
-            counts.rename(columns={country_col: "Country"})[["Country", "Chats", "Share"]]
-                  .style.format({"Chats": "{:,}", "Share": "{:.1%}"}),
-            use_container_width=True
-        )
-
+        st.altair_chart(pie + labels, use_container_width=True)
 # =========================
 # ⏱️ Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
 # =========================
