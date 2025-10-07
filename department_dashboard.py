@@ -951,7 +951,7 @@ else:
             .encode(theta=alt.Theta("Chats:Q", stack=True), text="Label:N")
         )
 
-        st.altair_chart(pie + labels, width='stretch')
+        st.altair_chart(pie + labels, use_container_width=True)
 
         with st.expander("View country breakdown table"):
             st.dataframe(
