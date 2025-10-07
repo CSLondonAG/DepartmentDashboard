@@ -182,16 +182,9 @@ def get_fcr_color_pct(v):
     return "#F44336" if v < 50 else "#4CAF50"
 
 # Interval helpers
-def merge_intervals(ints):
-    if not ints: return []
-    ints = sorted(ints, key=lambda x: x[0])
-    out = [list(ints[0])]
-    for s, e in ints[1:]:
-        if s > out[-1][1]:
-            out.append([s, e])
-        else:
-            out[-1][1] = max(out[-1][1], e)
-    return [(s, e) for s, e in out]
+
+# (removed duplicate merge_intervals helper)
+
 
 def clip_to_window(s, e, wstart, wend):
     s2, e2 = max(s, wstart), min(e, wend)
@@ -543,54 +536,40 @@ for ag in agents:
     dept_email_avail  += email_av
 
 
-# --- Accurate chat utilisation (overlap-based) ---
-# Build availability intervals by agent from presence DataFrame (assuming pres_df avail_by_agent exists)
-# Expect pres_df has Created By: Full Name and Start DT / End DT and Status columns
-try:
-    avail_by_agent = {}
-    for agent, g in pres_df.groupby("Created By: Full Name"):
-        rows = []
-        for _,r in g.iterrows():
-            st_dt = pd.to_datetime(r.get("Start DT"), errors="coerce")
-            en_dt = pd.to_datetime(r.get("End DT"), errors="coerce")
-            status = str(r.get("Status") or r.get("Presence Status") or "").strip().lower()
-            if pd.isna(st_dt) or pd.isna(en_dt) or en_dt <= st_dt:
-                continue
-            if status in ("available_chat","available all","available_all","available-all","available all channels"):
-                rows.append((st_dt, en_dt, status))
-            elif status in ("available_all","available all","available all channels"):
-                rows.append((st_dt, en_dt, status))
-        if rows:
-            # Split rows into chat-capable sets: Available_Chat OR Available_All
-            chat_cap = [(s,e) for (s,e,stt) in rows if "chat" in stt or "available all" in stt or "available_all" in stt]
-            avail_by_agent[agent] = coalesce_intervals(chat_cap)
-except Exception as _e:
-    avail_by_agent = {}
+# --- Accurate chat utilisation (overlap-based, clean) ---
+CHAT_DEVNAME = "sfdc_liveagent"
+avail_by_agent = {}
+for ag, grp in presence_win.groupby("Created By: Full Name"):
+    chat_cap = []
+    for _, r in grp.iterrows():
+        status = str(r.get("Service Presence Status: Developer Name", "")).strip()
+        if status not in {"Available_Chat", "Available_All"}:
+            continue
+        seg = clip_to_window(r["Start DT"], r["End DT"], window_start, window_end)
+        if seg:
+            chat_cap.append(seg)
+    if chat_cap:
+        avail_by_agent[ag] = merge_intervals(chat_cap)
 
-# Build handled chat intervals by agent from df_period (items)
 chat_handle_by_agent = {}
-try:
-    period = df_period[df_period["Service Channel: Developer Name"]==CHAT_DEVNAME]
-    for agent, g in period.groupby("User: Full Name"):
-        intervals = list(zip(pd.to_datetime(g["Start DT"], errors="coerce"), pd.to_datetime(g["End DT"], errors="coerce")))
-        intervals = [(s,e) for s,e in intervals if pd.notna(s) and pd.notna(e) and e > s]
-        chat_handle_by_agent[agent] = coalesce_intervals(intervals)
-except Exception:
-    chat_handle_by_agent = {}
+period = df_period[df_period["Service Channel: Developer Name"] == CHAT_DEVNAME]
+for ag, grp in period.groupby("User: Full Name"):
+    ints = [clip_to_window(s, e, window_start, window_end) for s, e in zip(grp["Start DT"], grp["End DT"])]
+    ints = [x for x in ints if x]
+    if ints:
+        chat_handle_by_agent[ag] = merge_intervals(ints)
 
 dept_chat_cap = 0.0
 dept_chat_work_incap = 0.0
-
-agents = set(list(avail_by_agent.keys()) + list(chat_handle_by_agent.keys()))
-for ag in agents:
+agents_all = set(avail_by_agent) | set(chat_handle_by_agent)
+for ag in agents_all:
     av = avail_by_agent.get(ag, [])
     hd = chat_handle_by_agent.get(ag, [])
-    dept_chat_cap += interval_seconds(av)
-    dept_chat_work_incap += total_overlap(hd, av)
+    dept_chat_cap += sum_secs(av)
+    dept_chat_work_incap += intersect_sum(hd, av)
 
 chat_util = (dept_chat_work_incap / dept_chat_cap) if dept_chat_cap else 0.0
 email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
-
 # =========================
 # Build per-day SLA & volumes (one row per day)
 # =========================
@@ -847,78 +826,137 @@ else:
 st.markdown("---")
 st.subheader("🌍 Chats by Country (volume)")
 
-def _detect_country_col(df: pd.DataFrame) -> Optional[str]:
-    cols = [c for c in df.columns if "country" in c.lower()]
-    if not cols:
-        cols = [c for c in df.columns if "geo" in c.lower()]
-    return cols[0] if cols else None
+DEVNAME_COL = "Chat Button: Developer Name"
 
-country_col = _detect_country_col(chat_sla_df)
-if not country_col:
-    st.info("No country column found in chat.csv (e.g., 'Country', 'Visitor Country').")
+def _country_from_devname(devname: str) -> str:
+    if not isinstance(devname, str):
+        return "Unknown"
+    s = devname.strip()
+    if not s:
+        return "Unknown"
+    s_norm = re.sub(r"[\-_.:/|]+", " ", s).lower()
+    stop = {"website","web","center","centre","support","service","services",
+            "customer","cs","live","chat","button","btn","queue","portal",
+            "mobile","app","online","site","vip","en","pt","fr","eng","por"}
+    tokens = [t for t in re.split(r"\s+", s_norm) if t and t not in stop]
+    s_clean = " ".join(tokens)
+
+    aliases = {
+        "Angola": ["angola","ao"],
+        "Botswana": ["botswana","bw"],
+        "Cameroon": ["cameroon","cm"],
+        "Congo (DRC)": ["congo drc","drc","dr congo","democratic republic of congo","rdc"],
+        "Côte d’Ivoire": ["cote d'ivoire","côte d’ivoire","ivory coast","ci"],
+        "Ghana": ["ghana","gh"],
+        "Kenya": ["kenya","ke"],
+        "Malawi": ["malawi","mw"],
+        "Mozambique": ["mozambique","mz","mocambique","moçambique"],
+        "Nigeria": ["nigeria","ng"],
+        "Rwanda": ["rwanda","rw"],
+        "Sierra Leone": ["sierra leone","sl"],
+        "South Africa": ["south africa","sa"],
+        "Tanzania": ["tanzania","tz"],
+        "Uganda": ["uganda","ug"],
+        "Zambia": ["zambia","zm"],
+        "Zimbabwe": ["zimbabwe","zw"],
+        "Eswatini": ["eswatini","swaziland","sz"],
+        "Lesotho": ["lesotho","ls"],
+        "São Tomé and Príncipe": ["sao tome","são tomé","sao tome and principe","stp"],
+        "Gabon": ["gabon","ga"],
+        "Liberia": ["liberia","lr"],
+        "Senegal": ["senegal","sn"],
+        "Burkina Faso": ["burkina","burkina faso","bf"],
+        "Mali": ["mali","ml"],
+        "Benin": ["benin","bj"],
+        "Niger": ["niger","ne"],
+        "Guinea": ["guinea","gn"],
+        "Guinea-Bissau": ["guinea bissau","gw"],
+        "The Gambia": ["gambia","gm"],
+        "Namibia": ["namibia","na"],
+        "Ethiopia": ["ethiopia","et"],
+        "Somalia": ["somalia","so"],
+        "Morocco": ["morocco","ma"],
+        "Tunisia": ["tunisia","tn"],
+        "Algeria": ["algeria","dz"]
+    }
+
+    for canon, pats in aliases.items():
+        for alias in sorted(pats, key=len, reverse=True):
+            if re.search(r"(?:^|\b)"+re.escape(alias)+r"(?:\b|$)", s_clean):
+                return canon
+    return "Unknown"
+
+if DEVNAME_COL not in chat_sla_df.columns:
+    st.info("Column 'Chat Button: Developer Name' not found in chat.csv.")
 else:
-    chat_country = chat_sla_df[
+    dfc = chat_sla_df[
         (chat_sla_df["Date/Time Opened"].dt.date >= start_date) &
         (chat_sla_df["Date/Time Opened"].dt.date <= end_date)
     ].copy()
 
-    chat_country[country_col] = (
-        chat_country[country_col]
-        .astype(str).str.strip()
-        .replace({"": None, "nan": None, "none": None, "None": None})
-        .fillna("Unknown").str.title()
-    )
+    dfc["Country"] = dfc[DEVNAME_COL].apply(_country_from_devname).fillna("Unknown").astype(str).str.title()
 
     counts = (
-        chat_country.groupby(country_col, dropna=False)
-        .size()
-        .reset_index(name="Chats")
-        .sort_values("Chats", ascending=False)
-        .reset_index(drop=True)
+        dfc.groupby("Country", dropna=False)
+           .size().reset_index(name="Chats")
+           .sort_values("Chats", ascending=False).reset_index(drop=True)
     )
 
-    top_n = st.sidebar.slider("Pie chart: top countries", min_value=3, max_value=12, value=8, step=1)
-    if len(counts) > top_n:
-        top = counts.head(top_n)
-        others_total = counts["Chats"].iloc[top_n:].sum()
-        counts = pd.concat(
-            [top, pd.DataFrame({country_col: ["Other"], "Chats": [others_total]})],
-            ignore_index=True
+    if counts.empty or counts["Chats"].sum() == 0:
+        st.info("No chats in the selected period (or developer names didn't map to countries).")
+    else:
+        order = counts.sort_values("Chats", ascending=False)["Country"].tolist()
+        try:
+            counts["Country"] = pd.Categorical(counts["Country"], categories=order, ordered=True)
+        except Exception:
+            pass
+
+        top_n = st.sidebar.slider("Pie chart: top countries", min_value=3, max_value=12, value=8, step=1)
+        if len(counts) > top_n:
+            top = counts.head(top_n)
+            others_total = counts["Chats"].iloc[top_n:].sum()
+            counts = pd.concat([top, pd.DataFrame({"Country": ["Other"], "Chats": [others_total]})], ignore_index=True)
+
+        total = int(counts["Chats"].sum())
+        counts["Share"] = counts["Chats"] / total if total else 0
+
+        min_share = st.sidebar.slider("Label slices ≥ this share", min_value=0.0, max_value=0.1, value=0.02, step=0.01)
+        label_df = counts[counts["Share"] >= min_share].copy()
+        label_df["Label"] = label_df.apply(lambda r: f"{r['Country']} — {int(r['Chats']):,} ({r['Share']:.0%})", axis=1)
+
+        pie = (
+            alt.Chart(counts)
+            .mark_arc(outerRadius=170, innerRadius=70, stroke="white", strokeWidth=2)
+            .encode(
+                theta=alt.Theta("Chats:Q", stack=True),
+                color=alt.Color("Country:N", sort=order, legend=alt.Legend(title="Country (sorted by volume)", labelLimit=220)),
+                order=alt.Order("Country:N", sort=order),
+                tooltip=[
+                    alt.Tooltip("Country:N", title="Country"),
+                    alt.Tooltip("Chats:Q", title="Chats", format=","),
+                    alt.Tooltip("Share:Q", title="Share", format=".1%")
+                ],
+            )
+            .properties(width=520, height=420, title="Chat Volume by Country (from Chat Button)")
         )
 
-    total_chats = int(counts["Chats"].sum()) if len(counts) else 0
-    counts["Share"] = counts["Chats"] / total_chats if total_chats else 0.0
-
-    pie = (
-        alt.Chart(counts)
-        .mark_arc(outerRadius=140, innerRadius=60)
-        .encode(
-            theta=alt.Theta("Chats:Q", stack=True),
-            color=alt.Color(f"{country_col}:N", legend=alt.Legend(title="Country")),
-            tooltip=[
-                alt.Tooltip(f"{country_col}:N", title="Country"),
-                alt.Tooltip("Chats:Q", title="Chats", format=","),
-                alt.Tooltip("Share:Q", title="Share", format=".1%")
-            ],
+        labels = (
+            alt.Chart(label_df)
+            .mark_text(radius=120, size=12)
+            .encode(theta=alt.Theta("Chats:Q", stack=True), text="Label:N")
         )
-        .properties(width=480, height=360, title="Chat Volume by Country")
-    )
-    labels = (
-        alt.Chart(counts)
-        .mark_text(radius=105, size=11)
-        .encode(theta=alt.Theta("Chats:Q", stack=True),
-                text=alt.Text("Chats:Q", format=","))
-    )
-    st.altair_chart(pie + labels, width='stretch')
 
-    with st.expander("View country breakdown table"):
-        st.dataframe(
-            counts.rename(columns={country_col: "Country"})[["Country", "Chats", "Share"]]
-                  .style.format({"Chats": "{:,}", "Share": "{:.1%}"}),
-            width='stretch'
-        )
+        st.altair_chart(pie + labels, width='stretch')
+
+        with st.expander("View country breakdown table"):
+            st.dataframe(
+                counts[["Country", "Chats", "Share"]].style.format({"Chats": "{:,}", "Share": "{:.1%}"}),
+                width='stretch'
+            )
 
 # =========================
+# ⏱️ Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
+# =========================# =========================
 # ⏱️ Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
 # =========================
 st.markdown("---")
