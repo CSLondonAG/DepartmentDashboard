@@ -829,27 +829,49 @@ else:
         total_chats = int(counts["Chats"].sum())
         counts["Share"] = counts["Chats"] / total_chats
 
-        pie = (
-            alt.Chart(counts)
-            .mark_arc(outerRadius=140, innerRadius=60)
-            .encode(
-                theta=alt.Theta("Chats:Q", stack=True),
-                color=alt.Color("Country:N", legend=alt.Legend(title="Country")),
-                tooltip=[
-                    alt.Tooltip("Country:N", title="Country"),
-                    alt.Tooltip("Chats:Q", title="Chats", format=","),
-                    alt.Tooltip("Share:Q", title="Share", format=".1%")
-                ],
-            )
-            .properties(width=480, height=360, title="Chat Volume by Country (from Chat Button)")
-        )
-        labels = (
-            alt.Chart(counts)
-            .mark_text(radius=105, size=11)
-            .encode(theta=alt.Theta("Chats:Q", stack=True),
-                    text=alt.Text("Chats:Q", format=","))
-        )
-        st.altair_chart(pie + labels, use_container_width=True)
+        
+# Reorder legend by size (descending)
+order = counts.sort_values("Chats", ascending=False)["Country"].tolist()
+# Make the Country column categorical to preserve order end-to-end
+try:
+    counts["Country"] = pd.Categorical(counts["Country"], categories=order, ordered=True)
+except Exception:
+    pass
+
+# Label only slices >= min_share to avoid clutter
+min_share = st.sidebar.slider("Label slices ≥ this share", min_value=0.0, max_value=0.1, value=0.02, step=0.01)
+label_df = counts[counts["Share"] >= min_share].copy()
+label_df["Label"] = label_df.apply(lambda r: f"{r['Country']} — {int(r['Chats']):,} ({r['Share']:.0%})", axis=1)
+
+pie = (
+    alt.Chart(counts)
+    .mark_arc(outerRadius=170, innerRadius=70, stroke="white", strokeWidth=2)
+    .encode(
+        theta=alt.Theta("Chats:Q", stack=True),
+        color=alt.Color("Country:N",
+                        sort=order,
+                        legend=alt.Legend(title="Country (sorted by volume)", labelLimit=220)),
+        order=alt.Order("Country:N", sort=order),
+        tooltip=[
+            alt.Tooltip("Country:N", title="Country"),
+            alt.Tooltip("Chats:Q", title="Chats", format=","),
+            alt.Tooltip("Share:Q", title="Share", format=".1%")
+        ],
+    )
+    .properties(width=520, height=420, title="Chat Volume by Country (from Chat Button)")
+)
+
+labels = (
+    alt.Chart(label_df)
+    .mark_text(radius=120, size=12)
+    .encode(
+        theta=alt.Theta("Chats:Q", stack=True),
+        text="Label:N"
+    )
+)
+
+st.altair_chart(pie + labels, use_container_width=True)
+
 # =========================
 # ⏱️ Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
 # =========================
