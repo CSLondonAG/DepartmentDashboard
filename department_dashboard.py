@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 
 # ----------------------------
-# Page config & theme accents
+# Page config & light theme tweaks
 # ----------------------------
 st.set_page_config(
     page_title="Department Performance Dashboard",
@@ -16,63 +16,91 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Small CSS touchups (keeps the app tidy, non-intrusive)
 st.markdown("""
 <style>
-/* cards */
 .block-container {padding-top: 1.2rem;}
 .kpi-card {background:#f8fbff;border:1px solid #e5eefb;border-radius:10px;padding:16px;}
 .kpi-title {color:#64748b;font-size:0.9rem;margin:0 0 6px 0;}
 .kpi-value {color:#1d4ed8;font-weight:700;font-size:1.6rem;margin:0;}
-/* info panel */
-.info {background:#eef6ff;border:1px solid #dbeafe;border-radius:8px;padding:14px;}
-/* light table tweak */
 thead tr th { white-space:nowrap; }
 </style>
 """, unsafe_allow_html=True)
 
 # ----------------------------
-# Paths & load helpers
+# Paths & generic csv reader
 # ----------------------------
 BASE_DIR = Path(__file__).parent
 
 @st.cache_data(ttl=600)
 def _read_csv_safe(path: Path, **kwargs) -> pd.DataFrame:
+    """Read CSV if present, else empty DataFrame (without raising)."""
     if not path.exists():
         return pd.DataFrame()
     return pd.read_csv(path, **kwargs)
 
 @st.cache_data(ttl=600)
-def load_data():
-    # Core sources
-    chat_df  = _read_csv_safe(BASE_DIR / "chat.csv",
-                              dayfirst=True,
-                              parse_dates=["Date/Time Opened"])
-    email_df = _read_csv_safe(BASE_DIR / "email.csv",
-                              dayfirst=True,
-                              parse_dates=["Date/Time Opened"])
-    items_df = _read_csv_safe(BASE_DIR / "report_items.csv",
-                              dayfirst=True,
-                              parse_dates=["Start DT","End DT"])
-    pres_df  = _read_csv_safe(BASE_DIR / "report_presence.csv",
-                              dayfirst=True,
-                              parse_dates=["Start DT","End DT"])
-    shifts   = _read_csv_safe(BASE_DIR / "shifts.csv")
-    survey   = _read_csv_safe(BASE_DIR / "survey.csv", dayfirst=True, parse_dates=["Survey Date"])  # optional
+def _read_survey_safe(path: Path) -> pd.DataFrame:
+    """
+    Survey file may have different date column names.
+    - Read without parse_dates.
+    - Create a unified 'Survey Date' parsed as dayfirst.
+    """
+    if not path.exists():
+        return pd.DataFrame()
 
+    df = pd.read_csv(path)
+    df.columns = df.columns.str.strip()
+
+    # Find a usable date column
+    candidates = [
+        "Survey Date",
+        "Survey Taker: Created Date",
+        "Created Date",
+        "Date",
+    ]
+    survey_date_col = None
+    for c in candidates:
+        if c in df.columns:
+            survey_date_col = c
+            break
+
+    if survey_date_col:
+        df["Survey Date"] = pd.to_datetime(df[survey_date_col], dayfirst=True, errors="coerce")
+    else:
+        # Create the column to avoid downstream KeyErrors
+        df["Survey Date"] = pd.NaT
+
+    return df
+
+@st.cache_data(ttl=600)
+def load_data():
+    # Core sources (parse_dates only where we are sure columns exist)
+    chat_df  = _read_csv_safe(BASE_DIR / "chat.csv",  dayfirst=True, parse_dates=["Date/Time Opened"])
+    email_df = _read_csv_safe(BASE_DIR / "email.csv", dayfirst=True, parse_dates=["Date/Time Opened"])
+    items_df = _read_csv_safe(BASE_DIR / "report_items.csv",    dayfirst=True, parse_dates=["Start DT","End DT"])
+    pres_df  = _read_csv_safe(BASE_DIR / "report_presence.csv", dayfirst=True, parse_dates=["Start DT","End DT"])
+    shifts   = _read_csv_safe(BASE_DIR / "shifts.csv")
+
+    # Survey is special (column names differ)
+    survey   = _read_survey_safe(BASE_DIR / "survey.csv")
+
+    # Normalize columns
     for df in (chat_df, email_df, items_df, pres_df, shifts, survey):
         if not df.empty:
             df.columns = df.columns.str.strip()
+
     return chat_df, email_df, items_df, pres_df, shifts, survey
 
+# Load
 chat_sla_df, email_sla_df, df_items, df_presence, df_shifts, df_survey = load_data()
 
+# Guard rails
 if chat_sla_df.empty or email_sla_df.empty:
     st.error("Please ensure chat.csv and email.csv exist alongside the app.")
     st.stop()
 
 # ----------------------------
-# Sidebar filter: date range
+# Sidebar date range (from both chat & email)
 # ----------------------------
 st.sidebar.header("Filters")
 
@@ -94,36 +122,32 @@ if start_date > end_date:
     st.stop()
 
 # ----------------------------
-# Utility formatters / helpers
+# Utility formatters
 # ----------------------------
 def fmt_mmss(sec: float | None) -> str:
-    if not sec or np.isnan(sec):
+    if sec is None or (isinstance(sec, float) and np.isnan(sec)):
         return "—"
     m, s = divmod(int(round(sec)), 60)
     return f"{m:02}:{s:02}"
 
-def _clip01(x: float) -> float:
-    return max(0.0, min(1.0, float(x)))
-
 # ----------------------------
-# KPI block (basic volumes & AHT)
+# Header & KPIs (AHT from report_items)
 # ----------------------------
 st.title("📊 Department Performance Dashboard")
 st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 st.divider()
 
-# Compute AHT from report_items
-mask = ((df_items["Start DT"].dt.date >= start_date) &
-        (df_items["Start DT"].dt.date <= end_date))
-df_period_items = df_items.loc[mask].copy()
+mask_items = ((df_items["Start DT"].dt.date >= start_date) &
+              (df_items["Start DT"].dt.date <= end_date))
+df_period_items = df_items.loc[mask_items].copy()
 if not df_period_items.empty:
     df_period_items["Duration_sec"] = (df_period_items["End DT"] - df_period_items["Start DT"]).dt.total_seconds()
-    chat_items = df_period_items[df_period_items["Service Channel: Developer Name"]=="sfdc_liveagent"]
+    chat_items  = df_period_items[df_period_items["Service Channel: Developer Name"]=="sfdc_liveagent"]
     email_items = df_period_items[df_period_items["Service Channel: Developer Name"]=="casesChannel"]
-    chat_total = int(len(chat_items))
+    chat_total  = int(len(chat_items))
     email_total = int(len(email_items))
-    chat_aht = chat_items["Duration_sec"].mean() if chat_total else np.nan
-    email_aht = email_items["Duration_sec"].mean() if email_total else np.nan
+    chat_aht    = chat_items["Duration_sec"].mean()  if chat_total  else np.nan
+    email_aht   = email_items["Duration_sec"].mean() if email_total else np.nan
 else:
     chat_total = email_total = 0
     chat_aht = email_aht = np.nan
@@ -143,7 +167,7 @@ with c4:
                 f'<div class="kpi-value">{fmt_mmss(email_aht)}</div></div>', unsafe_allow_html=True)
 
 # ----------------------------
-# SLA (daily) — Chat & Email + Weighted
+# SLA calculation (daily Chat & Email → Weighted)
 # ----------------------------
 chat_slice = chat_sla_df[
     (chat_sla_df["Date/Time Opened"].dt.date >= start_date) &
@@ -158,54 +182,51 @@ email_slice = email_sla_df[
 days = pd.date_range(start_date, end_date, freq="D")
 daily_rows = []
 for d in days.date:
-    # Chat
+    # Chat metrics
     cd = chat_slice[chat_slice["Date/Time Opened"].dt.date == d]
-    # Only include rows with wait time for %<=60 calculation
-    cw = cd[cd["Wait Time"].notna()]
-    chats_vol = len(cw)
-    pct_60s = (cw["Wait Time"] <= 60).mean()*100 if chats_vol else 0.0
-    avg_wait_m = (cw["Wait Time"].mean()/60.0) if chats_vol else 0.0
-    abandon_rate = (cd["Abandoned After"] > 20).mean()*100 if len(cd) else 0.0
-    chat_raw = (0.5*pct_60s) - (0.3*avg_wait_m) - (0.2*abandon_rate)
-    chat_sla = np.clip(((chat_raw / 0.45) * 80), 0, 100) if chats_vol else 0.0
+    cw = cd[cd["Wait Time"].notna()]  # only rows with measured wait time
+    chats_vol   = len(cw)
+    pct_60s     = (cw["Wait Time"] <= 60).mean()*100 if chats_vol else 0.0
+    avg_wait_m  = (cw["Wait Time"].mean()/60.0) if chats_vol else 0.0
+    abandon_rt  = (cd["Abandoned After"] > 20).mean()*100 if len(cd) else 0.0
+    chat_raw    = (0.5*pct_60s) - (0.3*avg_wait_m) - (0.2*abandon_rt)
+    chat_sla    = float(np.clip(((chat_raw / 0.45) * 80), 0, 100)) if chats_vol else 0.0
 
-    # Email
+    # Email metrics
     ed = email_slice[email_slice["Date/Time Opened"].dt.date == d]
-    emails_vol = len(ed)
-    pct_1h = (ed["Elapsed Time (Hours)"] <= 1).mean()*100 if emails_vol else 0.0
-    avg_resp_h = ed["Elapsed Time (Hours)"].mean() if emails_vol else 0.0
-    email_raw = (0.6*pct_1h) - (0.4*avg_resp_h)
-    email_sla = np.clip(((email_raw / 0.5625) * 80), 0, 100) if emails_vol else 0.0
+    emails_vol  = len(ed)
+    pct_1h      = (ed["Elapsed Time (Hours)"] <= 1).mean()*100 if emails_vol else 0.0
+    avg_resp_h  = ed["Elapsed Time (Hours)"].mean() if emails_vol else 0.0
+    email_raw   = (0.6*pct_1h) - (0.4*avg_resp_h)
+    email_sla   = float(np.clip(((email_raw / 0.5625) * 80), 0, 100)) if emails_vol else 0.0
 
     daily_rows.append({
         "Date": pd.to_datetime(d),
-        "Chat SLA": chat_sla, "Chat Vol": chats_vol,
-        "Email SLA": email_sla, "Email Vol": emails_vol
+        "Chat SLA": chat_sla,  "Chat Vol": chats_vol,
+        "Email SLA": email_sla,"Email Vol": emails_vol
     })
 
 df_daily = pd.DataFrame(daily_rows)
-if df_daily.empty:
-    st.info("No activity in the selected period.")
-else:
+st.divider()
+st.header("🎯 SLA Score Summary")
+
+if not df_daily.empty:
     total_vol = (df_daily["Chat Vol"] + df_daily["Email Vol"]).replace(0, np.nan)
     df_daily["Weighted SLA"] = ((df_daily["Chat SLA"]*df_daily["Chat Vol"] +
                                  df_daily["Email SLA"]*df_daily["Email Vol"]) / total_vol).fillna(0)
 
-st.divider()
-st.header("🎯 SLA Score Summary")
-if not df_daily.empty:
-    chat_weighted = (df_daily["Chat SLA"]*df_daily["Chat Vol"]).sum() / (df_daily["Chat Vol"].sum() or 1)
-    email_weighted = (df_daily["Email SLA"]*df_daily["Email Vol"]).sum() / (df_daily["Email Vol"].sum() or 1)
-    total_vol_period = (df_daily["Chat Vol"] + df_daily["Email Vol"]).sum()
-    weighted_sla = ((df_daily["Chat SLA"]*df_daily["Chat Vol"] +
-                     df_daily["Email SLA"]*df_daily["Email Vol"]).sum() / (total_vol_period or 1))
+    chat_weighted   = (df_daily["Chat SLA"]  * df_daily["Chat Vol"]).sum() / (df_daily["Chat Vol"].sum() or 1)
+    email_weighted  = (df_daily["Email SLA"] * df_daily["Email Vol"]).sum() / (df_daily["Email Vol"].sum() or 1)
+    total_vol_prd   = (df_daily["Chat Vol"] + df_daily["Email Vol"]).sum()
+    weighted_sla    = ((df_daily["Chat SLA"]*df_daily["Chat Vol"] +
+                        df_daily["Email SLA"]*df_daily["Email Vol"]).sum() / (total_vol_prd or 1))
 else:
     chat_weighted = email_weighted = weighted_sla = 0.0
 
 s1, s2, s3 = st.columns(3)
-s1.metric("Chat SLA Score", f"{chat_weighted:.1f}")
-s2.metric("Email SLA Score", f"{email_weighted:.1f}")
-s3.metric("Weighted SLA Score", f"{weighted_sla:.1f}")
+s1.metric("Chat SLA Score",   f"{chat_weighted:.1f}")
+s2.metric("Email SLA Score",  f"{email_weighted:.1f}")
+s3.metric("Weighted SLA",     f"{weighted_sla:.1f}")
 
 # ----------------------------
 # Weighted SLA trend
@@ -227,12 +248,11 @@ if not df_daily.empty:
         .properties(height=340)
     )
     target_rule = alt.Chart(pd.DataFrame({"y":[80]})).mark_rule(color="red", strokeDash=[5,5]).encode(y="y:Q")
-    st.altair_chart(trend + target_rule, use_container_width=True)
+    st.altair_chart(trend + target_rule, width="stretch")
 
 # ==========================================================
 # 🌍 Chats by Country (volume) — uses 'Chat Button: Developer Name'
-#     (Improved normalizer to combine "centre sierra leone",
-#      "website sierra leone", "Sierra-Leone", etc.)
+# (robust normalizer; combines 'centre sierra leone' & 'website sierra leone')
 # ==========================================================
 st.markdown("---")
 st.subheader("🌍 Chats by Country (volume)")
@@ -251,7 +271,7 @@ _ISO2_TO_NAME = {
     "SD":"Sudan","TZ":"Tanzania","TG":"Togo","TN":"Tunisia","UG":"Uganda","ZM":"Zambia","ZW":"Zimbabwe",
 }
 _KNOWN_COUNTRIES = {v.lower(): v for v in _ISO2_TO_NAME.values()}
-_LANG_CODES = {"EN","FR","PT","ES","AR"}  # ignore when they appear as suffixes
+_LANG_CODES = {"EN","FR","PT","ES","AR"}  # ignore when suffix
 _STOPWORDS = {
     "premier","premierbet","pb","mercury","bet","button","developer","name",
     "chat","support","customer","service","cs","care","help","web","live","agent"
@@ -260,7 +280,7 @@ _STOPWORDS = {
 def _matches_country_name(text_low: str, country_name: str) -> bool:
     """
     True if text_low contains country_name allowing any non-letters between words.
-    E.g. 'sierra-leone', 'website sierra   leone', 'centre_sierra_leone' all match 'Sierra Leone'.
+    e.g. 'sierra-leone', 'centre sierra   leone', 'website_sierra_leone'
     """
     tokens = re.findall(r"[a-z]+", country_name.lower())
     if not tokens:
@@ -276,7 +296,7 @@ def _country_from_button(val: object) -> str | None:
     if not s:
         return None
 
-    # If "City, Country" -> take last token
+    # If "City, Country" → take last token
     if "," in s and len(s) < 100:
         s = s.split(",")[-1].strip()
 
@@ -287,7 +307,7 @@ def _country_from_button(val: object) -> str | None:
         if _matches_country_name(low, cname):
             return cname
 
-    # 2) Locale/suffix like "en-TZ", "..._TZ" -> trailing 2 letters
+    # 2) Locale/suffix like "en-TZ", "..._TZ" → trailing 2 letters
     m = re.search(r"[_\-\s]([A-Za-z]{2})$", s)
     if m:
         code = m.group(1).upper()
@@ -313,7 +333,6 @@ def _country_from_button(val: object) -> str | None:
 
     return None
 
-# Slice chats by date range
 btn_col = "Chat Button: Developer Name"
 if btn_col not in chat_sla_df.columns:
     st.info(f"Column '{btn_col}' not found in chat.csv.")
@@ -365,13 +384,10 @@ else:
                 text=alt.Text("Chats:Q", format=",.0f")
             )
         )
-        st.altair_chart(pie + labels, use_container_width=True)
+        st.altair_chart(pie + labels, width="stretch")
 
         with st.expander("View country breakdown table"):
             st.dataframe(
                 counts[["Country","Chats","Share"]].style.format({"Chats": "{:,}", "Share": "{:.1%}"}),
-                use_container_width=True
+                use_container_width=True  # table layout still accepts this nicely
             )
-
-# ------------- end of file -------------
-
