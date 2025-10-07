@@ -934,7 +934,7 @@ else:
             .mark_arc(outerRadius=170, innerRadius=70, stroke="white", strokeWidth=2)
             .encode(
             theta=alt.Theta("Chats:Q", stack=True),
-            color=alt.Color("Country:N", sort=alt.Sort(country_order)), # <--- Corrected line
+            color=alt.Color("Country:N", sort=alt.Sort(country_order)),
             order=alt.Order("Chats:Q", sort="descending"),
                 tooltip=[
                     alt.Tooltip("Country:N", title="Country"),
