@@ -389,14 +389,32 @@ avg_resp_hrs  = email_sla_p["Elapsed Time (Hours)"].mean() if len(email_sla_p) e
 avg_resp_secs = avg_resp_hrs * 3600
 
 # =========================
-# Availability & Handling (Proportional split for overall utilization tiles)
+# Availability & Handling (Concurrency-aware proportional split)
 # =========================
+def intersect_intervals(a_ints, b_ints):
+    """Return list of intersection intervals between merged a_ints and b_ints."""
+    a = merge_intervals(a_ints)
+    b = merge_intervals(b_ints)
+    i = j = 0
+    out = []
+    while i < len(a) and j < len(b):
+        s = max(a[i][0], b[j][0])
+        e = min(a[i][1], b[j][1])
+        if e > s:
+            out.append((s, e))
+        if a[i][1] < b[j][1]:
+            i += 1
+        else:
+            j += 1
+    return out
+
 window_start = datetime.combine(start_date, datetime.min.time())
 window_end   = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
 
 presence_win = df_presence[(df_presence["Start DT"] < window_end) &
                            (df_presence["End DT"]   > window_start)].copy()
 
+# Collect availability by status
 chat_only_map  = {}
 email_only_map = {}
 shared_map     = {}
@@ -418,7 +436,7 @@ for ag, grp in presence_win.groupby("Created By: Full Name"):
     if eo: email_only_map[ag] = merge_intervals(eo)
     if sh: shared_map[ag]     = merge_intervals(sh)
 
-# Handling intervals per agent (clipped to window)
+# Handled intervals per agent (clipped to the window), merged
 chat_handles_map, email_handles_map = {}, {}
 for ag, grp in chat_df.groupby("User: Full Name"):
     ints = [clip_to_window(s, e, window_start, window_end) for s, e in zip(grp["Start DT"], grp["End DT"])]
@@ -430,48 +448,67 @@ for ag, grp in email_df.groupby("User: Full Name"):
     ints = [x for x in ints if x]
     if ints: email_handles_map[ag] = merge_intervals(ints)
 
-# Numerators and proportional denominators for utilization tiles
-dept_chat_handle  = 0.0
-dept_email_handle = 0.0
-dept_chat_avail   = 0.0
-dept_email_avail  = 0.0
+dept_chat_hand_eff  = 0.0  # concurrency-aware numerator
+dept_email_hand_eff = 0.0
+dept_chat_avail     = 0.0  # proportional denominator
+dept_email_avail    = 0.0
 
 agents = set(chat_only_map) | set(email_only_map) | set(shared_map) | set(chat_handles_map) | set(email_handles_map)
 for ag in agents:
-    co = chat_only_map.get(ag, [])
-    eo = email_only_map.get(ag, [])
-    sh = shared_map.get(ag, [])
+    co = chat_only_map.get(ag, [])       # Available_Chat
+    eo = email_only_map.get(ag, [])      # Available_Email_and_Web
+    sh = shared_map.get(ag, [])          # Available_All
 
-    chat_av_union  = merge_intervals(co + sh)
-    email_av_union = merge_intervals(eo + sh)
+    ch = chat_handles_map.get(ag, [])
+    em = email_handles_map.get(ag, [])
 
-    chat_hand  = intersect_sum(chat_handles_map.get(ag, []),  chat_av_union)  if chat_av_union  else 0.0
-    email_hand = intersect_sum(email_handles_map.get(ag, []), email_av_union) if email_av_union else 0.0
+    # Seconds of handled time inside each availability bucket
+    chat_in_co  = intersect_sum(ch, co)
+    email_in_eo = intersect_sum(em, eo)
 
+    chat_in_sh  = intersect_sum(ch, sh)
+    email_in_sh = intersect_sum(em, sh)
+
+    # Overlap where both chat & email are handled (within shared)
+    ch_em_overlap = intersect_intervals(ch, em)    # intersection of handled intervals
+    overlap_in_sh = intersect_sum(ch_em_overlap, sh)
+
+    # Within shared availability, split the overlap so totals don't exceed shared time
+    # (50/50 split; adjust here if you want a different policy)
+    split = 0.5
+    chat_only_sh  = max(chat_in_sh  - overlap_in_sh, 0.0)
+    email_only_sh = max(email_in_sh - overlap_in_sh, 0.0)
+    chat_eff_sh   = chat_only_sh  + split * overlap_in_sh
+    email_eff_sh  = email_only_sh + (1.0 - split) * overlap_in_sh
+
+    # Effective numerators per channel
+    chat_hand_eff  = chat_in_co  + chat_eff_sh
+    email_hand_eff = email_in_eo + email_eff_sh
+
+    # Proportional split of shared availability based on effective usage inside shared
     co_secs = sum_secs(co)
     eo_secs = sum_secs(eo)
     sh_secs = sum_secs(sh)
-    total_hand = chat_hand + email_hand
 
-    if sh_secs > 0:
-        if total_hand > 0:
-            sh_to_chat  = sh_secs * (chat_hand / total_hand)
-            sh_to_email = sh_secs * (email_hand / total_hand)
-        else:
-            sh_to_chat = sh_to_email = sh_secs / 2.0
+    total_eff_in_sh = chat_only_sh + email_only_sh + overlap_in_sh  # unique handled secs inside shared
+    if sh_secs > 0 and total_eff_in_sh > 0:
+        alpha = chat_eff_sh / total_eff_in_sh  # chat share of shared availability
+    elif sh_secs > 0:
+        alpha = 0.5
     else:
-        sh_to_chat = sh_to_email = 0.0
+        alpha = 0.0
 
-    chat_av   = co_secs + sh_to_chat
-    email_av  = eo_secs + sh_to_email
+    chat_av  = co_secs + alpha * sh_secs
+    email_av = eo_secs + (1.0 - alpha) * sh_secs
 
-    dept_chat_handle  += chat_hand
-    dept_email_handle += email_hand
-    dept_chat_avail   += chat_av
-    dept_email_avail  += email_av
+    dept_chat_hand_eff  += chat_hand_eff
+    dept_email_hand_eff += email_hand_eff
+    dept_chat_avail     += chat_av
+    dept_email_avail    += email_av
 
-chat_util  = (dept_chat_handle  / dept_chat_avail)  if dept_chat_avail  else 0
-email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
+# Final utilizations (clamped to [0,1] to guard tiny rounding overshoots)
+chat_util  = min(1.0, (dept_chat_hand_eff  / dept_chat_avail)  if dept_chat_avail  else 0.0)
+email_util = min(1.0, (dept_email_hand_eff / dept_email_avail) if dept_email_avail else 0.0)
 
 # =========================
 # Build per-day SLA & volumes (one row per day)
@@ -543,8 +580,8 @@ render_custom_metric(c4, "⏳ Avg Email Handle Time",   fmt_mmss(email_aht),  "A
 st.markdown("---")
 st.subheader("Operational Metrics")
 m1, m2, m3 = st.columns(3)
-render_custom_metric(m1, "📈 Chat Utilization",     f"{chat_util:.1%}",     "Handled∩Available / proportional availability", get_utilization_color(chat_util))
-render_custom_metric(m2, "📈 Email Utilization",    f"{email_util:.1%}",    "Handled∩Available / proportional availability", get_utilization_color(email_util))
+render_custom_metric(m1, "📈 Chat Utilization",     f"{chat_util:.1%}",     "Handled∩Availability (concurrency-aware) / proportional availability", get_utilization_color(chat_util))
+render_custom_metric(m2, "📈 Email Utilization",    f"{email_util:.1%}",    "Handled∩Availability (concurrency-aware) / proportional availability", get_utilization_color(email_util))
 render_custom_metric(m3, "⏱️ Avg Email Resp Time",  fmt_hms(avg_resp_secs), "Average email response time",           get_email_resp_time_color(avg_resp_secs))
 
 # SLA Score Summary
