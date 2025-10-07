@@ -1,4 +1,12 @@
 import streamlit as st
+import pandas as pd
+import altair as alt
+from datetime import datetime, timedelta, date
+from pathlib import Path
+import re
+import unicodedata
+from typing import Optional
+import datetime as _dt
 
 def merge_intervals(intervals):
     """
@@ -8,7 +16,7 @@ def merge_intervals(intervals):
     if not intervals:
         return []
 
-    import pandas as pd
+    
 
     # Normalize to lists (mutable) and drop invalid rows
     norm = []
@@ -41,7 +49,7 @@ def merge_intervals(intervals):
 
     return [tuple(x) for x in merged]
 
-import altair as alt
+
 
 # === Interval helpers for accurate utilisation ===
 def coalesce_intervals(iv):
@@ -70,12 +78,7 @@ def total_overlap(a, b):
         if e1 <= e2: i += 1
         else: j += 1
     return sec
-from datetime import datetime, timedelta, date
-from pathlib import Path
-import re
-import unicodedata
-from typing import Optional
-import datetime as _dt
+
 
 # =========================
 # Page Config & Styling
