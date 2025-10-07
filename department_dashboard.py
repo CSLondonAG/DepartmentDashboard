@@ -761,107 +761,116 @@ else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
 
 # =========================
-# 🌍 Chats by Country (robust) — volume
+# 🌍 Chats by Country (robust) — volume (uses 'Chat Button: Developer Name')
 # =========================
 st.markdown("---")
 st.subheader("🌍 Chats by Country (volume)")
 
-# 1) A larger set of candidate patterns we’ll try first.
-_CANDIDATE_PATTERNS = [
-    "country", "visitor country", "country name", "country_code", "country code",
-    "geo country", "geoip country", "ip country", "origin country",
-    "location", "visitor location", "site country", "market", "region"
-]
-
-# 2) A small ISO-2 mapping for common codes (extend if needed).
-_ISO2_TO_NAME = {
-    "AO": "Angola", "BJ": "Benin", "BW": "Botswana", "BF": "Burkina Faso",
-    "BI": "Burundi", "CM": "Cameroon", "CV": "Cabo Verde", "CF": "Central African Republic",
-    "TD": "Chad", "KM": "Comoros", "CG": "Congo", "CD": "Congo (DRC)",
-    "CI": "Côte d’Ivoire", "DJ": "Djibouti", "EG": "Egypt", "GQ": "Equatorial Guinea",
-    "ER": "Eritrea", "SZ": "Eswatini", "ET": "Ethiopia", "GA": "Gabon",
-    "GM": "Gambia", "GH": "Ghana", "GN": "Guinea", "GW": "Guinea-Bissau",
-    "KE": "Kenya", "LS": "Lesotho", "LR": "Liberia", "MG": "Madagascar",
-    "MW": "Malawi", "ML": "Mali", "MR": "Mauritania", "MU": "Mauritius",
-    "MA": "Morocco", "MZ": "Mozambique", "NA": "Namibia", "NE": "Niger",
-    "NG": "Nigeria", "RW": "Rwanda", "ST": "São Tomé & Príncipe", "SN": "Senegal",
-    "SC": "Seychelles", "SL": "Sierra Leone", "SO": "Somalia", "ZA": "South Africa",
-    "SS": "South Sudan", "SD": "Sudan", "TZ": "Tanzania", "TG": "Togo",
-    "TN": "Tunisia", "UG": "Uganda", "ZM": "Zambia", "ZW": "Zimbabwe",
-    # add more as needed…
-}
-
 import re
 
-def _guess_country_col(df: pd.DataFrame) -> Optional[str]:
-    cols = list(df.columns)
-    # 1) fuzzy name match
-    for c in cols:
-        lc = c.lower()
-        if any(pat in lc for pat in _CANDIDATE_PATTERNS):
-            return c
-    # 2) locale/language fields (e.g., en-TZ)
-    for c in cols:
-        if re.search(r"(locale|language|lang|culture)", c.lower()):
-            return c
-    return None
+# ISO2 -> name (extend as needed)
+_ISO2_TO_NAME = {
+    "AO":"Angola","BJ":"Benin","BW":"Botswana","BF":"Burkina Faso","BI":"Burundi",
+    "CM":"Cameroon","CV":"Cabo Verde","CF":"Central African Republic","TD":"Chad","KM":"Comoros",
+    "CG":"Congo","CD":"Congo (DRC)","CI":"Côte d’Ivoire","DJ":"Djibouti","EG":"Egypt",
+    "GQ":"Equatorial Guinea","ER":"Eritrea","SZ":"Eswatini","ET":"Ethiopia","GA":"Gabon",
+    "GM":"Gambia","GH":"Ghana","GN":"Guinea","GW":"Guinea-Bissau","KE":"Kenya",
+    "LS":"Lesotho","LR":"Liberia","MG":"Madagascar","MW":"Malawi","ML":"Mali",
+    "MR":"Mauritania","MU":"Mauritius","MA":"Morocco","MZ":"Mozambique","NA":"Namibia",
+    "NE":"Niger","NG":"Nigeria","RW":"Rwanda","ST":"São Tomé & Príncipe","SN":"Senegal",
+    "SC":"Seychelles","SL":"Sierra Leone","SO":"Somalia","ZA":"South Africa","SS":"South Sudan",
+    "SD":"Sudan","TZ":"Tanzania","TG":"Togo","TN":"Tunisia","UG":"Uganda","ZM":"Zambia","ZW":"Zimbabwe",
+}
 
-def _normalize_country_value(val: object) -> Optional[str]:
-    """Turn location/locale/code into a clean country name."""
+# Known country names (for direct substring matches)
+_KNOWN_COUNTRIES = {v.lower(): v for v in _ISO2_TO_NAME.values()}
+
+# Terms we strip from the button name (brand / channel / language bits)
+_STOPWORDS = {
+    "premier","premierbet","pb","mercury","bet","button","developer","name",
+    "chat","support","customer","service","cs","care","help",
+    # languages
+    "en","fr","pt","es","ar",
+    # channel artefacts
+    "web","live","agent"
+}
+
+def _normalize_country_from_button(val: object) -> str | None:
+    """Turn 'Chat Button: Developer Name' into a country label."""
     if pd.isna(val):
         return None
     s = str(val).strip()
     if not s:
         return None
 
-    # If looks like "City, Country", use the last token
-    if "," in s and len(s) < 80:
-        last = s.split(",")[-1].strip()
-        if 2 <= len(last) <= 40:
-            s = last
+    # If looks like "City, Country" -> last token
+    if "," in s and len(s) < 100:
+        s = s.split(",")[-1].strip()
 
-    # Locale format: en-TZ or pt_BR -> take the country code part
-    m = re.search(r"[_-]([A-Za-z]{2})$", s)
+    low = s.lower()
+
+    # If contains any known full country name
+    for cname_low, cname in _KNOWN_COUNTRIES.items():
+        if cname_low in low:
+            return cname
+
+    # Locale or suffix code: en-TZ, pb_chat_tz, ... (take trailing 2 letters)
+    m = re.search(r"[_\-\s]([A-Za-z]{2})$", s)
     if m:
         code = m.group(1).upper()
-        return _ISO2_TO_NAME.get(code, code)
+        if code not in {"EN","FR","PT","ES","AR"}:
+            return _ISO2_TO_NAME.get(code, code)
 
-    # Two-letter code only
+    # Only two-letter code?
     if re.fullmatch(r"[A-Za-z]{2}", s):
-        return _ISO2_TO_NAME.get(s.upper(), s.upper())
+        code = s.upper()
+        if code not in {"EN","FR","PT","ES","AR"}:
+            return _ISO2_TO_NAME.get(code, code)
 
-    # Otherwise treat as a country name string
-    return s.title()
+    # Remove non-letters, split to tokens, drop stopwords, rebuild
+    toks = re.findall(r"[A-Za-z]{2,}", s)
+    toks = [t for t in toks if t.lower() not in _STOPWORDS]
+    if toks:
+        # If any token is a known country name, prefer it
+        for t in toks:
+            if t.lower() in _KNOWN_COUNTRIES:
+                return _KNOWN_COUNTRIES[t.lower()]
+        return " ".join(toks).title()
 
-# Filter to date range
+    return None
+
+# Slice chats for the date range
 chat_country_df = chat_sla_df[
     (chat_sla_df["Date/Time Opened"].dt.date >= start_date) &
     (chat_sla_df["Date/Time Opened"].dt.date <= end_date)
-]
+].copy()
 
-# Pick/guess column
-default_col = _guess_country_col(chat_country_df)
-text_cols = [c for c in chat_country_df.columns if chat_country_df[c].dtype == "object"]
-
-with st.expander("Choose the column to build the country chart (auto-detect if possible)"):
-    chosen_col = st.selectbox(
-        "Country / Location / Locale column:",
-        options=( [default_col] + [c for c in text_cols if c != default_col] ) if default_col else text_cols,
-        index=0 if default_col else (0 if text_cols else None),
-        help="If the auto-detected column isn’t correct, pick the one that contains country/location info."
-    )
+preferred_col = "Chat Button: Developer Name"
+if preferred_col in chat_country_df.columns:
+    chosen_col = preferred_col
+    show_picker = False
+else:
+    # Fallback: let user pick a text column
+    text_cols = [c for c in chat_country_df.columns if chat_country_df[c].dtype == "object"]
+    with st.expander("Choose the column for country (auto target is missing)"):
+        chosen_col = st.selectbox("Select a column with country/market info:", options=text_cols)
+    show_picker = True
 
 if not chosen_col:
-    st.info("No suitable text column found in chat.csv. Please add a country or location column.")
+    st.info("No suitable column found in chat.csv. Please add a country/market column.")
 else:
-    # Normalize values from the chosen column into country names
-    cc = chat_country_df[chosen_col].map(_normalize_country_value) \
-                                    .replace({None: "Unknown", "": "Unknown"})
+    countries = (
+        chat_country_df[chosen_col]
+        .map(_normalize_country_from_button)
+        .fillna("Unknown")
+    )
+
     counts = (
-        cc.value_counts(dropna=False)
-          .rename_axis("Country")
-          .reset_index(name="Chats")
-          .sort_values("Chats", ascending=False)
+        countries.value_counts(dropna=False)
+        .rename_axis("Country")
+        .reset_index(name="Chats")
+        .sort_values("Chats", ascending=False)
+        .reset_index(drop=True)
     )
 
     total_chats = int(counts["Chats"].sum()) if not counts.empty else 0
@@ -871,10 +880,13 @@ else:
     if len(counts) > top_n:
         top = counts.head(top_n)
         others_total = counts["Chats"].iloc[top_n:].sum()
-        counts = pd.concat([top, pd.DataFrame({"Country": ["Other"], "Chats": [others_total], "Share":[others_total/total_chats if total_chats else 0.0]})], ignore_index=True)
+        counts = pd.concat(
+            [top, pd.DataFrame({"Country":["Other"], "Chats":[others_total], "Share":[others_total/(total_chats or 1)]})],
+            ignore_index=True
+        )
 
     if counts.empty:
-        st.info("No chats in the selected range to build a country breakdown.")
+        st.info("No chats in the selected period.")
     else:
         pie = (
             alt.Chart(counts)
@@ -903,6 +915,7 @@ else:
                 counts[["Country","Chats","Share"]].style.format({"Chats": "{:,}", "Share": "{:.1%}"}),
                 use_container_width=True
             )
+
 
 
 # =========================
@@ -1377,4 +1390,5 @@ else:
             return int(h)*3600 + int(m)*60
         total_secs = sum(_hhmm_to_sec(x) for x in disp["Total Shift"])
         st.metric("Total scheduled time", fmt_hms(total_secs))
+
 
