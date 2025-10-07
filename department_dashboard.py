@@ -761,7 +761,7 @@ else:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
 
 # =========================
-# 🌍 Chats by Country (robust) — volume (uses 'Chat Button: Developer Name')
+# 🌍 Chats by Country (volume) — uses 'Chat Button: Developer Name'
 # =========================
 st.markdown("---")
 st.subheader("🌍 Chats by Country (volume)")
@@ -782,91 +782,80 @@ _ISO2_TO_NAME = {
     "SD":"Sudan","TZ":"Tanzania","TG":"Togo","TN":"Tunisia","UG":"Uganda","ZM":"Zambia","ZW":"Zimbabwe",
 }
 
-# Known country names (for direct substring matches)
+# Known names for direct matches
 _KNOWN_COUNTRIES = {v.lower(): v for v in _ISO2_TO_NAME.values()}
 
-# Terms we strip from the button name (brand / channel / language bits)
+# Language codes to ignore when they appear as suffixes (en, fr, …)
+_LANG_CODES = {"EN","FR","PT","ES","AR"}
+
+# Remove brand/channel words that don’t indicate country
 _STOPWORDS = {
     "premier","premierbet","pb","mercury","bet","button","developer","name",
     "chat","support","customer","service","cs","care","help",
-    # languages
-    "en","fr","pt","es","ar",
-    # channel artefacts
     "web","live","agent"
 }
 
-def _normalize_country_from_button(val: object) -> str | None:
-    """Turn 'Chat Button: Developer Name' into a country label."""
+def _country_from_button(val: object) -> str | None:
+    """Turn Chat Button: Developer Name into a clean country label."""
     if pd.isna(val):
         return None
     s = str(val).strip()
     if not s:
         return None
 
-    # If looks like "City, Country" -> last token
+    # If "City, Country" -> take last token
     if "," in s and len(s) < 100:
         s = s.split(",")[-1].strip()
 
     low = s.lower()
 
-    # If contains any known full country name
+    # Direct country name present?
     for cname_low, cname in _KNOWN_COUNTRIES.items():
         if cname_low in low:
             return cname
 
-    # Locale or suffix code: en-TZ, pb_chat_tz, ... (take trailing 2 letters)
+    # Locale/suffix like "en-TZ", "pb_chat_TZ" -> use trailing 2 letters
     m = re.search(r"[_\-\s]([A-Za-z]{2})$", s)
     if m:
         code = m.group(1).upper()
-        if code not in {"EN","FR","PT","ES","AR"}:
+        if code not in _LANG_CODES:
             return _ISO2_TO_NAME.get(code, code)
 
-    # Only two-letter code?
+    # Pure 2-letter code?
     if re.fullmatch(r"[A-Za-z]{2}", s):
         code = s.upper()
-        if code not in {"EN","FR","PT","ES","AR"}:
+        if code not in _LANG_CODES:
             return _ISO2_TO_NAME.get(code, code)
 
-    # Remove non-letters, split to tokens, drop stopwords, rebuild
+    # Otherwise, strip to tokens, drop stopwords, prefer any token that is a known country
     toks = re.findall(r"[A-Za-z]{2,}", s)
     toks = [t for t in toks if t.lower() not in _STOPWORDS]
+    for t in toks:
+        if t.lower() in _KNOWN_COUNTRIES:
+            return _KNOWN_COUNTRIES[t.lower()]
     if toks:
-        # If any token is a known country name, prefer it
-        for t in toks:
-            if t.lower() in _KNOWN_COUNTRIES:
-                return _KNOWN_COUNTRIES[t.lower()]
         return " ".join(toks).title()
 
     return None
 
-# Slice chats for the date range
-chat_country_df = chat_sla_df[
-    (chat_sla_df["Date/Time Opened"].dt.date >= start_date) &
-    (chat_sla_df["Date/Time Opened"].dt.date <= end_date)
-].copy()
-
-preferred_col = "Chat Button: Developer Name"
-if preferred_col in chat_country_df.columns:
-    chosen_col = preferred_col
-    show_picker = False
+# Slice by date range and map to countries
+col_name = "Chat Button: Developer Name"
+if col_name not in chat_sla_df.columns:
+    st.info(f"Column '{col_name}' not found in chat.csv.")
 else:
-    # Fallback: let user pick a text column
-    text_cols = [c for c in chat_country_df.columns if chat_country_df[c].dtype == "object"]
-    with st.expander("Choose the column for country (auto target is missing)"):
-        chosen_col = st.selectbox("Select a column with country/market info:", options=text_cols)
-    show_picker = True
+    chat_country_df = chat_sla_df[
+        (chat_sla_df["Date/Time Opened"].dt.date >= start_date) &
+        (chat_sla_df["Date/Time Opened"].dt.date <= end_date)
+    ].copy()
 
-if not chosen_col:
-    st.info("No suitable column found in chat.csv. Please add a country/market column.")
-else:
-    countries = (
-        chat_country_df[chosen_col]
-        .map(_normalize_country_from_button)
+    country_series = (
+        chat_country_df[col_name]
+        .map(_country_from_button)
         .fillna("Unknown")
     )
 
     counts = (
-        countries.value_counts(dropna=False)
+        country_series.value_counts(dropna=False)
         .rename_axis("Country")
         .reset_index(name="Chats")
         .sort_values("Chats", ascending=False)
@@ -881,7 +870,7 @@ else:
         top = counts.head(top_n)
         others_total = counts["Chats"].iloc[top_n:].sum()
         counts = pd.concat(
-            [top, pd.DataFrame({"Country":["Other"], "Chats":[others_total], "Share":[others_total/(total_chats or 1)]})],
+            [top, pd.DataFrame({"Country": ["Other"], "Chats":[others_total], "Share":[(others_total/(total_chats or 1))]})],
             ignore_index=True
         )
 
@@ -905,8 +894,10 @@ else:
         labels = (
             alt.Chart(counts)
             .mark_text(radius=105, size=11)
-            .encode(theta=alt.Theta("Chats:Q", stack=True),
-                    text=alt.Text("Chats:Q", format=",.0f"))
+            .encode(
+                theta=alt.Theta("Chats:Q", stack=True),
+                text=alt.Text("Chats:Q", format=",.0f")
+            )
         )
         st.altair_chart(pie + labels, use_container_width=True)
 
@@ -1390,5 +1381,6 @@ else:
             return int(h)*3600 + int(m)*60
         total_secs = sum(_hhmm_to_sec(x) for x in disp["Total Shift"])
         st.metric("Total scheduled time", fmt_hms(total_secs))
+
 
 
