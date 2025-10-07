@@ -677,8 +677,13 @@ labels = trend_chart.mark_text(dy=-10, color="#2F80ED").encode(text=alt.Text("We
 rule   = alt.Chart(pd.DataFrame({"y":[85]})).mark_rule(color="red", strokeDash=[5,5]).encode(y="y:Q")
 rule_lb= alt.Chart(pd.DataFrame({"y":[85]})).mark_text(align="left", color="red", dy=-8)\
             .encode(y="y:Q", text=alt.value("Target: 85%"))
-st.altair_chart((trend_chart + labels + rule + rule_lb).properties(width=700, height=350),
-                width='stretch')
+st.altair_chart(
+    (trend_chart + labels + rule + rule_lb).properties(
+        width='container', # Optional: Tells Altair to use the container width
+        height=350
+    ),
+    use_container_width=True # <-- Use this instead of width='stretch'
+)
 
 # =========================
 # Customer Feedback Section (CSAT / NPS / FCR)
