@@ -819,7 +819,7 @@ if survey_path.exists():
                 .configure_view(stroke="#d1d5db", fill="white")\
                 .configure_legend(orient="top-right", titleFont="Arial", labelFont="Arial")\
                 .interactive()
-            st.altair_chart(trend, width='stretch')
+            st.altair_chart(trend, use_container_width=True)
     else:
         st.info("No survey responses in the selected date range.")
 else:
