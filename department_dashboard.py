@@ -470,8 +470,26 @@ for ag in agents:
     dept_chat_avail   += chat_av
     dept_email_avail  += email_av
 
-chat_util  = (dept_chat_handle  / dept_chat_avail)  if dept_chat_avail  else 0
-email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0
+
+# --- Accurate chat utilisation (overlap-based) ---
+# Compute department chat-capable availability as union of Available_Chat ∪ Available_All,
+# and numerator as overlap between chat handling and that availability. This guarantees <= 100% without clamping.
+_chat_cap_total = 0.0
+_chat_work_inside = 0.0
+_all_agents_for_chat = set(chat_only_map) | set(shared_map) | set(chat_handles_map)
+for _ag in _all_agents_for_chat:
+    _avail_iv = merge_intervals(chat_only_map.get(_ag, []) + shared_map.get(_ag, []))
+    if _avail_iv:
+        _chat_cap_total += sum_secs(_avail_iv)
+        _handle_iv = chat_handles_map.get(_ag, [])
+        if _handle_iv:
+            _chat_work_inside += intersect_sum(_handle_iv, _avail_iv)
+
+chat_util  = (_chat_work_inside / _chat_cap_total) if _chat_cap_total else 0.0
+
+# Keep email utilisation as previously computed from proportional availability
+email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else 0.0
+
 
 # =========================
 # Build per-day SLA & volumes (one row per day)
