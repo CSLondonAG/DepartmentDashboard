@@ -1,39 +1,46 @@
 import streamlit as st
 
 def merge_intervals(intervals):
-    """Merge overlapping/adjacent [start, end] datetime intervals.
-    Accepts tuples or lists; returns a list of tuples (start, end).
+    """
+    Merge overlapping/adjacent [start, end] datetime intervals.
+    Accepts tuples or lists; returns list of tuples.
     """
     if not intervals:
         return []
-    # Ensure all intervals are lists (mutable) and valid (end > start)
+
+    import pandas as pd
+
+    # Normalize to lists (mutable) and drop invalid rows
     norm = []
-    for s, e in intervals:
-        if s is None or e is None:
+    for pair in intervals:
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
             continue
-        # coerce to pandas.Timestamp if possible (no import cost if already)
+        s, e = pair[0], pair[1]
         try:
-            import pandas as pd
-            s = pd.to_datetime(s)
-            e = pd.to_datetime(e)
+            s = pd.to_datetime(s, errors="coerce")
+            e = pd.to_datetime(e, errors="coerce")
         except Exception:
-            pass
-        if e > s:
+            s = pd.NaT; e = pd.NaT
+        if pd.notna(s) and pd.notna(e) and e > s:
             norm.append([s, e])
+
     if not norm:
         return []
+
     norm.sort(key=lambda x: x[0])
     merged = [norm[0]]
+
     for s, e in norm[1:]:
+        # Ensure inner element is mutable
+        if isinstance(merged[-1], tuple):
+            merged[-1] = list(merged[-1])
         if s <= merged[-1][1]:
-            # extend the right edge
             merged[-1][1] = max(merged[-1][1], e)
         else:
             merged.append([s, e])
-    return [tuple(iv) for iv in merged]
 
+    return [tuple(x) for x in merged]
 
-import pandas as pd
 import altair as alt
 
 # === Interval helpers for accurate utilisation ===
