@@ -517,7 +517,6 @@ rule   = alt.Chart(pd.DataFrame({"y":[85]})).mark_rule(color="red", strokeDash=[
 rule_lb= alt.Chart(pd.DataFrame({"y":[85]})).mark_text(align="left", color="red", dy=-8)\
             .encode(y="y:Q", text=alt.value("Target: 85%"))
 
-# FIX 1: Removed fixed width from properties (previous fix)
 trend_final = (trend_chart + labels + rule + rule_lb).properties(height=350) 
 st.altair_chart(trend_final, use_container_width=True)
 
@@ -614,7 +613,6 @@ if survey is not None:
                 strokeDash=[6,4], color="#9ca3af", opacity=0.6
             ).encode(y=alt.Y("zero:Q", axis=None, scale=alt.Scale(domain=[-100,100])))
 
-            # FIX 2: Removed fixed width from properties (previous fix)
             trend = alt.layer(csat_line, nps_line, csat_points, nps_points, nps_zero_rule)\
                 .resolve_scale(y="independent")\
                 .properties(height=400, title=alt.TitleParams(
@@ -865,7 +863,6 @@ else:
     else:
         combined_top = left_chart
 
-    # FIX 3a: Removed fixed width (previous fix)
     combined_top = combined_top.properties(height=360, title=f"Hourly Weighted SLA — {hourly_date:%d %b %Y}")\
         .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2,3])\
         .configure_view(stroke="#d1d5db", fill="white")
@@ -885,7 +882,6 @@ else:
             tooltip=[alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
                      alt.Tooltip("Logged In Agents:Q", format=".0f")],
         )
-        # FIX 3b: Removed fixed width (previous fix)
         .properties(height=220, title="Logged In Agents per Hour")
         .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2,3])
         .configure_view(stroke="#d1d5db", fill="white")
@@ -1033,11 +1029,9 @@ def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame
     if out.empty:
         return out
         
-    # --- FIX 4a: Explicitly convert object columns to datetime to prevent subtraction type error ---
-    # This ensures that both columns are proper DatetimeArray/Series for arithmetic.
+    # Explicitly convert object columns to datetime to ensure proper Dtype is set.
     out["_shift_start_dt"] = pd.to_datetime(out["_shift_start_dt"], errors="coerce")
     out["_lunch_start_dt"] = pd.to_datetime(out["_lunch_start_dt"], errors="coerce")
-    # --------------------------------------------------------------------------------------------
 
     sort_key = pd.to_datetime(out["Shift Start"], format="%H:%M", errors="coerce")
     out = out.assign(_sort=sort_key).sort_values(["_sort","Agent"]).drop(columns=["_sort"]).reset_index(drop=True)
@@ -1050,12 +1044,15 @@ if schedule_df.empty:
 else:
     df = schedule_df.copy()
     
-    # --- FIX 4b: Simplify calculation now that the dtypes are correct ---
+    # *** FIX: Explicitly convert both sides to DatetimeSeries objects 
+    # right before subtraction to ensure type compatibility and resolve the TypeError. ***
+    lunch_dt  = pd.to_datetime(df["_lunch_start_dt"], errors="coerce")
+    shift_dt = pd.to_datetime(df["_shift_start_dt"], errors="coerce")
+    
     delta_hours = (
-        (df["_lunch_start_dt"] - df["_shift_start_dt"])
+        (lunch_dt - shift_dt)
         .dt.total_seconds() / 3600
     )
-    # -------------------------------------------------------------------
     
     viol_idx = df.index[delta_hours.notna() & ((delta_hours < 3.0) | (delta_hours > 5.0))]
     display_cols = [c for c in df.columns if c not in {"_shift_start_dt", "_lunch_start_dt"}]
