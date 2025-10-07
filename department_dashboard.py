@@ -915,8 +915,7 @@ else:
             counts["Country"] = pd.Categorical(counts["Country"], categories=order, ordered=True)
         except Exception:
             pass
-            country_order = ['Sierra Leone', 'Malawi', 'Zimbabwe', 'Namibia', 'Uganda', 'Liberia', 
-                 'Mali', 'Angola', 'Unknown', 'Cameroon', 'Gabon']
+        
 
         top_n = st.sidebar.slider("Pie chart: top countries", min_value=3, max_value=12, value=8, step=1)
         if len(counts) > top_n:
@@ -926,6 +925,9 @@ else:
 
         total = int(counts["Chats"].sum())
         counts["Share"] = counts["Chats"] / total if total else 0
+
+        country_order = ['Sierra Leone', 'Malawi', 'Zimbabwe', 'Namibia', 'Uganda', 'Liberia', 
+                 'Mali', 'Angola', 'Unknown', 'Cameroon', 'Gabon']
 
         min_share = st.sidebar.slider("Label slices ≥ this share", min_value=0.0, max_value=0.1, value=0.02, step=0.01)
         label_df = counts[counts["Share"] >= min_share].copy()
