@@ -1,4 +1,38 @@
 import streamlit as st
+
+def merge_intervals(intervals):
+    """Merge overlapping/adjacent [start, end] datetime intervals.
+    Accepts tuples or lists; returns a list of tuples (start, end).
+    """
+    if not intervals:
+        return []
+    # Ensure all intervals are lists (mutable) and valid (end > start)
+    norm = []
+    for s, e in intervals:
+        if s is None or e is None:
+            continue
+        # coerce to pandas.Timestamp if possible (no import cost if already)
+        try:
+            import pandas as pd
+            s = pd.to_datetime(s)
+            e = pd.to_datetime(e)
+        except Exception:
+            pass
+        if e > s:
+            norm.append([s, e])
+    if not norm:
+        return []
+    norm.sort(key=lambda x: x[0])
+    merged = [norm[0]]
+    for s, e in norm[1:]:
+        if s <= merged[-1][1]:
+            # extend the right edge
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [tuple(iv) for iv in merged]
+
+
 import pandas as pd
 import altair as alt
 from datetime import datetime, timedelta, date
@@ -729,148 +763,76 @@ else:
 st.markdown("---")
 st.subheader("🌍 Chats by Country (volume)")
 
-DEVNAME_COL = "Chat Button: Developer Name"
+def _detect_country_col(df: pd.DataFrame) -> Optional[str]:
+    cols = [c for c in df.columns if "country" in c.lower()]
+    if not cols:
+        cols = [c for c in df.columns if "geo" in c.lower()]
+    return cols[0] if cols else None
 
-def _country_from_devname(devname: str) -> str:
-    if not isinstance(devname, str):
-        return "Unknown"
-    s = devname.strip()
-    if not s:
-        return "Unknown"
-    # Normalize separators and remove generic words
-    s_norm = re.sub(r"[\-_./|]+", " ", s).lower()
-    stop = { "website","web","center","centre","support","service","services",
-             "customer","cs","live","chat","button","btn","queue","portal",
-             "mobile","app","online","site","vip","en","pt","fr","eng","por" }
-    tokens = [t for t in re.split(r"\s+", s_norm) if t and t not in stop]
-    s_clean = " ".join(tokens)
-
-    # Map of canonical country names to alias patterns
-    country_aliases = {
-        "Angola": ["angola","ao"],
-        "Botswana": ["botswana","bw"],
-        "Cameroon": ["cameroon","cm"],
-        "Congo (DRC)": ["congo drc","drc","dr congo","democratic republic of congo","rdc"],
-        "Côte d’Ivoire": ["cote d'ivoire","côte d’ivoire","ivory coast","ci"],
-        "Ghana": ["ghana","gh"],
-        "Kenya": ["kenya","ke"],
-        "Malawi": ["malawi","mw"],
-        "Mozambique": ["mozambique","mz","mocambique","moçambique"],
-        "Nigeria": ["nigeria","ng"],
-        "Rwanda": ["rwanda","rw"],
-        "Sierra Leone": ["sierra leone","sl"],
-        "South Africa": ["south africa","sa"],
-        "Tanzania": ["tanzania","tz"],
-        "Uganda": ["uganda","ug"],
-        "Zambia": ["zambia","zm"],
-        "Zimbabwe": ["zimbabwe","zw"],
-        "Eswatini": ["eswatini","swaziland","sz"],
-        "Lesotho": ["lesotho","ls"],
-        "São Tomé and Príncipe": ["sao tome","são tomé","sao tome and principe","stp"],
-        "Gabon": ["gabon","ga"],
-        "Liberia": ["liberia","lr"],
-        "Senegal": ["senegal","sn"],
-        "Burkina Faso": ["burkina","burkina faso","bf"],
-        "Mali": ["mali","ml"],
-        "Benin": ["benin","bj"],
-        "Niger": ["niger","ne"],
-        "Guinea": ["guinea","gn"],
-        "Guinea-Bissau": ["guinea bissau","gw"],
-        "The Gambia": ["gambia","gm"],
-        "Namibia": ["namibia","na"],
-        "Ethiopia": ["ethiopia","et"],
-        "Somalia": ["somalia","so"],
-        "Morocco": ["morocco","ma"],
-        "Tunisia": ["tunisia","tn"],
-        "Algeria": ["algeria","dz"]
-    }
-
-    # Prefer longest alias match to avoid false positives
-    best = None
-    for canon, aliases in country_aliases.items():
-        for alias in sorted(aliases, key=len, reverse=True):
-            if re.search(r"(?:^|\b)"+re.escape(alias)+r"(?:\b|$)", s_clean):
-                if best is None or len(alias) > len(best[1]):
-                    best = (canon, alias)
-                    break
-    return best[0] if best else "Unknown"
-
-if DEVNAME_COL not in chat_sla_df.columns:
-    st.info("Column 'Chat Button: Developer Name' was not found in chat data. Add it to enable the country pie chart.")
+country_col = _detect_country_col(chat_sla_df)
+if not country_col:
+    st.info("No country column found in chat.csv (e.g., 'Country', 'Visitor Country').")
 else:
-    # filter to selected date range (based on Opened timestamp)
-    _df = chat_sla_df[
+    chat_country = chat_sla_df[
         (chat_sla_df["Date/Time Opened"].dt.date >= start_date) &
         (chat_sla_df["Date/Time Opened"].dt.date <= end_date)
     ].copy()
 
-    # derive country from developer name
-    _df["Country"] = _df[DEVNAME_COL].apply(_country_from_devname)
+    chat_country[country_col] = (
+        chat_country[country_col]
+        .astype(str).str.strip()
+        .replace({"": None, "nan": None, "none": None, "None": None})
+        .fillna("Unknown").str.title()
+    )
 
     counts = (
-        _df.groupby("Country", dropna=False)
-           .size()
-           .reset_index(name="Chats")
-           .sort_values("Chats", ascending=False)
-           .reset_index(drop=True)
+        chat_country.groupby(country_col, dropna=False)
+        .size()
+        .reset_index(name="Chats")
+        .sort_values("Chats", ascending=False)
+        .reset_index(drop=True)
     )
 
-    if counts.empty or counts["Chats"].sum() == 0:
-        st.info("No chats available in the selected period to display by country.")
-    else:
-        counts["Country"] = counts["Country"].str.title()
+    top_n = st.sidebar.slider("Pie chart: top countries", min_value=3, max_value=12, value=8, step=1)
+    if len(counts) > top_n:
+        top = counts.head(top_n)
+        others_total = counts["Chats"].iloc[top_n:].sum()
+        counts = pd.concat(
+            [top, pd.DataFrame({country_col: ["Other"], "Chats": [others_total]})],
+            ignore_index=True
+        )
 
-        top_n = st.sidebar.slider("Pie chart: top countries", min_value=3, max_value=12, value=8, step=1)
-        if len(counts) > top_n:
-            top = counts.head(top_n)
-            others_total = counts["Chats"].iloc[top_n:].sum()
-            counts = pd.concat([top, pd.DataFrame({"Country": ["Other"], "Chats": [others_total]})], ignore_index=True)
+    total_chats = int(counts["Chats"].sum()) if len(counts) else 0
+    counts["Share"] = counts["Chats"] / total_chats if total_chats else 0.0
 
-        total_chats = int(counts["Chats"].sum())
-        counts["Share"] = counts["Chats"] / total_chats
-
-        
-# Reorder legend by size (descending)
-order = counts.sort_values("Chats", ascending=False)["Country"].tolist()
-# Make the Country column categorical to preserve order end-to-end
-try:
-    counts["Country"] = pd.Categorical(counts["Country"], categories=order, ordered=True)
-except Exception:
-    pass
-
-# Label only slices >= min_share to avoid clutter
-min_share = st.sidebar.slider("Label slices ≥ this share", min_value=0.0, max_value=0.1, value=0.02, step=0.01)
-label_df = counts[counts["Share"] >= min_share].copy()
-label_df["Label"] = label_df.apply(lambda r: f"{r['Country']} — {int(r['Chats']):,} ({r['Share']:.0%})", axis=1)
-
-pie = (
-    alt.Chart(counts)
-    .mark_arc(outerRadius=170, innerRadius=70, stroke="white", strokeWidth=2)
-    .encode(
-        theta=alt.Theta("Chats:Q", stack=True),
-        color=alt.Color("Country:N",
-                        sort=order,
-                        legend=alt.Legend(title="Country (sorted by volume)", labelLimit=220)),
-        order=alt.Order("Country:N", sort=order),
-        tooltip=[
-            alt.Tooltip("Country:N", title="Country"),
-            alt.Tooltip("Chats:Q", title="Chats", format=","),
-            alt.Tooltip("Share:Q", title="Share", format=".1%")
-        ],
+    pie = (
+        alt.Chart(counts)
+        .mark_arc(outerRadius=140, innerRadius=60)
+        .encode(
+            theta=alt.Theta("Chats:Q", stack=True),
+            color=alt.Color(f"{country_col}:N", legend=alt.Legend(title="Country")),
+            tooltip=[
+                alt.Tooltip(f"{country_col}:N", title="Country"),
+                alt.Tooltip("Chats:Q", title="Chats", format=","),
+                alt.Tooltip("Share:Q", title="Share", format=".1%")
+            ],
+        )
+        .properties(width=480, height=360, title="Chat Volume by Country")
     )
-    .properties(width=520, height=420, title="Chat Volume by Country (from Chat Button)")
-)
-
-labels = (
-    alt.Chart(label_df)
-    .mark_text(radius=120, size=12)
-    .encode(
-        theta=alt.Theta("Chats:Q", stack=True),
-        text="Label:N"
+    labels = (
+        alt.Chart(counts)
+        .mark_text(radius=105, size=11)
+        .encode(theta=alt.Theta("Chats:Q", stack=True),
+                text=alt.Text("Chats:Q", format=","))
     )
-)
+    st.altair_chart(pie + labels, use_container_width=True)
 
-st.altair_chart(pie + labels, use_container_width=True)
+    with st.expander("View country breakdown table"):
+        st.dataframe(
+            counts.rename(columns={country_col: "Country"})[["Country", "Chats", "Share"]]
+                  .style.format({"Chats": "{:,}", "Share": "{:.1%}"}),
+            use_container_width=True
+        )
 
 # =========================
 # ⏱️ Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
