@@ -933,9 +933,9 @@ else:
             alt.Chart(counts)
             .mark_arc(outerRadius=170, innerRadius=70, stroke="white", strokeWidth=2)
             .encode(
-                theta=alt.Theta("Chats:Q", stack=True),
-                color=alt.Color("Country:N", sort=order, legend=alt.Legend(title="Country (sorted by volume)", labelLimit=220)),
-                order=alt.Order("Country:N", sort=order),
+            theta=alt.Theta("Chats:Q", stack=True),
+            color=alt.Color("Country:N", sort=alt.Sort(country_order)), # <--- Corrected line
+            order=alt.Order("Chats:Q", sort="descending"),
                 tooltip=[
                     alt.Tooltip("Country:N", title="Country"),
                     alt.Tooltip("Chats:Q", title="Chats", format=","),
