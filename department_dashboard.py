@@ -1,29 +1,3 @@
-# The incomplete code snippet:
-# st.altair_chart(trend, use_container_width=True)
-# ...
-# df_hourly = compute_hourly_sla_for_date(hourly_date)
-
-# if df_hourly[["Chat Vol","Email Vol"]].fillna(0).sum().sum() == 0:
-#     st.info("No activity for the selected day.")
-# else:
-#     show_breakdown = st.checkbox("Show Chat & Email lines", value=False)
-#     show_avail     = st.checkbox("Overlay available minutes (bars)", value=True)
-
-#     # -------- Two-axis composition --------
-#     # Left axis owner: Weighted SLA (and optional Chat/Email lines share it without axes)
-#     weighted_line = (
-#         alt.Chart(df_hourly)
-#         .mark_line(point=True, color="#2F80ED")
-#         .encode(
-#             x=alt.X("Hour:T", title="Hour", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-#             y=alt.Y("Weighted SLA:Q", title="Weighted SLA",
-#                     scale=alt.Scale(domain=[0, 105]), axis=alt.Axis(orient="left")),
-#             tooltip=[
-#                 alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-#                 alt.Tooltip("Weighted SLA:Q", format
-# } # <- This is where the code was cut off.
-
-# The completed code is below:
 import streamlit as st
 import pandas as pd
 import altair as alt
@@ -208,6 +182,8 @@ def get_fcr_color_pct(v):
     return "#F44336" if v < 50 else "#4CAF50"
 
 # Interval helpers
+
+# (removed duplicate merge_intervals helper)
 
 
 def clip_to_window(s, e, wstart, wend):
@@ -964,17 +940,9 @@ else:
             .properties(width=520, height=420, title="Chat Volume by Country (from Chat Button)")
         )
 
-        labels = (
-            alt.Chart(label_df)
-            .mark_text(radius=195, size=11, fontWeight="bold")
-            .encode(
-                theta=alt.Theta("Chats:Q", stack=True), 
-                text="Label:N",
-                color=alt.value("black")
-            )
-        )
-
-        st.altair_chart(pie + labels, use_container_width=True)
+        # The 'labels' chart definition has been removed (Option 1 applied)
+        # The chart is now displayed using only 'pie', relying on the legend/tooltip for accurate identification.
+        st.altair_chart(pie, use_container_width=True)
 
         with st.expander("View country breakdown table"):
             st.dataframe(
@@ -1161,54 +1129,4 @@ else:
                     scale=alt.Scale(domain=[0, 105]), axis=alt.Axis(orient="left")),
             tooltip=[
                 alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-                alt.Tooltip("Weighted SLA:Q", format=".1f"),
-                alt.Tooltip("Chat Vol:Q", title="Chat Vol", format=".0f"),
-                alt.Tooltip("Email Vol:Q", title="Email Vol", format=".0f")
-            ]
-        )
-    )
-
-    sla_layers = [weighted_line]
-
-    if show_breakdown:
-        # Chat SLA line (shares y-axis with Weighted SLA)
-        chat_line = alt.Chart(df_hourly).mark_line(point=True, color="#4CAF50").encode(
-            x="Hour:T",
-            y=alt.Y("Chat SLA:Q", title=None, scale=alt.Scale(domain=[0, 105])),
-            tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Chat SLA:Q", format=".1f")]
-        )
-        # Email SLA line (shares y-axis with Weighted SLA)
-        email_line = alt.Chart(df_hourly).mark_line(point=True, color="#FFC107").encode(
-            x="Hour:T",
-            y=alt.Y("Email SLA:Q", title=None, scale=alt.Scale(domain=[0, 105])),
-            tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Email SLA:Q", format=".1f")]
-        )
-        sla_layers.extend([chat_line, email_line])
-
-
-    # Right axis owner: Available Minutes (bars)
-    if show_avail:
-        max_avail = df_hourly["Avail (min)"].max() if df_hourly["Avail (min)"].max() > 0 else 60
-        avail_bars = (
-            alt.Chart(df_hourly)
-            .mark_bar(opacity=0.3, color="#9E9E9E")
-            .encode(
-                x=alt.X("Hour:T"),
-                y=alt.Y("Avail (min):Q", title="Available Minutes", axis=alt.Axis(orient="right", grid=False), scale=alt.Scale(domain=[0, max_avail + 10])),
-                tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Avail (min):Q", title="Available Min", format=".0f")]
-            )
-        )
-        
-        # Combine bars and lines, resolving y-scales
-        combined = alt.layer(avail_bars, *sla_layers).resolve_scale(y='independent')
-    else:
-        combined = alt.layer(*sla_layers).resolve_scale(y='shared')
-
-    st.altair_chart(
-        combined.properties(
-            title=f"Hourly Performance for {hourly_date:%d %b %Y}",
-            width='container',
-            height=400
-        ).configure_legend(orient="bottom"),
-        use_container_width=True
-    )
+                alt.Tooltip("Weighted SLA:Q", format
