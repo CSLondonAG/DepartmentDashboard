@@ -1174,7 +1174,55 @@ else:
                     scale=alt.Scale(domain=[0, 105]), axis=alt.Axis(orient="left")),
             tooltip=[
                 alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-                alt.Tooltip("Weighted SLA:Q", format=".1f") 
-            ], # <-- Correctly closed tooltip list
-        ) # <-- Correctly closed encode method
+                alt.Tooltip("Weighted SLA:Q", format=".1f"), # <-- FIXED: Added format string and closed parenthesis
+            ],
+        )
+    )
+
+    chart_layers = [weighted_line]
+
+    # Optional Chat & Email SLA lines (share the left Y-axis)
+    if show_breakdown:
+        chat_line = weighted_line.mark_line(point=True, color="#4CAF50").encode(
+            y=alt.Y("Chat SLA:Q", title=alt.value(""), scale=alt.Scale(domain=[0, 105]), axis=None),
+            tooltip=[
+                alt.Tooltip("Hour:T", format="%H:%M"),
+                alt.Tooltip("Chat SLA:Q", title="Chat SLA", format=".1f"),
+                alt.Tooltip("Chat Vol:Q", title="Chat Vol", format=",.0f"),
+            ]
+        )
+        email_line = weighted_line.mark_line(point=True, color="#F44336").encode(
+            y=alt.Y("Email SLA:Q", title=alt.value(""), scale=alt.Scale(domain=[0, 105]), axis=None),
+            tooltip=[
+                alt.Tooltip("Hour:T", format="%H:%M"),
+                alt.Tooltip("Email SLA:Q", title="Email SLA", format=".1f"),
+                alt.Tooltip("Email Vol:Q", title="Email Vol", format=",.0f"),
+            ]
+        )
+        chart_layers.append(chat_line)
+        chart_layers.append(email_line)
+    
+    # Optional Available Minutes (Right Y-axis, bars)
+    if show_avail:
+        avail_bar = (
+            alt.Chart(df_hourly)
+            .mark_bar(opacity=0.3, color="#FFC107")
+            .encode(
+                x=alt.X("Hour:T", axis=None),
+                y=alt.Y("Avail (min):Q", title="Available (min)", axis=alt.Axis(orient="right")),
+                tooltip=[
+                    alt.Tooltip("Hour:T", format="%H:%M"),
+                    alt.Tooltip("Avail (min):Q", title="Available (min)", format=",.0f"),
+                    alt.Tooltip("Logged In Agents:Q", title="Logged In Agents", format=",.0f"),
+                ]
+            )
+        )
+        chart_layers.append(avail_bar)
+
+    # Combine all layers and render
+    final_chart = alt.layer(*chart_layers).resolve_scale(y="independent")
+    
+    st.altair_chart(
+        final_chart.properties(width='container', height=350),
+        use_container_width=True
     )
