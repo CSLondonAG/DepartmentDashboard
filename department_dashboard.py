@@ -1129,4 +1129,7 @@ else:
                     scale=alt.Scale(domain=[0, 105]), axis=alt.Axis(orient="left")),
             tooltip=[
                 alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-                alt.Tooltip("Weighted SLA:Q", =".1f")
+                alt.Tooltip("Weighted SLA:Q", format=".1f") 
+            ], # <-- Correctly closed tooltip list
+        ) # <-- Correctly closed encode method
+    )
