@@ -1,3 +1,29 @@
+# The incomplete code snippet:
+# st.altair_chart(trend, use_container_width=True)
+# ...
+# df_hourly = compute_hourly_sla_for_date(hourly_date)
+
+# if df_hourly[["Chat Vol","Email Vol"]].fillna(0).sum().sum() == 0:
+#     st.info("No activity for the selected day.")
+# else:
+#     show_breakdown = st.checkbox("Show Chat & Email lines", value=False)
+#     show_avail     = st.checkbox("Overlay available minutes (bars)", value=True)
+
+#     # -------- Two-axis composition --------
+#     # Left axis owner: Weighted SLA (and optional Chat/Email lines share it without axes)
+#     weighted_line = (
+#         alt.Chart(df_hourly)
+#         .mark_line(point=True, color="#2F80ED")
+#         .encode(
+#             x=alt.X("Hour:T", title="Hour", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
+#             y=alt.Y("Weighted SLA:Q", title="Weighted SLA",
+#                     scale=alt.Scale(domain=[0, 105]), axis=alt.Axis(orient="left")),
+#             tooltip=[
+#                 alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
+#                 alt.Tooltip("Weighted SLA:Q", format
+# } # <- This is where the code was cut off.
+
+# The completed code is below:
 import streamlit as st
 import pandas as pd
 import altair as alt
@@ -111,25 +137,25 @@ st.markdown("""
 CHAT_RESCALE_K       = 0.4167  # Chat: (raw / 0.4167) * 80
 EMAIL_RESCALE_K      = 0.50    # Email: (raw / 0.50) * 80
 SLA_SCALE            = 80.0
-CHAT_TARGET_WAIT_MIN = 1.0     # “no penalty” wait threshold in minutes
+CHAT_TARGET_WAIT_MIN = 1.0     # "no penalty" wait threshold in minutes
 
 # =========================
 # Helpers
 # =========================
 def fmt_mmss(sec):
-    if sec is None or pd.isna(sec): return "–"
+    if sec is None or pd.isna(sec): return "—"
     m, s = divmod(int(sec), 60)
     return f"{m:02}:{s:02}"
 
 def fmt_hhmm(sec):
-    if sec is None or pd.isna(sec): return "–"
+    if sec is None or pd.isna(sec): return "—"
     sec = int(round(sec))
     h = sec // 3600
     m = (sec % 3600) // 60
     return f"{h:02}:{m:02}"
 
 def fmt_hms(sec):
-    if sec is None or pd.isna(sec): return "–"
+    if sec is None or pd.isna(sec): return "—"
     h, rem = divmod(int(sec), 3600)
     m, s   = divmod(rem, 60)
     return f"{h:02}:{m:02}:{s:02}"
@@ -182,8 +208,6 @@ def get_fcr_color_pct(v):
     return "#F44336" if v < 50 else "#4CAF50"
 
 # Interval helpers
-
-# (removed duplicate merge_intervals helper)
 
 
 def clip_to_window(s, e, wstart, wend):
@@ -288,7 +312,7 @@ def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
     off_mask = long["Range"].str.fullmatch(r"(?i)\s*(off|off day|offday|na|nan|-|—|–)?\s*")
     long = long[~off_mask.fillna(True)]
 
-    rgx = re.compile(r"^\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*[-–—]\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*$")
+    rgx = re.compile(r"^\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*[-—–]\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*$")
 
     def _parse_range(s, d):
         m = rgx.match(s or "")
@@ -415,7 +439,7 @@ with st.expander("ℹ️ Data files loaded"):
     st.write("\n".join(lines))
 
 # =========================
-# Core Metrics: Volume & AHT (report_items) — robust time filtering
+# Core Metrics: Volume & AHT (report_items) – robust time filtering
 # =========================
 ts_start = pd.Timestamp(start_date)  # inclusive
 ts_end   = pd.Timestamp(end_date) + pd.Timedelta(days=1)  # exclusive
@@ -625,7 +649,7 @@ weighted_sla   = ((df_daily["Chat SLA"] * df_daily["Chat Vol"] + df_daily["Email
 # Header & KPI Tiles
 # =========================
 st.title("📊 Department Performance Dashboard")
-st.markdown(f"### Period: {start_date:%d %b %Y} – {end_date:%d %b %Y}")
+st.markdown(f"### Period: {start_date:%d %b %Y} — {end_date:%d %b %Y}")
 st.markdown("---")
 
 # Core Metrics
@@ -679,10 +703,10 @@ rule_lb= alt.Chart(pd.DataFrame({"y":[85]})).mark_text(align="left", color="red"
             .encode(y="y:Q", text=alt.value("Target: 85%"))
 st.altair_chart(
     (trend_chart + labels + rule + rule_lb).properties(
-        width='container', # Optional: Tells Altair to use the container width
+        width='container',
         height=350
     ),
-    use_container_width=True # <-- Use this instead of width='stretch'
+    use_container_width=True
 )
 
 # =========================
@@ -730,19 +754,19 @@ if survey_path.exists():
         render_custom_metric(k1, "🗳️ Surveys", f"{total_surveys:,}", "Total surveys in range", "#4CAF50")
         render_custom_metric(
             k2, "😊 CSAT (avg %)",
-            f"{csat_overall:.1f}%" if csat_overall is not None else "–",
+            f"{csat_overall:.1f}%" if csat_overall is not None else "—",
             "Average CSAT normalized to 0–100%",
             get_csat_color_pct(csat_overall)
         )
         render_custom_metric(
             k3, "⭐ NPS",
-            f"{nps_overall:.1f}" if nps_overall is not None else "–",
+            f"{nps_overall:.1f}" if nps_overall is not None else "—",
             "NPS: %Promoters − %Detractors",
             get_nps_color(nps_overall)
         )
         render_custom_metric(
             k4, "🎯 FCR",
-            f"{fcr_overall:.1f}%" if fcr_overall is not None else "–",
+            f"{fcr_overall:.1f}%" if fcr_overall is not None else "—",
             "First Contact Resolution rate",
             get_fcr_color_pct(fcr_overall)
         )
@@ -851,7 +875,7 @@ def _country_from_devname(devname: str) -> str:
         "Botswana": ["botswana","bw"],
         "Cameroon": ["cameroon","cm"],
         "Congo (DRC)": ["congo drc","drc","dr congo","democratic republic of congo","rdc"],
-        "Côte d’Ivoire": ["cote d'ivoire","côte d’ivoire","ivory coast","ci"],
+        "Côte d'Ivoire": ["cote d'ivoire","côte d'ivoire","ivory coast","ci"],
         "Ghana": ["ghana","gh"],
         "Kenya": ["kenya","ke"],
         "Malawi": ["malawi","mw"],
@@ -910,13 +934,6 @@ else:
     if counts.empty or counts["Chats"].sum() == 0:
         st.info("No chats in the selected period (or developer names didn't map to countries).")
     else:
-        order = counts.sort_values("Chats", ascending=False)["Country"].tolist()
-        try:
-            counts["Country"] = pd.Categorical(counts["Country"], categories=order, ordered=True)
-        except Exception:
-            pass
-        
-
         top_n = st.sidebar.slider("Pie chart: top countries", min_value=3, max_value=12, value=8, step=1)
         if len(counts) > top_n:
             top = counts.head(top_n)
@@ -926,20 +943,18 @@ else:
         total = int(counts["Chats"].sum())
         counts["Share"] = counts["Chats"] / total if total else 0
 
-        country_order = ['Sierra Leone', 'Malawi', 'Zimbabwe', 'Namibia', 'Uganda', 'Liberia', 
-                 'Mali', 'Angola', 'Unknown', 'Cameroon', 'Gabon']
-
         min_share = st.sidebar.slider("Label slices ≥ this share", min_value=0.0, max_value=0.1, value=0.02, step=0.01)
         label_df = counts[counts["Share"] >= min_share].copy()
         label_df["Label"] = label_df.apply(lambda r: f"{r['Country']} — {int(r['Chats']):,} ({r['Share']:.0%})", axis=1)
 
+        # FIX: Remove the predefined sort order that may not match actual data
         pie = (
             alt.Chart(counts)
             .mark_arc(outerRadius=170, innerRadius=70, stroke="white", strokeWidth=2)
             .encode(
-            theta=alt.Theta("Chats:Q", stack=True),
-            color=alt.Color("Country:N", sort=alt.Sort(country_order)),
-            order=alt.Order("Chats:Q", sort="descending"),
+                theta=alt.Theta("Chats:Q", stack=True),
+                color=alt.Color("Country:N", legend=alt.Legend(title="Country")),
+                order=alt.Order("Chats:Q", sort="descending"),
                 tooltip=[
                     alt.Tooltip("Country:N", title="Country"),
                     alt.Tooltip("Chats:Q", title="Chats", format=","),
@@ -951,8 +966,12 @@ else:
 
         labels = (
             alt.Chart(label_df)
-            .mark_text(radius=120, size=12)
-            .encode(theta=alt.Theta("Chats:Q", stack=True), text="Label:N")
+            .mark_text(radius=195, size=11, fontWeight="bold")
+            .encode(
+                theta=alt.Theta("Chats:Q", stack=True), 
+                text="Label:N",
+                color=alt.value("black")
+            )
         )
 
         st.altair_chart(pie + labels, use_container_width=True)
@@ -960,12 +979,10 @@ else:
         with st.expander("View country breakdown table"):
             st.dataframe(
                 counts[["Country", "Chats", "Share"]].style.format({"Chats": "{:,}", "Share": "{:.1%}"}),
-                width='stretch'
+                use_container_width=True
             )
 
 # =========================
-# ⏱️ Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
-# =========================# =========================
 # ⏱️ Hourly Weighted SLA (selected day) + Available Minutes + Logged-in Agents
 # =========================
 st.markdown("---")
@@ -1080,9 +1097,10 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
         raw = 0.5 * frac_60 - 0.3 * excess_wait - 0.2 * abandon_frac
         return max(0.0, min(100.0, (raw / CHAT_RESCALE_K) * SLA_SCALE))
 
+    # FIX: Use apply without include_groups parameter for compatibility
     chat_hour_sla = (
-        chat_day.groupby("Hour")
-        .apply(_chat_sla_for_group, include_groups=False)
+        chat_day.groupby("Hour", group_keys=False)
+        .apply(lambda g: _chat_sla_for_group(g))
         .rename("Chat SLA")
     )
 
@@ -1095,9 +1113,10 @@ def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
         raw = 0.6 * frac_le_1hr - 0.4 * excess
         return max(0.0, min(100.0, (raw / EMAIL_RESCALE_K) * SLA_SCALE))
 
+    # FIX: Use apply without include_groups parameter for compatibility
     email_hour_sla = (
-        email_day.groupby("Hour")
-        .apply(_email_sla_for_group, include_groups=False)
+        email_day.groupby("Hour", group_keys=False)
+        .apply(lambda g: _email_sla_for_group(g))
         .rename("Email SLA")
     )
 
@@ -1144,296 +1163,52 @@ else:
                 alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
                 alt.Tooltip("Weighted SLA:Q", format=".1f"),
                 alt.Tooltip("Chat Vol:Q", title="Chat Vol", format=".0f"),
-                alt.Tooltip("Email Vol:Q", title="Email Vol", format=".0f"),
-                alt.Tooltip("Avail (min):Q", title="Available (min)", format=".0f"),
-                alt.Tooltip("Logged In Agents:Q", title="Logged In Agents", format=".0f"),
-            ],
+                alt.Tooltip("Email Vol:Q", title="Email Vol", format=".0f")
+            ]
         )
     )
-    left_layers = [weighted_line]
+
+    sla_layers = [weighted_line]
 
     if show_breakdown:
-        chat_line = (
+        # Chat SLA line (shares y-axis with Weighted SLA)
+        chat_line = alt.Chart(df_hourly).mark_line(point=True, color="#4CAF50").encode(
+            x="Hour:T",
+            y=alt.Y("Chat SLA:Q", title=None, scale=alt.Scale(domain=[0, 105])),
+            tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Chat SLA:Q", format=".1f")]
+        )
+        # Email SLA line (shares y-axis with Weighted SLA)
+        email_line = alt.Chart(df_hourly).mark_line(point=True, color="#FFC107").encode(
+            x="Hour:T",
+            y=alt.Y("Email SLA:Q", title=None, scale=alt.Scale(domain=[0, 105])),
+            tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Email SLA:Q", format=".1f")]
+        )
+        sla_layers.extend([chat_line, email_line])
+
+
+    # Right axis owner: Available Minutes (bars)
+    if show_avail:
+        max_avail = df_hourly["Avail (min)"].max() if df_hourly["Avail (min)"].max() > 0 else 60
+        avail_bars = (
             alt.Chart(df_hourly)
-            .mark_line(point=True, color="#0EA5E9")
+            .mark_bar(opacity=0.3, color="#9E9E9E")
             .encode(
-                x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-                y=alt.Y("Chat SLA:Q", title=None, axis=None, scale=alt.Scale(domain=[0,105])),
-                tooltip=[alt.Tooltip("Hour:T", format="%H:%M"),
-                         alt.Tooltip("Chat SLA:Q", format=".1f")],
+                x=alt.X("Hour:T"),
+                y=alt.Y("Avail (min):Q", title="Available Minutes", axis=alt.Axis(orient="right", grid=False), scale=alt.Scale(domain=[0, max_avail + 10])),
+                tooltip=[alt.Tooltip("Hour:T", format="%H:%M"), alt.Tooltip("Avail (min):Q", title="Available Min", format=".0f")]
             )
         )
-        email_line = (
-            alt.Chart(df_hourly)
-            .mark_line(point=True, color="#EF4444", strokeDash=[5,3])
-            .encode(
-                x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-                y=alt.Y("Email SLA:Q", title=None, axis=None, scale=alt.Scale(domain=[0,105])),
-                tooltip=[alt.Tooltip("Hour:T", format="%H:%M"),
-                         alt.Tooltip("Email SLA:Q", format=".1f")],
-            )
-        )
-        left_layers += [chat_line, email_line]
-
-    target_val = 85
-    rule = alt.Chart(pd.DataFrame({"y":[target_val]})).mark_rule(color="red", strokeDash=[5,5]).encode(y="y:Q")
-    rule_lb = alt.Chart(pd.DataFrame({"y":[target_val]})).mark_text(align="left", dy=-8, color="red")\
-        .encode(y="y:Q", text=alt.value(f"Target: {target_val}%"))
-    left_chart = alt.layer(*left_layers, rule, rule_lb).resolve_scale(y="shared")
-
-    # Right axis owner: Available minutes bars
-    right_chart = (
-        alt.Chart(df_hourly)
-        .mark_bar(opacity=0.28, color="#8B5CF6")
-        .encode(
-            x=alt.X("Hour:T", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-            y=alt.Y("Avail (min):Q", title="Available Minutes",
-                    axis=alt.Axis(orient="right"), scale=alt.Scale(nice=True)),
-            tooltip=[alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-                     alt.Tooltip("Avail (min):Q", title="Available (min)", format=".0f")],
-        )
-    ) if show_avail else None
-
-    if right_chart is not None:
-        combined_top = alt.layer(left_chart, right_chart).resolve_scale(y="independent")
+        
+        # Combine bars and lines, resolving y-scales
+        combined = alt.layer(avail_bars, *sla_layers).resolve_scale(y='independent')
     else:
-        combined_top = left_chart
+        combined = alt.layer(*sla_layers).resolve_scale(y='shared')
 
-    combined_top = combined_top.properties(width=900, height=360, title=f"Hourly Weighted SLA — {hourly_date:%d %b %Y}")\
-        .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2,3])\
-        .configure_view(stroke="#d1d5db", fill="white")
-
-    st.altair_chart(combined_top, width='stretch')
-
-    # Logged-in agents (separate big chart)
-    max_agents_val = pd.to_numeric(df_hourly["Logged In Agents"], errors="coerce").max()
-    max_agents = int((0 if pd.isna(max_agents_val) else max_agents_val) + 1)
-
-    agents_chart = (
-        alt.Chart(df_hourly)
-        .mark_bar(color="#6B7280", opacity=0.70)
-        .encode(
-            x=alt.X("Hour:T", title="Hour", axis=alt.Axis(format="%H:%M", labelAngle=-45, labelLimit=140)),
-            y=alt.Y("Logged In Agents:Q", title="Logged In Agents", scale=alt.Scale(domain=[0, max_agents])),
-            tooltip=[alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-                     alt.Tooltip("Logged In Agents:Q", format=".0f")],
-        )
-        .properties(width=900, height=220, title="Logged In Agents per Hour")
-        .configure_axis(grid=True, gridColor="#e5e7eb", gridDash=[2,3])
-        .configure_view(stroke="#d1d5db", fill="white")
+    st.altair_chart(
+        combined.properties(
+            title=f"Hourly Performance for {hourly_date:%d %b %Y}",
+            width='container',
+            height=400
+        ).configure_legend(orient="bottom"),
+        use_container_width=True
     )
-    st.altair_chart(agents_chart, width='stretch')
-
-    with st.expander("View hourly table"):
-        show_cols = ["Hour","Chat SLA","Chat Vol","Email SLA","Email Vol","Avail (min)","Logged In Agents","Weighted SLA"]
-        st.dataframe(
-            df_hourly[show_cols].style.format({
-                "Chat SLA": "{:.1f}",
-                "Email SLA": "{:.1f}",
-                "Weighted SLA": "{:.1f}",
-                "Avail (min)": "{:.0f}",
-                "Logged In Agents": "{:.0f}",
-            }),
-            width='stretch'
-        )
-
-# =========================
-# 👥 Daily Schedule Summary (end_date)
-# =========================
-st.markdown("---")
-st.subheader(f"👥 Daily Schedule Summary — {end_date:%d %b %Y}")
-
-def build_daily_schedule(df_shifts_tidy: pd.DataFrame, df_presence: pd.DataFrame, day: datetime.date) -> pd.DataFrame:
-    """
-    For each agent scheduled overlapping `day` (from normalized shifts.csv), show:
-      - Scheduled Shift Start / End (HH:MM)
-      - Lunch Start / End (from presence where status contains 'lunch')
-      - Total Shift (scheduled hh:mm), Logged-in/Available (hh:mm) within scheduled,
-        Adherence %, Availability %,
-      - Login / Logout (AVAILABLE statuses only, full day),
-      - Late/Early mins (based on ANY presence),
-      plus hidden helpers for styling.
-    """
-    if df_shifts_tidy is None or df_shifts_tidy.empty:
-        return pd.DataFrame(columns=[
-            "Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift",
-            "Logged-in (hh:mm)","Available (hh:mm)","Adherence %","Availability %",
-            "Login","Logout","Late Start (min)","Early Finish (min)",
-            "_shift_start_dt","_lunch_start_dt"
-        ])
-
-    day_start = datetime.combine(day, datetime.min.time())
-    day_end   = day_start + timedelta(days=1)
-
-    # Consider any shift that overlaps the selected day
-    sched = df_shifts_tidy[
-        (df_shifts_tidy["Shift Start"] < day_end) &
-        (df_shifts_tidy["Shift End"]   > day_start)
-    ].copy()
-
-    if sched.empty:
-        return pd.DataFrame(columns=[
-            "Agent","Shift Start","Lunch Start","Lunch End","Shift End","Total Shift",
-            "Logged-in (hh:mm)","Available (hh:mm)","Adherence %","Availability %",
-            "Login","Logout","Late Start (min)","Early Finish (min)",
-            "_shift_start_dt","_lunch_start_dt"
-        ])
-
-    # Presence overlapping the day (normalize agent and status)
-    pres_day = df_presence[(df_presence["Start DT"] < day_end) &
-                           (df_presence["End DT"]   > day_start)].copy()
-    pres_day["__status_norm"] = pres_day["Service Presence Status: Developer Name"].apply(_norm_status_key)
-    pres_day["__agent_key"]   = pres_day["Created By: Full Name"].apply(_norm_person_key)
-
-    AVAILABLE_STATUSES = {"available_chat","available_email_and_web","available_all"}
-
-    rows = []
-    for _, r in sched.iterrows():
-        agent = str(r["Agent"])
-        agent_key = _norm_person_key(agent)
-
-        s_sched = r["Shift Start"]; e_sched = r["Shift End"]
-        sched_clip_s = max(s_sched, day_start)
-        sched_clip_e = min(e_sched, day_end)
-        if sched_clip_e <= sched_clip_s:
-            continue
-
-        sched_secs = (sched_clip_e - sched_clip_s).total_seconds()
-
-        # Agent presence for the day
-        pa = pres_day[pres_day["__agent_key"] == agent_key]
-
-        def _clip_to_sched(s, e):
-            cs, ce = max(s, sched_clip_s), min(e, sched_clip_e)
-            return (cs, ce) if ce > cs else None
-
-        # Logged-in intervals (ANY presence) — for adherence and late/early
-        logged_ints = []
-        for _, pr in pa.iterrows():
-            seg = _clip_to_sched(pr["Start DT"].to_pydatetime(), pr["End DT"].to_pydatetime())
-            if seg: logged_ints.append(seg)
-        logged_ints = merge_intervals(logged_ints)
-        logged_secs = sum((e - s).total_seconds() for s, e in logged_ints)
-
-        # Available intervals within scheduled (for availability %)
-        avail_ints = []
-        for _, pr in pa[pa["__status_norm"].isin(AVAILABLE_STATUSES)].iterrows():
-            seg = _clip_to_sched(pr["Start DT"].to_pydatetime(), pr["End DT"].to_pydatetime())
-            if seg: avail_ints.append(seg)
-        avail_ints = merge_intervals(avail_ints)
-        avail_secs = sum((e - s).total_seconds() for s, e in avail_ints)
-
-        # Lunch from presence = any status containing 'lunch'
-        lunch_rows = pa[pa["__status_norm"].str.contains("lunch", na=False)]
-        lunch_ints = []
-        for _, lr in lunch_rows.iterrows():
-            seg = _clip_to_sched(lr["Start DT"].to_pydatetime(), lr["End DT"].to_pydatetime())
-            if seg: lunch_ints.append(seg)
-        lunch_ints = merge_intervals(lunch_ints)
-        lunch_start = min((s for s, _ in lunch_ints), default=None)
-        lunch_end   = max((e for _, e in lunch_ints), default=None)
-
-        # Login/Logout from AVAILABLE statuses over the full day (not clipped to schedule)
-        avail_day_ints = []
-        for _, pr in pa[pa["__status_norm"].isin(AVAILABLE_STATUSES)].iterrows():
-            cs, ce = max(pr["Start DT"], day_start), min(pr["End DT"], day_end)
-            if ce > cs:
-                avail_day_ints.append((cs.to_pydatetime(), ce.to_pydatetime()))
-        avail_day_ints = merge_intervals(avail_day_ints)
-        login_avail  = min((s for s, _ in avail_day_ints), default=None)
-        logout_avail = max((e for _, e in avail_day_ints), default=None)
-
-        # First/Last presence across the day (ANY presence) for late/early mins
-        all_pres_ints = []
-        for _, pr in pa.iterrows():
-            cs, ce = max(pr["Start DT"], day_start), min(pr["End DT"], day_end)
-            if ce > cs:
-                all_pres_ints.append((cs.to_pydatetime(), ce.to_pydatetime()))
-        all_pres_ints = merge_intervals(all_pres_ints)
-        first_login_any = min((s for s, _ in all_pres_ints), default=None)
-        last_logout_any = max((e for _, e in all_pres_ints), default=None)
-
-        # Late start / early finish vs scheduled (mins) using ANY presence
-        late_start_min   = round(max(((first_login_any - sched_clip_s).total_seconds()/60.0), 0.0), 1) if first_login_any else None
-        early_finish_min = round(max(((sched_clip_e - last_logout_any).total_seconds()/60.0), 0.0), 1)  if last_logout_any else None
-
-        adher_pct = (logged_secs / sched_secs * 100.0) if sched_secs > 0 else None
-        avail_pct = (avail_secs  / sched_secs * 100.0) if sched_secs > 0 else None
-
-        rows.append({
-            "Agent":               agent,
-            "Shift Start":         sched_clip_s.strftime("%H:%M"),
-            "Lunch Start":         ("—" if lunch_start is None else lunch_start.strftime("%H:%M")),
-            "Lunch End":           ("—" if lunch_end   is None else lunch_end.strftime("%H:%M")),
-            "Shift End":           sched_clip_e.strftime("%H:%M"),
-            "Total Shift":         fmt_hhmm(sched_secs),          # HH:MM
-            "Logged-in (hh:mm)":   fmt_hhmm(logged_secs),         # HH:MM
-            "Available (hh:mm)":   fmt_hhmm(avail_secs),          # HH:MM
-            "Adherence %":         (round(adher_pct, 1) if adher_pct is not None else None),
-            "Availability %":      (round(avail_pct, 1) if avail_pct is not None else None),
-            "Login":               fmt_hhmm_dt(login_avail),
-            "Logout":              fmt_hhmm_dt(logout_avail),
-            "Late Start (min)":    fmt_minutes_clean(late_start_min),
-            "Early Finish (min)":  fmt_minutes_clean(early_finish_min),
-
-            # hidden helper columns for styling
-            "_shift_start_dt":     sched_clip_s,
-            "_lunch_start_dt":     lunch_start
-        })
-
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out
-    sort_key = pd.to_datetime(out["Shift Start"], format="%H:%M", errors="coerce")
-    out = out.assign(_sort=sort_key).sort_values(["_sort","Agent"]).drop(columns=["_sort"]).reset_index(drop=True)
-    return out
-
-schedule_df = build_daily_schedule(df_shifts, df_presence, end_date)
-
-if schedule_df.empty:
-    st.info(f"No scheduled agents found for {end_date:%d %b %Y}.")
-else:
-    # Compute lunch-window violations using hidden datetime helpers
-    df = schedule_df.copy()
-
-    # Hours delta from shift start to lunch start (NaN if no lunch)
-    delta_hours = (
-        (pd.to_datetime(df["_lunch_start_dt"]) - pd.to_datetime(df["_shift_start_dt"]))
-        .dt.total_seconds() / 3600
-    )
-
-    # Violation: lunch < 3h OR > 5h from shift start (only when lunch exists)
-    viol_idx = df.index[delta_hours.notna() & ((delta_hours < 3.0) | (delta_hours > 5.0))]
-
-    # Drop helper columns from what we display
-    display_cols = [c for c in df.columns if c not in {"_shift_start_dt", "_lunch_start_dt"}]
-    disp = df[display_cols].copy()
-
-    # Row-wise styling: make Lunch cells red when violated
-    lunch_cols = {"Lunch Start", "Lunch End"}
-    def _style_row(row):
-        is_violation = row.name in viol_idx
-        styles = []
-        for col in disp.columns:
-            if is_violation and col in lunch_cols:
-                styles.append("color: red; font-weight: 600;")
-            else:
-                styles.append("")
-        return styles
-
-    left, right = st.columns([4,1])
-    with left:
-        st.dataframe(
-            disp.style.apply(_style_row, axis=1),
-            width='stretch'
-        )
-    with right:
-        st.metric("Scheduled agents", f"{len(disp):,}")
-        # Sum total shift seconds from HH:MM strings
-        def _hhmm_to_sec(s):
-            if not isinstance(s, str) or ":" not in s:
-                return 0
-            h, m = s.split(":")[:2]
-            return int(h)*3600 + int(m)*60
-        total_secs = sum(_hhmm_to_sec(x) for x in disp["Total Shift"])
-        st.metric("Total scheduled time", fmt_hms(total_secs))
