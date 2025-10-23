@@ -834,6 +834,7 @@ st.subheader("🌍 Chats by Country (volume)")
 DEVNAME_COL = "Chat Button: Developer Name"
 
 def _country_from_devname(devname: str) -> str:
+    # ... (Keep the existing _country_from_devname function as is) ...
     if not isinstance(devname, str):
         return "Unknown"
     s = devname.strip()
@@ -920,16 +921,17 @@ else:
         counts["Share"] = counts["Chats"] / total if total else 0
 
         min_share = st.sidebar.slider("Label slices ≥ this share", min_value=0.0, max_value=0.1, value=0.02, step=0.01)
-        label_df = counts[counts["Share"] >= min_share].copy()
-        label_df["Label"] = label_df.apply(lambda r: f"{r['Country']} — {int(r['Chats']):,} ({r['Share']:.0%})", axis=1)
+        
+        # --- IMPROVED AESTHETIC START ---
 
-        # FIX: Remove the predefined sort order that may not match actual data
+        # 1. Base chart with enhanced color scheme, and a slightly larger radius
         pie = (
             alt.Chart(counts)
-            .mark_arc(outerRadius=170, innerRadius=70, stroke="white", strokeWidth=2)
+            .mark_arc(outerRadius=180, innerRadius=100, stroke="#f8f9fa", strokeWidth=2) # Light stroke for separation
             .encode(
                 theta=alt.Theta("Chats:Q", stack=True),
-                color=alt.Color("Country:N", legend=alt.Legend(title="Country")),
+                # Use a color scheme optimized for categorical data (e.g., 'category10', 'tableau20')
+                color=alt.Color("Country:N", legend=alt.Legend(title="Country"), scale=alt.Scale(scheme='tableau10')),
                 order=alt.Order("Chats:Q", sort="descending"),
                 tooltip=[
                     alt.Tooltip("Country:N", title="Country"),
@@ -937,12 +939,55 @@ else:
                     alt.Tooltip("Share:Q", title="Share", format=".1%")
                 ],
             )
-            .properties(width=520, height=420, title="Chat Volume by Country (from Chat Button)")
+            .properties(
+                width=550, 
+                height=450, 
+                title=alt.TitleParams(
+                    "Chat Volume by Country (from Chat Button)", 
+                    anchor="middle", 
+                    fontSize=16
+                )
+            )
         )
 
-        # The 'labels' chart definition has been removed (Option 1 applied)
-        # The chart is now displayed using only 'pie', relying on the legend/tooltip for accurate identification.
-        st.altair_chart(pie, use_container_width=True)
+        # 2. Labels for slices
+        # Filter for labels (only slices above the minimum share threshold)
+        label_df = counts[counts["Share"] >= min_share].copy()
+        
+        # Create a cleaner label format: "Country (Share)"
+        label_df["Label"] = label_df.apply(lambda r: f"{r['Country']} ({r['Share']:.0%})", axis=1)
+
+        labels = (
+            alt.Chart(label_df)
+            # Use a slightly larger radius for text placement
+            .mark_text(radius=205, size=12, fontWeight="normal", fill="#333") 
+            .encode(
+                theta=alt.Theta("Chats:Q", stack=True), 
+                text="Label:N",
+                order=alt.Order("Chats:Q", sort="descending"),
+                color=alt.value("black")
+            )
+        )
+        
+        # 3. Center Text (Total Volume)
+        # Add a text layer in the center for the total volume
+        center_text = alt.Chart(pd.DataFrame({'text': [f"Total: {total:,}"], 'x': [0], 'y': [0]})).mark_text(
+            align='center',
+            baseline='middle',
+            fontSize=18,
+            fontWeight='bold',
+            color='#333333'
+        ).encode(
+            x='x:Q',
+            y='y:Q',
+            text='text:N'
+        )
+
+        # Combine all layers: Donut + Labels + Center Text
+        chart_final = alt.layer(pie, labels, center_text).configure_view(stroke=None)
+
+        st.altair_chart(chart_final, use_container_width=True)
+        # --- IMPROVED AESTHETIC END ---
 
         with st.expander("View country breakdown table"):
             st.dataframe(
