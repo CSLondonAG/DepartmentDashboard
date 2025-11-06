@@ -250,6 +250,57 @@ def _norm_status_key(s: str) -> str:
     return s
 
 # =========================
+# NEW: Missed-chat de-duplication (email/IP + button + time window)
+# =========================
+def exclude_repeat_missed_chats(
+    df: pd.DataFrame,
+    time_col: str = "Date/Time Opened",
+    email_col: str = "Visitor Email",
+    ip_col: str = "Visitor IP Address",
+    button_col: str = "Chat Button: Developer Name",
+    abandoned_col: str = "Abandoned After",
+    window_minutes: int = 20
+) -> pd.DataFrame:
+    """
+    Collapse multiple 'missed' chats from the same customer (by email, else IP)
+    on the same chat button within <window_minutes> into a single record.
+    Only affects rows where Abandoned After is non-null. All others unchanged.
+    """
+    if df is None or df.empty or abandoned_col not in df.columns:
+        return df
+
+    dfx = df.copy()
+    # Defensive datetime coercion
+    dfx[time_col] = pd.to_datetime(dfx[time_col], errors="coerce", dayfirst=True)
+
+    missed = dfx[dfx[abandoned_col].notna()].copy()
+    if missed.empty:
+        return dfx
+
+    # Customer key: prefer email, fallback to IP
+    cust_key = missed.get(email_col, pd.Series(index=missed.index))
+    if cust_key.isna().all() and ip_col not in missed.columns:
+        # No usable key columns, return as-is
+        return dfx
+
+    missed["customer_key"] = missed.get(email_col, pd.Series(index=missed.index)).fillna(
+        missed.get(ip_col, pd.Series(index=missed.index))
+    ).astype(str)
+
+    missed["button_key"] = missed.get(button_col, "").astype(str)
+
+    missed = missed.sort_values(["button_key", "customer_key", time_col])
+    prev_opened = missed.groupby(["button_key", "customer_key"])[time_col].shift(1)
+    mins_since_prev = (missed[time_col] - prev_opened).dt.total_seconds() / 60
+
+    keep_mask = prev_opened.isna() | (mins_since_prev >= float(window_minutes))
+    missed_dedup = missed[keep_mask].copy()
+
+    non_missed = dfx[dfx[abandoned_col].isna()].copy()
+    out = pd.concat([non_missed, missed_dedup], ignore_index=True).sort_values(time_col)
+    return out
+
+# =========================
 # Wide -> Tidy shifts.csv normalizer (matrix to tidy)
 # =========================
 def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
@@ -382,7 +433,7 @@ for df_ in (df_items, df_presence):
 df_shifts = normalize_wide_shifts(df_shifts_raw)
 
 # =========================
-# Sidebar: Date Range (from chat.csv)
+# Sidebar: Date Range (from chat.csv) + Dedupe control
 # =========================
 st.sidebar.header("Filter Options")
 
@@ -396,6 +447,20 @@ end_date   = st.sidebar.date_input("End Date",   value=max_date,
 if start_date > end_date:
     st.sidebar.error("Start must be on or before End")
     st.stop()
+
+# New control: window for de-duplicating missed chats
+dedup_window_minutes = int(st.sidebar.number_input("Missed de-dup window (mins)", min_value=5, max_value=60, value=20, step=5))
+
+# Apply missed-chat de-duplication globally before slicing/metrics
+chat_sla_df = exclude_repeat_missed_chats(
+    chat_sla_df,
+    time_col="Date/Time Opened",
+    email_col="Visitor Email",
+    ip_col="Visitor IP Address",
+    button_col="Chat Button: Developer Name",
+    abandoned_col="Abandoned After",
+    window_minutes=dedup_window_minutes
+)
 
 # Show which files were loaded (helpful on Cloud)
 def fmt_sig(p: Path):
