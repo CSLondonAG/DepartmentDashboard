@@ -336,13 +336,13 @@ def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
     long["Date"] = long["DateStr"].map(date_map)
     long["Range"] = long["Range"].astype(str).str.strip()
 
-    off_mask = long["Range"].str.fullmatch(r"(?i)\s*(off|off day|offday|na|nan|-|—|–)?\s*")
+    off_mask = long["Range"].str.fullmatch(r"(?i)\s*(off|off day|offday|na|nan|none|-|—|–)?\s*")
     long = long[~off_mask.fillna(True)]
 
     rgx = re.compile(r"^\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*[-—–]\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*$")
 
     def _parse_range(s, d):
-        m = rgx.match(s or "")
+    m = rgx.match(s if isinstance(s, str) else "")
         if not m:
             return (pd.NaT, pd.NaT)
         t1, t2 = m.group(1), m.group(2)
