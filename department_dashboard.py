@@ -747,7 +747,7 @@ st.altair_chart(
         width='container',
         height=350
     ),
-    use_container_width=True
+    width='stretch'
 )
 
 # =========================
@@ -884,7 +884,7 @@ if survey_path.exists():
                 .configure_view(stroke="#d1d5db", fill="white")\
                 .configure_legend(orient="top-right", titleFont="Arial", labelFont="Arial")\
                 .interactive()
-            st.altair_chart(trend, use_container_width=True)
+            st.altair_chart(trend, width='stretch')
     else:
         st.info("No survey responses in the selected date range.")
 else:
@@ -1051,13 +1051,13 @@ else:
         # Combine all layers: Donut + Labels + Center Text
         chart_final = alt.layer(pie, labels, center_text).configure_view(stroke=None)
 
-        st.altair_chart(chart_final, use_container_width=True)
+        st.altair_chart(chart_final, width='stretch')
         # --- IMPROVED AESTHETIC END ---
 
         with st.expander("View country breakdown table"):
             st.dataframe(
                 counts[["Country", "Chats", "Share"]].style.format({"Chats": "{:,}", "Share": "{:.1%}"}),
-                use_container_width=True
+                width='stretch'
             )
 
 # =========================
@@ -1078,109 +1078,112 @@ def _clamp01(x):
         return 0.0
     return max(0.0, min(1.0, float(x)))
 
+def _merge_intervals(ints):
+    if not ints: return []
+    ints = sorted(ints, key=lambda x: x[0])
+    out = [list(ints[0])]
+    for s, e in ints[1:]:
+        if s > out[-1][1]:
+            out.append([s, e])
+        else:
+            out[-1][1] = max(out[-1][1], e)
+    return [(s, e) for s, e in out]
+
 def _clip(seg_s, seg_e, w_s, w_e):
     s, e = max(seg_s, w_s), min(seg_e, w_e)
     return (s, e) if e > s else None
 
-def compute_hourly_available_minutes_and_logged_in(sel_date) -> pd.DataFrame:
+def _sum_secs(ints):
+    return sum((e - s).total_seconds() for s, e in ints)
+
+def compute_hourly_available_minutes_and_logged_in(sel_date: datetime.date) -> pd.DataFrame:
     day_start = datetime.combine(sel_date, datetime.min.time())
-    day_end = day_start + timedelta(days=1)
+    day_end   = day_start + timedelta(days=1)
 
-    pres_day = df_presence[
-        (df_presence["Start DT"] < day_end) &
-        (df_presence["End DT"] > day_start)
-    ].copy()
+    pres_day = df_presence[(df_presence["Start DT"] < day_end) &
+                           (df_presence["End DT"]   > day_start)].copy()
 
-    hours = pd.date_range(day_start, day_end, freq="h", inclusive="left")
-    avail_secs_per_hour = {h.to_pydatetime(): 0.0 for h in hours}
-    logged_sets_per_hour = {h.to_pydatetime(): set() for h in hours}
+    hours = pd.date_range(day_start, day_end, freq="h", inclusive="left").to_pydatetime().tolist()
+    avail_secs_per_hour  = {h: 0.0 for h in hours}
+    logged_sets_per_hour = {h: set() for h in hours}
 
-    available_statuses = {"Available_Chat", "Available_Email_and_Web", "Available_All"}
+    AVAILABLE_STATUSES = {"Available_Chat", "Available_Email_and_Web", "Available_All"}
 
     if not pres_day.empty:
         for _, r in pres_day.iterrows():
-            if pd.isna(r["Start DT"]) or pd.isna(r["End DT"]):
-                continue
-
-            seg = _clip(
-                r["Start DT"].to_pydatetime(),
-                r["End DT"].to_pydatetime(),
-                day_start,
-                day_end
-            )
+            seg = _clip(r["Start DT"].to_pydatetime(), r["End DT"].to_pydatetime(), day_start, day_end)
             if not seg:
                 continue
-
-            seg_start, seg_end = seg
-            agent = str(r["Created By: Full Name"])
+            stt, end = seg
+            agent  = str(r["Created By: Full Name"])
             status = str(r["Service Presence Status: Developer Name"])
 
-            hour_cursor = seg_start.replace(minute=0, second=0, microsecond=0)
-            while hour_cursor < seg_end:
-                hour_start = hour_cursor
-                hour_end = hour_start + timedelta(hours=1)
-                overlap = _clip(seg_start, seg_end, hour_start, hour_end)
-
-                if overlap:
-                    o_start, o_end = overlap
-                    duration = (o_end - o_start).total_seconds()
+            h = stt.replace(minute=0, second=0, microsecond=0)
+            while h < end:
+                hour_start = h
+                hour_end   = h + timedelta(hours=1)
+                o = _clip(stt, end, hour_start, hour_end)
+                if o:
+                    o_s, o_e = o
+                    dur = (o_e - o_s).total_seconds()
                     logged_sets_per_hour[hour_start].add(agent)
-
-                    if status in available_statuses:
-                        avail_secs_per_hour[hour_start] += duration
-
-                hour_cursor = hour_end
+                    if status in AVAILABLE_STATUSES:
+                        avail_secs_per_hour[hour_start] += dur
+                h = hour_end
 
     return pd.DataFrame({
         "Hour": hours,
-        "Avail (min)": [avail_secs_per_hour[h.to_pydatetime()] / 60.0 for h in hours],
-        "Logged In Agents": [len(logged_sets_per_hour[h.to_pydatetime()]) for h in hours],
+        "Avail (min)":  [avail_secs_per_hour[h] / 60.0 for h in hours],
+        "Logged In Agents": [len(logged_sets_per_hour[h]) for h in hours],
     })
 
-def compute_hourly_sla_for_date(sel_date) -> pd.DataFrame:
+def compute_hourly_sla_for_date(sel_date: datetime.date) -> pd.DataFrame:
     day_start = datetime.combine(sel_date, datetime.min.time())
-    day_end = day_start + timedelta(days=1)
+    day_end   = day_start + timedelta(days=1)
+
+    chat_day  = chat_sla_df[(chat_sla_df["Date/Time Opened"] >= day_start) &
+                            (chat_sla_df["Date/Time Opened"] <  day_end)].copy()
+    email_day = email_sla_df[(email_sla_df["Date/Time Opened"] >= day_start) &
+                             (email_sla_df["Date/Time Opened"] <  day_end)].copy()
+    chat_day["Hour"]  = chat_day["Date/Time Opened"].dt.floor("h")
+    email_day["Hour"] = email_day["Date/Time Opened"].dt.floor("h")
+
+    items_day = df_items[(df_items["Start DT"] >= day_start) &
+                         (df_items["Start DT"] <  day_end)].copy()
+    items_day["Hour"] = items_day["Start DT"].dt.floor("h")
+
+    chat_vol_hour = (
+        items_day[items_day["Service Channel: Developer Name"] == "sfdc_liveagent"]
+        .groupby("Hour").size().rename("Chat Vol")
+    )
+    email_vol_hour = (
+        items_day[items_day["Service Channel: Developer Name"] == "casesChannel"]
+        .groupby("Hour").size().rename("Email Vol")
+    )
 
     hours = pd.date_range(day_start, day_end, freq="h", inclusive="left")
     out = pd.DataFrame({"Hour": hours})
 
-    chat_day = chat_sla_df[
-        (chat_sla_df["Date/Time Opened"] >= day_start) &
-        (chat_sla_df["Date/Time Opened"] < day_end)
-    ].copy()
-
-    email_day = email_sla_df[
-        (email_sla_df["Date/Time Opened"] >= day_start) &
-        (email_sla_df["Date/Time Opened"] < day_end)
-    ].copy()
-
-    items_day = df_items[
-        (df_items["Start DT"] >= day_start) &
-        (df_items["Start DT"] < day_end)
-    ].copy()
-
-    if not chat_day.empty:
-        chat_day["Hour"] = chat_day["Date/Time Opened"].dt.floor("h")
-    if not email_day.empty:
-        email_day["Hour"] = email_day["Date/Time Opened"].dt.floor("h")
-    if not items_day.empty:
-        items_day["Hour"] = items_day["Start DT"].dt.floor("h")
-
     def _chat_sla_for_group(g: pd.DataFrame) -> float:
-        if g.empty:
-            return None
+        if g.empty: return None
         total = len(g)
         answered = g[g["Wait Time"].notna()]
         frac_60 = _clamp01((answered["Wait Time"] <= 60).sum() / total) if total else 0.0
         avg_wait_min = (answered["Wait Time"].mean() / 60.0) if len(answered) else 0.0
         abandon_frac = _clamp01((g["Abandoned After"] > 20).sum() / total) if total else 0.0
-        excess_wait = max(avg_wait_min - CHAT_TARGET_WAIT_MIN, 0.0)
+        excess_wait  = max(avg_wait_min - CHAT_TARGET_WAIT_MIN, 0.0)
         raw = 0.5 * frac_60 - 0.3 * excess_wait - 0.2 * abandon_frac
         return max(0.0, min(100.0, (raw / CHAT_RESCALE_K) * SLA_SCALE))
 
+    # FIX: Use apply without include_groups parameter for compatibility
+    chat_hour_sla = (
+        chat_day.groupby("Hour", group_keys=False)
+        .apply(lambda g: _chat_sla_for_group(g))
+        .rename("Chat SLA")
+    )
+
     def _email_sla_for_group(g: pd.DataFrame) -> float:
-        if g.empty:
-            return None
+        if g.empty: return None
         total = len(g)
         frac_le_1hr = _clamp01((g["Elapsed Time (Hours)"] <= 1).sum() / total) if total else 0.0
         avg_resp_hr = g["Elapsed Time (Hours)"].mean() if total else 0.0
@@ -1188,62 +1191,41 @@ def compute_hourly_sla_for_date(sel_date) -> pd.DataFrame:
         raw = 0.6 * frac_le_1hr - 0.4 * excess
         return max(0.0, min(100.0, (raw / EMAIL_RESCALE_K) * SLA_SCALE))
 
-    if not chat_day.empty:
-        chat_hour_sla = (
-            chat_day.groupby("Hour", group_keys=False)
-            .apply(lambda g: _chat_sla_for_group(g))
-            .rename("Chat SLA")
-        )
-    else:
-        chat_hour_sla = pd.Series(dtype="float64", name="Chat SLA")
-
-    if not email_day.empty:
-        email_hour_sla = (
-            email_day.groupby("Hour", group_keys=False)
-            .apply(lambda g: _email_sla_for_group(g))
-            .rename("Email SLA")
-        )
-    else:
-        email_hour_sla = pd.Series(dtype="float64", name="Email SLA")
-
-    if not items_day.empty:
-        chat_vol_hour = (
-            items_day[items_day["Service Channel: Developer Name"] == "sfdc_liveagent"]
-            .groupby("Hour")
-            .size()
-            .rename("Chat Vol")
-        )
-        email_vol_hour = (
-            items_day[items_day["Service Channel: Developer Name"] == "casesChannel"]
-            .groupby("Hour")
-            .size()
-            .rename("Email Vol")
-        )
-    else:
-        chat_vol_hour = pd.Series(dtype="float64", name="Chat Vol")
-        email_vol_hour = pd.Series(dtype="float64", name="Email Vol")
+    # FIX: Use apply without include_groups parameter for compatibility
+    email_hour_sla = (
+        email_day.groupby("Hour", group_keys=False)
+        .apply(lambda g: _email_sla_for_group(g))
+        .rename("Email SLA")
+    )
 
     out = (
         out.set_index("Hour")
-        .join([chat_hour_sla, email_hour_sla, chat_vol_hour, email_vol_hour])
-        .reset_index()
+           .join([chat_hour_sla, email_hour_sla, chat_vol_hour, email_vol_hour])
+           .reset_index()
     )
 
     avail_df = compute_hourly_available_minutes_and_logged_in(sel_date)
     out = out.merge(avail_df, on="Hour", how="left")
 
-    for col in ["Chat Vol", "Email Vol", "Avail (min)", "Logged In Agents"]:
-        out[col] = out[col].fillna(0)
-
     def _weighted(row):
-        cv = row.get("Chat Vol", 0) or 0
-        ev = row.get("Email Vol", 0) or 0
+        # Important: NaN is truthy in Python, so "or 0" does not clean it.
+        # If one channel has no volume for the hour, treat that channel as 0
+        # instead of allowing NaN to poison the blended SLA calculation.
+        cv = pd.to_numeric(row.get("Chat Vol", 0), errors="coerce")
+        ev = pd.to_numeric(row.get("Email Vol", 0), errors="coerce")
+        cs = pd.to_numeric(row.get("Chat SLA", 0), errors="coerce")
+        es = pd.to_numeric(row.get("Email SLA", 0), errors="coerce")
+
+        cv = 0.0 if pd.isna(cv) else float(cv)
+        ev = 0.0 if pd.isna(ev) else float(ev)
+        cs = 0.0 if pd.isna(cs) else float(cs)
+        es = 0.0 if pd.isna(es) else float(es)
+
         denom = cv + ev
         if denom == 0:
             return None
-        cs = row.get("Chat SLA", 0) or 0
-        es = row.get("Email SLA", 0) or 0
-        return (cs * cv + es * ev) / denom
+
+        return ((cs * cv) + (es * ev)) / denom
 
     out["Weighted SLA"] = out.apply(_weighted, axis=1)
     out["HourLabel"] = out["Hour"].dt.strftime("%H:%M")
@@ -1251,92 +1233,72 @@ def compute_hourly_sla_for_date(sel_date) -> pd.DataFrame:
 
 df_hourly = compute_hourly_sla_for_date(hourly_date)
 
-if df_hourly[["Chat Vol", "Email Vol"]].fillna(0).sum().sum() == 0:
+if df_hourly[["Chat Vol","Email Vol"]].fillna(0).sum().sum() == 0:
     st.info("No activity for the selected day.")
 else:
     show_breakdown = st.checkbox("Show Chat & Email lines", value=False)
-    show_avail = st.checkbox("Overlay available minutes (bars)", value=True)
+    show_avail     = st.checkbox("Overlay available minutes (bars)", value=True)
 
-    # Keep the full hourly scaffold, but do not force missing SLA hours to zero.
-    # Nulls stop the line from drawing fake drops where there was no work.
-    df_hourly_plot = df_hourly.copy()
-    df_hourly_plot["Avail (min)"] = df_hourly_plot["Avail (min)"].fillna(0)
-    df_hourly_plot["Logged In Agents"] = df_hourly_plot["Logged In Agents"].fillna(0)
-
-    x_scale = alt.Scale(
-        domain=[
-            datetime.combine(hourly_date, datetime.min.time()),
-            datetime.combine(hourly_date, datetime.min.time()) + timedelta(hours=23),
-        ]
-    )
-
-    base = alt.Chart(df_hourly_plot).encode(
-        x=alt.X(
-            "Hour:T",
-            title="Hour",
-            axis=alt.Axis(format="%H:%M", labelAngle=-45),
-            scale=x_scale,
-        )
-    )
-
-    layers = []
-
-    if show_avail:
-        bars = base.mark_bar(opacity=0.28, color="#F6C85F").encode(
-            y=alt.Y(
-                "Avail (min):Q",
-                title="Available (min)",
-                axis=alt.Axis(orient="right")
-            ),
+    # -------- Two-axis composition --------
+    # Left axis owner: Weighted SLA (and optional Chat/Email lines share it without axes)
+    weighted_line = (
+        alt.Chart(df_hourly)
+        .mark_line(point=True, color="#2F80ED")
+        .encode(
+            x=alt.X("Hour:T", title="Hour", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
+            y=alt.Y("Weighted SLA:Q", title="Weighted SLA",
+                    scale=alt.Scale(domain=[0, 105]), axis=alt.Axis(orient="left")),
             tooltip=[
                 alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-                alt.Tooltip("Avail (min):Q", title="Available (min)", format=".0f"),
-                alt.Tooltip("Logged In Agents:Q", title="Logged In Agents", format=".0f"),
-            ]
+                alt.Tooltip("Weighted SLA:Q", format=".1f"), # <-- FIXED: Added format string and closed parenthesis
+            ],
         )
-        layers.append(bars)
-
-    weighted_line = base.mark_line(point=True, strokeWidth=3, color="#2563EB").encode(
-        y=alt.Y(
-            "Weighted SLA:Q",
-            title="Weighted SLA",
-            scale=alt.Scale(domain=[0, 100]),
-            axis=alt.Axis(orient="left")
-        ),
-        tooltip=[
-            alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-            alt.Tooltip("Weighted SLA:Q", title="Weighted SLA", format=".1f"),
-            alt.Tooltip("Chat Vol:Q", title="Chat Vol", format=".0f"),
-            alt.Tooltip("Email Vol:Q", title="Email Vol", format=".0f"),
-        ]
     )
-    layers.append(weighted_line)
 
+    chart_layers = [weighted_line]
+
+    # Optional Chat & Email SLA lines (share the left Y-axis)
     if show_breakdown:
-        chat_line = base.mark_line(point=True, strokeWidth=2, color="#4CAF50").encode(
-            y=alt.Y("Chat SLA:Q", scale=alt.Scale(domain=[0, 100]), axis=None),
+        chat_line = weighted_line.mark_line(point=True, color="#4CAF50").encode(
+            y=alt.Y("Chat SLA:Q", title=alt.value(""), scale=alt.Scale(domain=[0, 105]), axis=None),
             tooltip=[
-                alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
+                alt.Tooltip("Hour:T", format="%H:%M"),
                 alt.Tooltip("Chat SLA:Q", title="Chat SLA", format=".1f"),
-                alt.Tooltip("Chat Vol:Q", title="Chat Vol", format=".0f"),
+                alt.Tooltip("Chat Vol:Q", title="Chat Vol", format=",.0f"),
             ]
         )
-
-        email_line = base.mark_line(point=True, strokeWidth=2, color="#F44336").encode(
-            y=alt.Y("Email SLA:Q", scale=alt.Scale(domain=[0, 100]), axis=None),
+        email_line = weighted_line.mark_line(point=True, color="#F44336").encode(
+            y=alt.Y("Email SLA:Q", title=alt.value(""), scale=alt.Scale(domain=[0, 105]), axis=None),
             tooltip=[
-                alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
+                alt.Tooltip("Hour:T", format="%H:%M"),
                 alt.Tooltip("Email SLA:Q", title="Email SLA", format=".1f"),
-                alt.Tooltip("Email Vol:Q", title="Email Vol", format=".0f"),
+                alt.Tooltip("Email Vol:Q", title="Email Vol", format=",.0f"),
             ]
         )
+        chart_layers.append(chat_line)
+        chart_layers.append(email_line)
+    
+    # Optional Available Minutes (Right Y-axis, bars)
+    if show_avail:
+        avail_bar = (
+            alt.Chart(df_hourly)
+            .mark_bar(opacity=0.3, color="#FFC107")
+            .encode(
+                x=alt.X("Hour:T", axis=None),
+                y=alt.Y("Avail (min):Q", title="Available (min)", axis=alt.Axis(orient="right")),
+                tooltip=[
+                    alt.Tooltip("Hour:T", format="%H:%M"),
+                    alt.Tooltip("Avail (min):Q", title="Available (min)", format=",.0f"),
+                    alt.Tooltip("Logged In Agents:Q", title="Logged In Agents", format=",.0f"),
+                ]
+            )
+        )
+        chart_layers.append(avail_bar)
 
-        layers.extend([chat_line, email_line])
-
-    final_chart = (
-        alt.layer(*layers)
-        .resolve_scale(y="independent")
-        .properties(height=360)
+    # Combine all layers and render
+    final_chart = alt.layer(*chart_layers).resolve_scale(y="independent")
+    
+    st.altair_chart(
+        final_chart.properties( height=350),
+        width='stretch'
     )
-
-    st.altair_chart(final_chart, width="stretch")
