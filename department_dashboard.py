@@ -750,7 +750,7 @@ with _bc1:
     _cc1.metric(
         "Answered ≤60s",
         f"{sla_comp_chat_answered_60s:.1f}%",
-        help=f"{int((_cw_p['Wait Time'] <= 60).sum())} of {sla_comp_chat_total} chats answered within 60s  (weight +0.5)"
+        help=f"{int((_cw_p['Wait Time'] <= 60).sum())} of {sla_comp_chat_answered} answered chats waited ≤60s. % is of all {sla_comp_chat_total} chats incl. abandoned  (weight +0.5)"
     )
     _cc2.metric(
         "Avg Wait Time",
@@ -809,6 +809,91 @@ st.altair_chart(
     ),
     width='stretch'
 )
+
+# =========================
+# Contact Volume Heatmap (Chat + Email by Day & Hour)
+# =========================
+st.markdown("---")
+st.subheader("📅 Contact Volume Heatmap")
+
+DOW_ORDER  = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+HOUR_ORDER = [f"{h:02d}:00" for h in range(24)]
+
+# Build combined contact frame — all chats (incl. missed) + all emails
+_hm_chat = chat_sla_p[["Date/Time Opened"]].copy()
+_hm_chat["Channel"] = "Chat"
+
+_hm_email = email_sla_p[["Date/Time Opened"]].copy()
+_hm_email["Channel"] = "Email"
+
+_hm = pd.concat([_hm_chat, _hm_email], ignore_index=True)
+_hm["Date/Time Opened"] = pd.to_datetime(_hm["Date/Time Opened"], errors="coerce")
+_hm = _hm.dropna(subset=["Date/Time Opened"])
+_hm["DayOfWeek"] = _hm["Date/Time Opened"].dt.day_name()
+_hm["Hour"]      = _hm["Date/Time Opened"].dt.strftime("%H:00")
+
+# Filter to only days actually present in the period (avoids empty DOW rows)
+_days_present = set(_hm["DayOfWeek"].unique())
+_dow_order_filtered = [d for d in DOW_ORDER if d in _days_present]
+
+_hm_tab, _hm_chat_tab, _hm_email_tab = st.tabs(["Combined", "Chat only", "Email only"])
+
+def _build_heatmap(df_src, title, color_scheme="blues"):
+    _grid = (
+        df_src.groupby(["DayOfWeek", "Hour"])
+        .size()
+        .reset_index(name="Volume")
+    )
+    # Fill zeros for missing combinations so the grid is complete
+    from itertools import product as _product
+    _all_combos = pd.DataFrame(
+        list(_product(_dow_order_filtered, HOUR_ORDER)),
+        columns=["DayOfWeek", "Hour"]
+    )
+    _grid = _all_combos.merge(_grid, on=["DayOfWeek", "Hour"], how="left").fillna(0)
+    _grid["Volume"] = _grid["Volume"].astype(int)
+    _grid["DayOfWeek"] = pd.Categorical(_grid["DayOfWeek"], categories=_dow_order_filtered, ordered=True)
+    _grid["Hour"]      = pd.Categorical(_grid["Hour"],      categories=HOUR_ORDER,           ordered=True)
+
+    _chart = (
+        alt.Chart(_grid)
+        .mark_rect()
+        .encode(
+            x=alt.X("Hour:O",      title="Hour of Day",   sort=HOUR_ORDER,
+                    axis=alt.Axis(labelAngle=-45, labelFontSize=10)),
+            y=alt.Y("DayOfWeek:O", title=None,            sort=_dow_order_filtered),
+            color=alt.Color(
+                "Volume:Q",
+                title="Contacts",
+                scale=alt.Scale(scheme=color_scheme, zero=True),
+                legend=alt.Legend(orient="right")
+            ),
+            tooltip=[
+                alt.Tooltip("DayOfWeek:O", title="Day"),
+                alt.Tooltip("Hour:O",      title="Hour"),
+                alt.Tooltip("Volume:Q",    title="Contacts"),
+            ]
+        )
+        .properties(height=220, title=title)
+    )
+    return _chart
+
+with _hm_tab:
+    st.altair_chart(_build_heatmap(_hm, "All Contacts (Chat + Email)"), use_container_width=True)
+
+with _hm_chat_tab:
+    _hm_c = _hm[_hm["Channel"] == "Chat"]
+    if _hm_c.empty:
+        st.info("No chat data in this period.")
+    else:
+        st.altair_chart(_build_heatmap(_hm_c, "Chat Contacts (incl. missed)", color_scheme="greens"), use_container_width=True)
+
+with _hm_email_tab:
+    _hm_e = _hm[_hm["Channel"] == "Email"]
+    if _hm_e.empty:
+        st.info("No email data in this period.")
+    else:
+        st.altair_chart(_build_heatmap(_hm_e, "Email Contacts", color_scheme="oranges"), use_container_width=True)
 
 # =========================
 # Customer Feedback Section (CSAT / NPS / FCR)
