@@ -666,9 +666,16 @@ for d in pd.date_range(start_date, end_date):
     v_e = len(email_df[email_df["Start DT"].dt.date == dd.date()])
 
     daily.append({
-        "Date":      dd,
-        "Chat SLA":  sla_c,  "Chat Vol":  v_c,
-        "Email SLA": sla_e,  "Email Vol": v_e
+        "Date":           dd,
+        "Chat SLA":       sla_c,  "Chat Vol":  v_c,
+        "Email SLA":      sla_e,  "Email Vol": v_e,
+        # Chat components
+        "Chat ≤60s %":    round(frac_answer_60s * 100, 1),
+        "Chat Avg Wait":  round(avg_wait_min * 60, 1),   # seconds
+        "Chat Abandon %": round(abandon_frac  * 100, 1),
+        # Email components
+        "Email ≤1hr %":   round(frac_le_1hr * 100, 1),
+        "Email Avg Resp": round(avg_resp_hr, 3),          # hours
     })
 
 df_daily = pd.DataFrame(daily)
@@ -685,6 +692,22 @@ chat_weighted  = (df_daily["Chat SLA"]  * df_daily["Chat Vol"]).sum()  / df_dail
 email_weighted = (df_daily["Email SLA"] * df_daily["Email Vol"]).sum() / df_daily["Email Vol"].sum() if df_daily["Email Vol"].sum() else 0
 total_vol      = (df_daily["Chat Vol"] + df_daily["Email Vol"]).sum()
 weighted_sla   = ((df_daily["Chat SLA"] * df_daily["Chat Vol"] + df_daily["Email SLA"] * df_daily["Email Vol"]).sum() / total_vol) if total_vol else 0
+
+# =========================
+# Period-level SLA component breakdown
+# =========================
+# Chat components (over the full period slice)
+_cw_p = chat_sla_p[chat_sla_p["Wait Time"].notna()]
+sla_comp_chat_answered_60s  = ((_cw_p["Wait Time"] <= 60).sum() / len(chat_sla_p) * 100) if len(chat_sla_p) else 0.0
+sla_comp_chat_avg_wait_secs = _cw_p["Wait Time"].mean() if len(_cw_p) else 0.0
+sla_comp_chat_abandon_pct   = ((chat_sla_p["Abandoned After"] > 20).sum() / len(chat_sla_p) * 100) if len(chat_sla_p) else 0.0
+sla_comp_chat_total         = len(chat_sla_p)
+sla_comp_chat_answered      = len(_cw_p)
+
+# Email components (over the full period slice)
+sla_comp_email_le_1hr_pct   = ((email_sla_p["Elapsed Time (Hours)"] <= 1).sum() / len(email_sla_p) * 100) if len(email_sla_p) else 0.0
+sla_comp_email_avg_resp_hrs = email_sla_p["Elapsed Time (Hours)"].mean() if len(email_sla_p) else 0.0
+sla_comp_email_total        = len(email_sla_p)
 
 # =========================
 # Header & KPI Tiles
@@ -716,6 +739,43 @@ s1, s2, s3 = st.columns(3)
 render_custom_metric(s1, "Chat SLA Score",     f"{chat_weighted:.1f}",  "Daily-volume weighted chat SLA",  get_sla_score_color(chat_weighted))
 render_custom_metric(s2, "Email SLA Score",    f"{email_weighted:.1f}", "Daily-volume weighted email SLA", get_sla_score_color(email_weighted))
 render_custom_metric(s3, "Weighted SLA Score", f"{weighted_sla:.1f}",   "Volume-weighted blended SLA",     get_sla_score_color(weighted_sla))
+
+# --- SLA Component Breakdown ---
+st.markdown("#### Score breakdown")
+_bc1, _bc2 = st.columns(2)
+
+with _bc1:
+    st.markdown("**💬 Chat SLA components**")
+    _cc1, _cc2, _cc3 = st.columns(3)
+    _cc1.metric(
+        "Answered ≤60s",
+        f"{sla_comp_chat_answered_60s:.1f}%",
+        help=f"{int((_cw_p['Wait Time'] <= 60).sum())} of {sla_comp_chat_total} chats answered within 60s  (weight +0.5)"
+    )
+    _cc2.metric(
+        "Avg Wait Time",
+        fmt_mmss(sla_comp_chat_avg_wait_secs),
+        help=f"Penalty applied above 1:00  (weight −0.3). Based on {sla_comp_chat_answered} answered chats."
+    )
+    _cc3.metric(
+        "Abandon Rate",
+        f"{sla_comp_chat_abandon_pct:.1f}%",
+        help=f"{int((chat_sla_p['Abandoned After'] > 20).sum())} of {sla_comp_chat_total} chats abandoned after 20s  (weight −0.2)"
+    )
+
+with _bc2:
+    st.markdown("**✉️ Email SLA components**")
+    _ec1, _ec2 = st.columns(2)
+    _ec1.metric(
+        "Replied ≤1hr",
+        f"{sla_comp_email_le_1hr_pct:.1f}%",
+        help=f"{int((email_sla_p['Elapsed Time (Hours)'] <= 1).sum())} of {sla_comp_email_total} emails replied within 1hr  (weight +0.6)"
+    )
+    _ec2.metric(
+        "Avg Response Time",
+        fmt_hhmm(sla_comp_email_avg_resp_hrs * 3600),
+        help=f"Penalty applied above 1:00  (weight −0.4). Avg: {sla_comp_email_avg_resp_hrs:.2f}hrs across {sla_comp_email_total} emails."
+    )
 
 # =========================
 # Weighted SLA Trend Chart
