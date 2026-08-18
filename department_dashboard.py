@@ -137,6 +137,49 @@ AVAILABLE_STATUSES = {STATUS_CHAT_ONLY, STATUS_EMAIL_ONLY, STATUS_SHARED}
 CHAT_DEVNAME = "sfdc_liveagent"
 EMAIL_DEVNAME = "casesChannel"
 
+# ---- Excluded people ----------------------------------------------------
+# Names listed here are removed from every metric: their work items drop out of
+# volume, AHT and utilisation, and their presence time drops out of the
+# availability denominator and schedule adherence.
+#
+# Matching is accent- and word-order-insensitive ("Ferreira, Thammy" == "Thammy
+# Ferreira"), but it still needs the name to appear in the data. A configured
+# name that matches nothing is reported in the data-quality panel rather than
+# passing silently — a typo here would otherwise look like a working filter.
+#
+# NOTE: this cannot be applied to the email SLA. The email milestone export has
+# no case-owner column, so there is no way to tell whose cases they are. Add a
+# 'Case Owner' column to that export and set EMAIL_OWNER_COLUMN below.
+EXCLUDED_OWNERS = [
+    "Adam Goodridge",
+    "David Balish",
+    "Hamond Manouan",
+    "Thammy Ferreira",
+    "Felipe Schmid",
+]
+
+# Candidate owner columns, tried in order, in chat.csv and the email export.
+# Leave as-is; the first one present is used.
+OWNER_COLUMN_CANDIDATES = [
+    "Case Owner", "Case Owner: Full Name", "Owner", "Owner: Full Name",
+    "Assigned To", "Agent", "Agent: Full Name", "User: Full Name",
+    "Created By: Full Name", "Owner Name",
+]
+
+# Case identifier in email.csv, joined to 'Work Item: Name' in report_items.csv
+# for the exact volume/SLA reconciliation.
+EMAIL_CASE_KEY = "Case Number"
+
+# A case can carry several entitlement milestones. "lenient" keeps the longest
+# target (the wider entitlement actually promised); "strictest" keeps the shortest.
+EMAIL_MILESTONE_PREFERENCE = "lenient"
+
+# Status values that mean the case is finished. Used to tell a genuinely OPEN
+# case (no reply yet -> a breach once past target) apart from a case that was
+# closed while its response milestone was never completed (unmeasurable ->
+# excluded from the score, but reported).
+EMAIL_CLOSED_STATUSES = {"resolved", "closed", "completed"}
+
 # ---- Survey -------------------------------------------------------------
 # FIX #10: explicit question mapping. Keyword matching previously let a single
 # question land in two categories ("How satisfied were you that your issue was
@@ -611,14 +654,73 @@ if st.sidebar.button("🔄 Reload data now"):
     st.cache_data.clear()
     st.rerun()
 
-df_items = load_csv_cached(str(items_path), file_signature(items_path),
-                           dayfirst=True, parse_dates=["Start DT", "End DT"])
-df_presence = load_csv_cached(str(pres_path), file_signature(pres_path),
-                              dayfirst=True, parse_dates=["Start DT", "End DT"])
-chat_sla_df = load_csv_cached(str(chat_path), file_signature(chat_path),
-                              dayfirst=True, parse_dates=["Date/Time Opened"])
-email_sla_df = load_csv_cached(str(email_path), file_signature(email_path),
-                               dayfirst=True, parse_dates=["Date/Time Opened", "Completion Date"])
+# ---------------------------------------------------------------------------
+# Column-name canonicalisation.
+#
+# Salesforce report exports rename columns between runs — 'End DT' has also
+# arrived as 'End Dt'. Passing a missing name to read_csv(parse_dates=...)
+# raises before any of the app's own error handling can report it, so dates are
+# parsed AFTER load and column names are matched ignoring case, spaces and
+# punctuation. A column that still cannot be found is named explicitly.
+# ---------------------------------------------------------------------------
+def _colkey(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def canonicalise_columns(frame: pd.DataFrame, wanted, label: str) -> pd.DataFrame:
+    frame.columns = frame.columns.str.strip()
+    lookup = {}
+    for c in frame.columns:
+        lookup.setdefault(_colkey(c), c)
+    renames, missing_cols = {}, []
+    for want in wanted:
+        if want in frame.columns:
+            continue
+        found = lookup.get(_colkey(want))
+        if found is not None:
+            renames[found] = want
+        else:
+            missing_cols.append(want)
+    if renames:
+        frame = frame.rename(columns=renames)
+        _col_renames.setdefault(label, []).extend(f"{k} → {v}" for k, v in renames.items())
+    if missing_cols:
+        _col_missing[label] = missing_cols
+    return frame
+
+
+def parse_dt(frame: pd.DataFrame, cols):
+    """Coerce datetime columns. Excel error strings ('#VALUE!') become NaT."""
+    for c in cols:
+        if c in frame.columns:
+            frame[c] = pd.to_datetime(frame[c], errors="coerce", dayfirst=True)
+    return frame
+
+
+_col_renames: dict = {}
+_col_missing: dict = {}
+
+df_items = canonicalise_columns(
+    load_csv_cached(str(items_path), file_signature(items_path)),
+    ["Work Item: Name", "Service Channel: Developer Name", "Handle Time",
+     "Queue: Name", "User: Full Name", "Start DT", "End DT"], "report_items.csv")
+df_presence = canonicalise_columns(
+    load_csv_cached(str(pres_path), file_signature(pres_path)),
+    ["Created By: Full Name", "Service Presence Status: Developer Name",
+     "Start DT", "End DT"], "report_presence.csv")
+chat_sla_df = canonicalise_columns(
+    load_csv_cached(str(chat_path), file_signature(chat_path)),
+    ["Date/Time Opened", "Wait Time", "Abandoned After",
+     "Chat Button: Developer Name"], "chat.csv")
+email_sla_df = canonicalise_columns(
+    load_csv_cached(str(email_path), file_signature(email_path)),
+    ["Date/Time Opened", "Completion Date", "Elapsed Time (Hours)",
+     "Target Response (Hours)", "Status", "Case Origin", EMAIL_CASE_KEY], "email.csv")
+
+df_items = parse_dt(df_items, ["Start DT", "End DT"])
+df_presence = parse_dt(df_presence, ["Start DT", "End DT"])
+chat_sla_df = parse_dt(chat_sla_df, ["Date/Time Opened"])
+email_sla_df = parse_dt(email_sla_df, ["Date/Time Opened", "Completion Date"])
 
 df_shifts = pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
 if shifts_path.exists():
@@ -628,17 +730,11 @@ if shifts_path.exists():
 
 survey_q = None
 if survey_path.exists():
-    survey_q = load_csv_cached(str(survey_path), file_signature(survey_path),
-                               dayfirst=True, parse_dates=["Survey Taker: Created Date"],
-                               low_memory=False)
-    survey_q.columns = survey_q.columns.str.strip()
-
-for _df in (df_items, df_presence, chat_sla_df, email_sla_df):
-    _df.columns = _df.columns.str.strip()
-
-for _df in (df_items, df_presence):
-    for col in ("Start DT", "End DT"):
-        _df[col] = pd.to_datetime(_df[col], errors="coerce", dayfirst=True)
+    survey_q = canonicalise_columns(
+        load_csv_cached(str(survey_path), file_signature(survey_path), low_memory=False),
+        ["Survey Taker: ID", "Survey Taker: Created Date", "Survey Question: Question Title",
+         "Survey Question: Survey", "Response"], "survey.csv")
+    survey_q = parse_dt(survey_q, ["Survey Taker: Created Date"])
 
 # FIX #27: explicit timezone shift, applied once, before anything is bucketed.
 if SOURCE_UTC_OFFSET_HOURS:
@@ -671,6 +767,48 @@ def _coerce_numeric(frame: pd.DataFrame, col: str, label: str):
         dq[f"uncoercible_{label}"] = int(before - after)
 
 
+# ---------------------------------------------------------------------------
+# Apply the excluded-owner list.
+#
+# Done before any metric is computed so the exclusion reaches volume, AHT,
+# utilisation, availability and adherence consistently. Row-level: if an
+# excluded person was one of several people who touched a case, the case
+# survives through the other agents' touches but that person's handle time and
+# availability do not count.
+# ---------------------------------------------------------------------------
+_excluded_keys = {_norm_person_key(n): n for n in EXCLUDED_OWNERS if str(n).strip()}
+_excluded_hits: dict = {n: 0 for n in _excluded_keys.values()}
+
+
+def _apply_owner_exclusion(frame: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Drop rows owned by an excluded person. Returns the filtered frame."""
+    if not _excluded_keys or frame is None or frame.empty:
+        return frame
+    col = next((c for c in OWNER_COLUMN_CANDIDATES if c in frame.columns), None)
+    if col is None:
+        dq.setdefault("exclusion_no_owner_col", []).append(label)
+        return frame
+    keys = frame[col].map(_norm_person_key)
+    drop = keys.isin(_excluded_keys)
+    if drop.any():
+        for k, cnt in keys[drop].value_counts().items():
+            _excluded_hits[_excluded_keys[k]] += int(cnt)
+        dq[f"excluded_rows_{label}"] = int(drop.sum())
+    return frame.loc[~drop].copy()
+
+
+df_items = _apply_owner_exclusion(df_items, "items")
+df_presence = _apply_owner_exclusion(df_presence, "presence")
+chat_sla_df = _apply_owner_exclusion(chat_sla_df, "chat")
+email_sla_df = _apply_owner_exclusion(email_sla_df, "email")
+if not df_shifts.empty and _excluded_keys and "Agent" in df_shifts.columns:
+    _sk = df_shifts["Agent"].map(_norm_person_key)
+    dq["excluded_rows_shifts"] = int(_sk.isin(_excluded_keys).sum())
+    df_shifts = df_shifts.loc[~_sk.isin(_excluded_keys)].copy()
+
+dq["excluded_hits"] = _excluded_hits
+dq["excluded_unmatched"] = [n for n, c in _excluded_hits.items() if c == 0]
+
 _coerce_numeric(chat_sla_df, "Wait Time", "wait_time")
 _coerce_numeric(chat_sla_df, "Abandoned After", "abandoned_after")
 _coerce_numeric(email_sla_df, "Elapsed Time (Hours)", "elapsed_hours")
@@ -695,6 +833,27 @@ email_sla_df.loc[_missing_target, "Target Hrs"] = EMAIL_TARGET_HRS
 email_sla_df["Target Hrs"] = email_sla_df["Target Hrs"].astype(float)
 dq["email_target_defaulted"] = int(_missing_target.sum())
 dq["email_target_non_default"] = int((email_sla_df["Target Hrs"] != EMAIL_TARGET_HRS).sum())
+
+# ---------------------------------------------------------------------------
+# One row per case.
+#
+# A case can carry more than one entitlement milestone, producing several rows
+# with identical timestamps but different targets (e.g. both a 1 Hour and a
+# 6 Hour milestone). Left as-is the case is scored twice, against two different
+# targets. Keep a single row per case, using the MOST LENIENT (longest) target
+# on the basis that the wider entitlement is the one actually promised.
+# ---------------------------------------------------------------------------
+if EMAIL_CASE_KEY in email_sla_df.columns:
+    email_sla_df[EMAIL_CASE_KEY] = email_sla_df[EMAIL_CASE_KEY].astype(str).str.strip()
+    _before = len(email_sla_df)
+    email_sla_df = (
+        email_sla_df.sort_values("Target Hrs", ascending=(EMAIL_MILESTONE_PREFERENCE == "strictest"))
+        .drop_duplicates(subset=[EMAIL_CASE_KEY], keep="first")
+        .sort_index()
+    )
+    dq["email_milestone_dupes"] = int(_before - len(email_sla_df))
+else:
+    dq["email_no_case_key"] = True
 
 # FIX #4: 'Completion Date' was parsed and never used. Use it to fill any missing
 # elapsed time, so a blank pre-computed column no longer silently drops emails
@@ -723,6 +882,28 @@ _starts = [s.max() for s in (df_items["Start DT"], df_presence["Start DT"],
                              chat_sla_df["Date/Time Opened"], email_sla_df["Date/Time Opened"])
            if s.notna().any()]
 DATA_ASOF = max(_ends + _starts) if (_ends or _starts) else pd.Timestamp.now()
+
+# ---------------------------------------------------------------------------
+# Work items ASSIGNED but never ACCEPTED.
+#
+# Some exports include routing attempts the agent never accepted (declined or
+# timed out). They have no Accept/Close time, so Start DT / End DT are blank or
+# carry an Excel error string, and there is no handle time. They cannot be
+# scored or timed — but the rate is a real operational signal, so it is counted
+# and shown rather than silently dropped.
+# ---------------------------------------------------------------------------
+_unaccepted = df_items["Start DT"].isna()
+if "Handle Time" in df_items.columns:
+    _unaccepted = _unaccepted | df_items["Handle Time"].isna()
+dq["items_unaccepted"] = int(_unaccepted.sum())
+if dq["items_unaccepted"]:
+    _ua = df_items.loc[_unaccepted, "Service Channel: Developer Name"]
+    dq["items_unaccepted_chat"] = int((_ua == CHAT_DEVNAME).sum())
+    dq["items_unaccepted_email"] = int((_ua == EMAIL_DEVNAME).sum())
+    _tot_chat = int((df_items["Service Channel: Developer Name"] == CHAT_DEVNAME).sum())
+    _tot_email = int((df_items["Service Channel: Developer Name"] == EMAIL_DEVNAME).sum())
+    dq["items_unaccepted_chat_pct"] = (dq["items_unaccepted_chat"] / _tot_chat * 100) if _tot_chat else 0.0
+    dq["items_unaccepted_email_pct"] = (dq["items_unaccepted_email"] / _tot_email * 100) if _tot_email else 0.0
 
 for _df, _label in ((df_items, "items"), (df_presence, "presence")):
     _open = _df["End DT"].isna() & _df["Start DT"].notna()
@@ -758,16 +939,27 @@ _age_hrs = (DATA_ASOF - email_sla_df["Date/Time Opened"]).dt.total_seconds() / 3
 # Answered -> the real elapsed time. Unanswered -> how long it has been waiting.
 email_sla_df["Effective Elapsed"] = email_sla_df["Elapsed Time (Hours)"].where(
     email_sla_df["Is Answered"], _age_hrs)
+# A case that is already CLOSED but has no completion time for its response
+# milestone cannot be measured — there is no response timestamp to compare
+# against the target, and ageing it to "now" would be meaningless because the
+# case is not actually still waiting. Excluded from the score and reported.
+if "Status" in email_sla_df.columns:
+    _closed = email_sla_df["Status"].astype(str).str.strip().str.lower().isin(EMAIL_CLOSED_STATUSES)
+else:
+    _closed = pd.Series(False, index=email_sla_df.index)
+email_sla_df["Unmeasurable"] = ~email_sla_df["Is Answered"] & _closed
+dq["email_unmeasurable"] = int(email_sla_df["Unmeasurable"].sum())
+
 # "Not yet due" is judged against the case's OWN target, not a global 1hr.
 email_sla_df["Counts Toward SLA"] = (
     email_sla_df["Effective Elapsed"].notna()
+    & ~email_sla_df["Unmeasurable"]
     & (email_sla_df["Is Answered"] | (_age_hrs > email_sla_df["Target Hrs"]))
 )
 
-dq["email_unanswered_breach"] = int((~email_sla_df["Is Answered"]
-                                     & (_age_hrs > email_sla_df["Target Hrs"])).sum())
-dq["email_unanswered_not_due"] = int((~email_sla_df["Is Answered"]
-                                      & (_age_hrs <= email_sla_df["Target Hrs"])).sum())
+_still_open = ~email_sla_df["Is Answered"] & ~email_sla_df["Unmeasurable"]
+dq["email_unanswered_breach"] = int((_still_open & (_age_hrs > email_sla_df["Target Hrs"])).sum())
+dq["email_unanswered_not_due"] = int((_still_open & (_age_hrs <= email_sla_df["Target Hrs"])).sum())
 dq["email_no_response_time"] = int((~email_sla_df["Counts Toward SLA"]
                                     & email_sla_df["Is Answered"]).sum())
 
@@ -852,13 +1044,17 @@ st.sidebar.header("Filter Options")
 # FIX #19 (and a correctness improvement): the selectable range now spans every
 # source, not just chat.csv. Previously a period with email/work-item activity
 # but no chats was unreachable.
+# Take min/max on the DATETIME series, then convert. Calling .dt.date first
+# turns NaT into a float nan, giving a column of mixed date/float values whose
+# .min() raises TypeError — reachable as soon as an export contains an
+# unparseable timestamp (e.g. an Excel '#VALUE!' string).
 _all_dates = [
-    chat_sla_df["Date/Time Opened"].dt.date,
-    email_sla_df["Date/Time Opened"].dt.date,
-    df_items["Start DT"].dt.date,
+    chat_sla_df["Date/Time Opened"],
+    email_sla_df["Date/Time Opened"],
+    df_items["Start DT"],
 ]
-_mins = [s.min() for s in _all_dates if s.notna().any()]
-_maxs = [s.max() for s in _all_dates if s.notna().any()]
+_mins = [s.min().date() for s in _all_dates if s.notna().any()]
+_maxs = [s.max().date() for s in _all_dates if s.notna().any()]
 if not _mins:
     st.error("No usable dates found in chat.csv, email.csv or report_items.csv.")
     st.stop()
@@ -931,6 +1127,38 @@ with st.expander("ℹ️ Data files & quality"):
     if dq.get("elapsed_derived_from_completion"):
         notes.append(f"**{dq['elapsed_derived_from_completion']}** emails had a blank elapsed time, "
                      f"derived from Completion Date − Date/Time Opened.")
+    for _lbl, _rn in _col_renames.items():
+        notes.append(f"`{_lbl}`: column name(s) auto-matched — {', '.join(f'`{r}`' for r in _rn)}. "
+                     f"The export renamed these; the dashboard adapted, but worth keeping consistent.")
+    for _lbl, _mc in _col_missing.items():
+        notes.append(f"⚠️ `{_lbl}` is missing expected column(s): "
+                     + ", ".join(f"`{c}`" for c in _mc) + ".")
+    if dq.get("items_unaccepted"):
+        notes.append(
+            f"**{dq['items_unaccepted']:,}** work item(s) were assigned but never accepted "
+            f"(no accept/close time, no handle time) — "
+            f"{dq.get('items_unaccepted_chat', 0):,} chat ({dq.get('items_unaccepted_chat_pct', 0):.2f}% of chat) "
+            f"and {dq.get('items_unaccepted_email', 0):,} email ({dq.get('items_unaccepted_email_pct', 0):.2f}% of email). "
+            f"They cannot be timed so they are excluded from AHT and utilisation, but the rate is "
+            f"worth watching — these are routing attempts an agent declined or let time out."
+        )
+    if _excluded_keys:
+        _hits = {n: c for n, c in dq.get("excluded_hits", {}).items() if c}
+        if _hits:
+            notes.append("Excluded owners removed from every metric: "
+                         + ", ".join(f"**{n}** ({c:,} rows)" for n, c in sorted(_hits.items())) + ".")
+        _un = dq.get("excluded_unmatched") or []
+        if _un:
+            notes.append("⚠️ These names are in `EXCLUDED_OWNERS` but **match no rows in any file**, so "
+                         "they are having no effect — check the spelling against the agent names in "
+                         "report_items.csv, or they may simply not appear in this data: "
+                         + ", ".join(f"**{n}**" for n in _un) + ".")
+        if dq.get("exclusion_no_owner_col"):
+            notes.append("⚠️ No owner column found in: "
+                         + ", ".join(f"`{s}`" for s in dq["exclusion_no_owner_col"])
+                         + ". Rows from these sources **cannot be filtered by owner** — for the email "
+                           "milestone export, add a *Case Owner* column to make the exclusion apply "
+                           "to the Email SLA as well as to volume and utilisation.")
     if dq.get("cases_rolled_up"):
         notes.append(f"**{dq['cases_rolled_up']:,}** report_items rows were repeat routings of a case "
                      f"already counted. Volume counts distinct cases; handle time sums every touch.")
@@ -940,6 +1168,17 @@ with st.expander("ℹ️ Data files & quality"):
     if dq.get("handle_time_used"):
         notes.append(f"Handle time taken from the exact 'Handle Time' column for "
                      f"**{dq['handle_time_used']:,}** rows (Start/End DT are minute-resolution).")
+    if dq.get("email_milestone_dupes"):
+        notes.append(f"**{dq['email_milestone_dupes']:,}** duplicate milestone row(s) collapsed so each "
+                     f"case is scored once, keeping the "
+                     f"{'longest' if EMAIL_MILESTONE_PREFERENCE == 'lenient' else 'shortest'} target.")
+    if dq.get("email_unmeasurable"):
+        notes.append(f"**{dq['email_unmeasurable']:,}** case(s) are closed but their response milestone "
+                     f"never completed (no completion time). Excluded from the SLA as unmeasurable — "
+                     f"they are neither a confirmed hit nor a datable miss.")
+    if dq.get("email_no_case_key"):
+        notes.append(f"ℹ️ email.csv has no '{EMAIL_CASE_KEY}' column, so it cannot be reconciled "
+                     f"case-by-case against report_items.csv.")
     if dq.get("email_target_non_default"):
         notes.append(f"**{dq['email_target_non_default']:,}** email case(s) have a response target "
                      f"other than {EMAIL_TARGET_HRS:.0f}hr and are scored against their own target.")
@@ -1380,6 +1619,25 @@ with _bc2:
              f"{n_email_carried_in:,} carried in from before. "
              f"{n_email_not_due:,} unanswered email(s) are not yet past target and are excluded.",
     )
+    # The penalty term uses the MEAN response time by choice. On a long-tailed
+    # distribution the mean can sit far above the median and max out the penalty
+    # on its own, which pins the score near zero regardless of the hit rate.
+    # Say so, rather than letting it read as a data fault.
+    if n_email_total:
+        _med = float(email_scored_p["Effective Elapsed"].median())
+        _mean = float(sla_comp_email_avg_resp_hrs or 0.0)
+        _excess = max(_mean - float(email_scored_p["Target Hrs"].mean()), 0.0)
+        _pen_frac = min(_excess / EMAIL_RESP_TOLERANCE_HRS, 1.0) if EMAIL_RESP_TOLERANCE_HRS else 0.0
+        if _pen_frac >= 0.5 and _mean > 2 * max(_med, 0.01):
+            st.caption(
+                f"⚠️ The response-time penalty is at **{_pen_frac:.0%} of maximum**: the mean is {_mean:.1f}h against a "
+                f"median of {_med:.1f}h, so a small number of long-running cases are setting the "
+                f"score on their own. {sla_comp_email_in_target_pct:.0f}% of cases still met target. "
+                f"To make the score track typical performance, change the penalty statistic from the "
+                f"mean to a percentile, or cap each case before averaging "
+                f"(`email_sla_from_slice`)."
+            )
+
     _ec2.metric(
         "Avg Response Time", fmt_hhmm(sla_comp_email_avg_resp_hrs * 3600
                                       if sla_comp_email_avg_resp_hrs is not None
@@ -1389,15 +1647,145 @@ with _bc2:
              f"scaled linearly between. Across {n_email_total:,} emails.",
     )
 
+# ---------------------------------------------------------------------------
+# Email SLA split by Case Origin.
+#
+# Different origins can behave like completely different services — a combined
+# score averages them into a number that describes neither. Worth checking
+# before reading the headline figure.
+# ---------------------------------------------------------------------------
+if n_email_total and "Case Origin" in email_scored_p.columns and email_scored_p["Case Origin"].nunique() > 1:
+    _orig_rows = []
+    for _o, _g in email_scored_p.groupby("Case Origin"):
+        _orig_rows.append({
+            "Case Origin": str(_o),
+            "Cases": len(_g),
+            "Median (h)": float(_g["Effective Elapsed"].median()),
+            "Mean (h)": float(_g["Effective Elapsed"].mean()),
+            "p90 (h)": float(_g["Effective Elapsed"].quantile(0.90)),
+            "% within target": float((_g["Effective Elapsed"] <= _g["Target Hrs"]).mean() * 100),
+            "SLA": email_sla_from_slice(_g),
+        })
+    _orig = pd.DataFrame(_orig_rows).sort_values("Cases", ascending=False)
+
+    _spread = _orig["SLA"].max() - _orig["SLA"].min()
+    with st.expander(f"📬 Email SLA by case origin"
+                     f"{'  ⚠️ origins differ by ' + f'{_spread:.0f}' + ' points' if _spread >= 20 else ''}",
+                     expanded=bool(_spread >= 40)):
+        st.dataframe(
+            _orig.style.format({"Cases": "{:,}", "Median (h)": "{:.2f}", "Mean (h)": "{:.2f}",
+                                "p90 (h)": "{:.2f}", "% within target": "{:.1f}", "SLA": "{:.1f}"},
+                               na_rep="—"),
+            width="stretch", hide_index=True,
+        )
+        if _spread >= 20:
+            _best = _orig.loc[_orig["SLA"].idxmax()]
+            _worst = _orig.loc[_orig["SLA"].idxmin()]
+            st.warning(
+                f"**These origins are not one service.** “{_best['Case Origin']}” scores "
+                f"{_best['SLA']:.1f} on {_best['Cases']:,} cases while “{_worst['Case Origin']}” "
+                f"scores {_worst['SLA']:.1f} on {_worst['Cases']:,} — median "
+                f"{_best['Median (h)']:.2f}h against {_worst['Median (h)']:.2f}h. The combined "
+                f"figure of {email_weighted:.1f} describes neither. Consider tracking them "
+                f"separately, or setting different targets per origin."
+            )
+
 # FIX #14: surface the two populations so a divergence is visible.
 _wt_chat, _wt_email = int(df_daily["Chat SLA Wt"].sum()), int(df_daily["Email SLA Wt"].sum())
-if _wt_chat and chat_total and abs(_wt_chat - chat_total) / _wt_chat > 0.05:
-    st.caption(f"ℹ️ chat.csv has {_wt_chat:,} chats this period while report_items.csv has "
-               f"{chat_total:,} chat work items. SLA is scored and weighted on chat.csv "
-               f"(which includes missed chats); the volume tiles count work items.")
-if _wt_email and email_total and abs(_wt_email - email_total) / _wt_email > 0.05:
-    st.caption(f"ℹ️ email.csv has {_wt_email:,} emails this period while report_items.csv has "
-               f"{email_total:,} email work items.")
+
+# ---------------------------------------------------------------------------
+# Volume vs SLA-population reconciliation.
+#
+# The volume tiles come from report_items.csv (cases an agent handled) while the
+# SLA comes from chat.csv / email.csv. Neither file is a subset of the other, so
+# the two counts legitimately differ — but a LARGE positive gap on email means
+# cases were routed and then never appeared in email.csv, which in a
+# resolved-only export means they are still open. Those cases are by definition
+# past target, so excluding them flatters the score. This panel makes the size
+# of that blind spot explicit instead of leaving it to be discovered.
+# ---------------------------------------------------------------------------
+with st.expander("🧮 Volume vs SLA population — why these two numbers differ"):
+    _rec = pd.DataFrame([
+        {"Channel": "Chat",
+         "Cases handled (tile)": chat_total,
+         "Contacts scored for SLA": _wt_chat,
+         "Difference": _wt_chat - chat_total},
+        {"Channel": "Email",
+         "Cases handled (tile)": email_total,
+         "Contacts scored for SLA": _wt_email,
+         "Difference": _wt_email - email_total},
+    ])
+    st.dataframe(_rec.style.format({c: "{:,}" for c in _rec.columns if c != "Channel"}),
+                 width="stretch", hide_index=True)
+
+    st.markdown(
+        f"""
+The two columns count different things and **neither file is a subset of the other**:
+
+- **Cases handled** — distinct cases in `report_items.csv` first picked up by an agent in this
+  period. A case appears here only if it was routed through Omni-Channel.
+- **Contacts scored** — rows in `chat.csv` / `email.csv` for this period. For email that is
+  {n_email_opened_here:,} opened in the period plus {n_email_carried_in:,} opened earlier but
+  answered inside it.
+
+Nothing is being silently discarded: every one of the {_wt_email:,} emails in scope was scored.
+"""
+    )
+
+    # ----- Exact reconciliation, when email.csv carries the Case Number -----
+    if EMAIL_CASE_KEY in email_sla_df.columns and HAS_CASE_KEY:
+        _routed = set(
+            df_cases.loc[df_cases["Service Channel: Developer Name"] == EMAIL_DEVNAME, CASE_KEY]
+            .astype(str).str.strip()
+        ) if CASE_KEY in df_cases.columns else set()
+        _routed_period = set(
+            cases_period.loc[cases_period["Service Channel: Developer Name"] == EMAIL_DEVNAME, CASE_KEY]
+            .astype(str).str.strip()
+        ) if CASE_KEY in cases_period.columns else set()
+        _in_export = set(email_sla_df[EMAIL_CASE_KEY].astype(str).str.strip())
+
+        _matched = _routed_period & _in_export
+        _missing = _routed_period - _in_export
+        _opened_here_keys = set(
+            email_sla_df.loc[(email_sla_df["Date/Time Opened"] >= ts_start)
+                             & (email_sla_df["Date/Time Opened"] < ts_end),
+                             EMAIL_CASE_KEY].astype(str).str.strip())
+        _never_routed = _opened_here_keys - _routed
+
+        st.markdown("**Exact reconciliation** (joined on Case Number ↔ Work Item: Name)")
+        st.dataframe(pd.DataFrame([
+            {"Measure": "Cases routed to an agent this period", "Cases": len(_routed_period)},
+            {"Measure": "…also present in the email export", "Cases": len(_matched)},
+            {"Measure": "…MISSING from the email export", "Cases": len(_missing)},
+            {"Measure": "Cases in the export, opened this period, never routed",
+             "Cases": len(_never_routed)},
+        ]).style.format({"Cases": "{:,}"}), width="stretch", hide_index=True)
+
+        if _routed_period and len(_missing) > max(10, 0.02 * len(_routed_period)):
+            st.warning(
+                f"**{len(_missing):,} cases ({len(_missing)/len(_routed_period):.1%}) were routed to "
+                f"an agent this period but do not appear in the email export at all.**\n\n"
+                f"The export is filtered to closed cases, so these are cases still open when it ran. "
+                f"Each is already past its response target, so excluding them makes the Email SLA "
+                f"look better than reality. Re-export **without the status filter** to close this gap "
+                f"— the dashboard already knows how to age an open case and count it as a breach "
+                f"once it passes target."
+            )
+        if _never_routed:
+            st.caption(
+                f"The {len(_never_routed):,} never-routed cases are the opposite effect — resolved "
+                f"without passing through Omni-Channel, so they reach the email export but never "
+                f"reach report_items.csv. They partly offset the figure above, which is why the raw "
+                f"difference between the two columns understates both flows."
+            )
+    else:
+        _email_gap = email_total - n_email_opened_here
+        if email_total and _email_gap > max(20, 0.05 * email_total):
+            st.warning(
+                f"**{_email_gap:,} email cases were handled in this period but never appear in "
+                f"email.csv** ({_email_gap / email_total:.0%} of the tile). Add a **Case Number** "
+                f"column to the email export to reconcile these exactly instead of by difference."
+            )
 
 # FIX #22: the daily component columns used to be computed and never shown.
 with st.expander("Daily SLA detail"):
