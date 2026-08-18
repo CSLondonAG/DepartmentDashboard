@@ -144,8 +144,12 @@ EMAIL_DEVNAME = "casesChannel"
 # questions. Patterns are tried in order; first match wins; a question matching
 # none is reported so new survey questions do not silently vanish.
 SURVEY_QUESTION_PATTERNS = [
-    ("NPS",  r"\brecommend\b|\bhow likely are you to recommend\b"),
-    ("FCR",  r"\bfirst contact\b|\bresolved (?:on|at) first\b|\bresolve[d]? your (?:issue|query|problem)\b"),
+    ("NPS",  r"\brecommend\b"),
+    ("FCR",  r"\bresolved by the agent\b"
+             r"|\bfirst contact\b"
+             r"|\bresolved (?:on|at) first\b"
+             r"|\bwas (?:the|your) (?:issue|query|problem|enquiry|inquiry|case|request|question)\b.*\bresolv"
+             r"|\bresolve[d]? your (?:issue|query|problem|enquiry|inquiry|case|request|question)\b"),
     ("CSAT", r"\bsatisf(?:ied|action)\b|\bhow would you rate\b"),
 ]
 
@@ -1291,6 +1295,12 @@ def _leading_int(x) -> Optional[int]:
 
 
 def _bool_yes_no(x) -> Optional[bool]:
+    """Parse a yes/no response.
+
+    Tolerates decorated answers ("Yes - it was resolved", "No, I had to call
+    back"), which an exact-match-only version silently turned into None and
+    therefore dropped from the FCR denominator.
+    """
     if pd.isna(x):
         return None
     s = str(x).strip().lower()
@@ -1298,6 +1308,11 @@ def _bool_yes_no(x) -> Optional[bool]:
         return True
     if s in ("no", "n", "false", "0"):
         return False
+    # Leading token only: "not resolved" must NOT read as "no" (there is no word
+    # boundary between "no" and "t"), while "No, I had to call back" must.
+    m = re.match(r"^(yes|no|y|n|true|false)\b", s)
+    if m:
+        return m.group(1) in ("yes", "y", "true")
     return None
 
 
@@ -1340,10 +1355,14 @@ else:
     survey_q["FCR_bool"] = survey_q["Response"].where(survey_q["_metric"] == "FCR").apply(_bool_yes_no)
 
     # FIX #4: Channel is now actually used (per-channel breakdown below).
-    survey_q["Channel"] = (
-        survey_q["Survey Question: Survey"].astype(str)
-        .str.extract(r"(Email|Chat)", expand=False).fillna("Other")
-    )
+    # Fall back to the question title, since channel-specific wordings such as
+    # "Was the issue reported in the chat resolved by the agent?" name the
+    # channel even when the survey name does not.
+    _ch_survey = (survey_q["Survey Question: Survey"].astype(str)
+                  .str.extract(r"(?i)\b(Email|Chat)\b", expand=False).str.capitalize())
+    _ch_title = (survey_q["Survey Question: Question Title"].astype(str)
+                 .str.extract(r"(?i)\b(Email|Chat)\b", expand=False).str.capitalize())
+    survey_q["Channel"] = _ch_survey.fillna(_ch_title).fillna("Other")
 
     # FIX #11: validate the declared scales instead of assuming them.
     _scale_warnings = []
@@ -1371,10 +1390,22 @@ else:
         v = s.dropna()
         return v.iloc[0] if len(v) else None
 
+    def _first_channel(s):
+        """Prefer a real channel over the 'Other' placeholder.
+
+        A respondent's CSAT question may name no channel while their FCR
+        question does; taking the literal first value would label them 'Other'.
+        """
+        v = s.dropna()
+        real = v[v != "Other"]
+        if len(real):
+            return real.iloc[0]
+        return v.iloc[0] if len(v) else "Other"
+
     survey = survey_q.groupby("Survey Taker: ID", as_index=False).agg(
         **{
             "Survey Date": ("Survey Taker: Created Date", "min"),
-            "Channel": ("Channel", _first_or_none),
+            "Channel": ("Channel", _first_channel),
             "NPS_raw": ("NPS_raw", _mean_or_none),
             "CSAT_raw": ("CSAT_raw", _mean_or_none),
             "FCR_bool": ("FCR_bool", _first_or_none),
@@ -1401,6 +1432,51 @@ else:
         )
     if _undated:
         st.caption(f"{_undated} survey(s) had an unparseable date and are excluded.")
+
+    # ---------------------------------------------------------------------
+    # Question-mapping diagnostic.
+    # A silently mis-mapped question is the easiest way for CSAT/NPS/FCR to go
+    # quietly wrong, and the "unmapped" warning above only catches questions
+    # that match NOTHING — it cannot catch a question mapped to the WRONG
+    # metric. This table shows every distinct question title, what it mapped
+    # to, and how many answers were parsed, so both failure modes are visible.
+    # ---------------------------------------------------------------------
+    with st.expander("🔍 Survey question mapping — check this if CSAT/NPS/FCR look wrong"):
+        _rows = []
+        for _title, _grp in survey_q.groupby("Survey Question: Question Title", dropna=False):
+            _m = _grp["_metric"].dropna()
+            _m = _m.iloc[0] if len(_m) else None
+            if _m == "NPS":
+                _parsed = int(_grp["NPS_raw"].notna().sum())
+            elif _m == "CSAT":
+                _parsed = int(_grp["CSAT_raw"].notna().sum())
+            elif _m == "FCR":
+                _parsed = int(_grp["FCR_bool"].notna().sum())
+            else:
+                _parsed = 0
+            _sample = _grp["Response"].dropna()
+            _rows.append({
+                "Question": str(_title),
+                "Mapped to": _m if _m else "— excluded —",
+                "Rows": len(_grp),
+                "Answers parsed": _parsed,
+                "Example response": str(_sample.iloc[0]) if len(_sample) else "",
+            })
+        _map_df = pd.DataFrame(_rows).sort_values(["Mapped to", "Rows"], ascending=[True, False])
+        st.dataframe(_map_df, width="stretch", hide_index=True)
+
+        # A question that mapped to a metric but parsed almost nothing means the
+        # RESPONSE format is unexpected, not the question title.
+        _bad = _map_df[(_map_df["Mapped to"] != "— excluded —")
+                       & (_map_df["Answers parsed"] < _map_df["Rows"] * 0.5)]
+        if not _bad.empty:
+            st.warning(
+                "These questions were mapped but fewer than half their responses could be "
+                "parsed — check the response format (FCR expects Yes/No; CSAT and NPS expect "
+                "a leading number): "
+                + "; ".join(f"“{r['Question']}” ({r['Answers parsed']}/{r['Rows']} parsed)"
+                            for _, r in _bad.iterrows())
+            )
 
     if survey_period.empty:
         st.info("No survey responses in the selected date range.")
