@@ -374,13 +374,29 @@ def chat_sla_from_slice(g: pd.DataFrame) -> Optional[float]:
     return clamp((raw / CHAT_RESCALE_K) * SLA_SCALE)
 
 
+def email_scorable(g: pd.DataFrame) -> pd.DataFrame:
+    """The subset of an email slice that counts toward the SLA.
+
+    Drops emails with no usable response time, and unanswered emails that are
+    not yet past target ("not yet due"). Everything remaining is scored on
+    'Effective Elapsed', so the reward term and the penalty term always refer to
+    the same set of emails.
+    """
+    if g is None or len(g) == 0:
+        return g
+    if "Counts Toward SLA" not in g.columns:
+        return g
+    return g[g["Counts Toward SLA"]]
+
+
 def email_sla_from_slice(g: pd.DataFrame) -> Optional[float]:
-    """Email SLA score 0-100 for a slice of email.csv. None if the slice is empty."""
+    """Email SLA score 0-100 for a slice of email.csv. None if nothing scorable."""
+    g = email_scorable(g)
     if g is None or len(g) == 0:
         return None
 
     total = len(g)
-    elapsed = g["Elapsed Time (Hours)"]
+    elapsed = g["Effective Elapsed"] if "Effective Elapsed" in g.columns else g["Elapsed Time (Hours)"]
     frac_in_target = float((elapsed <= EMAIL_TARGET_HRS).sum()) / total
     avg_resp_hr = elapsed.mean()
     avg_resp_hr = 0.0 if pd.isna(avg_resp_hr) else float(avg_resp_hr)
@@ -671,9 +687,13 @@ if "Completion Date" in email_sla_df.columns:
 # from availability (NaT > ts is False) and from volume. Clamp instead, to the
 # latest end timestamp seen anywhere in the export ("as of").
 # ---------------------------------------------------------------------------
-_ends = [s.max() for s in (df_items["End DT"], df_presence["End DT"]) if s.notna().any()]
-_starts = [s.max() for s in (df_items["Start DT"], df_presence["Start DT"]) if s.notna().any()]
-DATA_ASOF = max(_ends) if _ends else (max(_starts) if _starts else pd.Timestamp.now())
+_ends = [s.max() for s in (df_items["End DT"], df_presence["End DT"],
+                           email_sla_df.get("Completion Date", pd.Series(dtype="datetime64[ns]")))
+         if s.notna().any()]
+_starts = [s.max() for s in (df_items["Start DT"], df_presence["Start DT"],
+                             chat_sla_df["Date/Time Opened"], email_sla_df["Date/Time Opened"])
+           if s.notna().any()]
+DATA_ASOF = max(_ends + _starts) if (_ends or _starts) else pd.Timestamp.now()
 
 for _df, _label in ((df_items, "items"), (df_presence, "presence")):
     _open = _df["End DT"].isna() & _df["Start DT"].notna()
@@ -681,6 +701,60 @@ for _df, _label in ((df_items, "items"), (df_presence, "presence")):
     _df["End DT Clamped"] = _df["End DT"].where(~_open, DATA_ASOF)
     _df["Is Open"] = _open
     dq[f"no_start_{_label}"] = int(_df["Start DT"].isna().sum())
+
+# ---------------------------------------------------------------------------
+# Email response timestamp, effective elapsed time, and "counts toward SLA".
+#
+# An email has a response time from either source: an explicit Completion Date,
+# or Date/Time Opened + Elapsed Time (Hours). Deriving one canonical column lets
+# the SLA use the OPENED-OR-RESPONDED window (see email_window_slice) and lets
+# the two halves of the score agree about which emails exist.
+#
+# Unanswered emails: previously an email with no reply counted as a failure in
+# the "replied <=1hr" term but was skipped by .mean() in the average-response
+# term — the two halves of the same score disagreed. Now an unanswered email
+# counts as a breach ONLY once it is already past target; one that arrived more
+# recently than the target is "not yet due" and is excluded from both terms.
+# ---------------------------------------------------------------------------
+if "Completion Date" not in email_sla_df.columns:
+    email_sla_df["Completion Date"] = pd.NaT
+
+_from_elapsed = email_sla_df["Date/Time Opened"] + pd.to_timedelta(
+    email_sla_df["Elapsed Time (Hours)"], unit="h", errors="coerce")
+email_sla_df["Response DT"] = email_sla_df["Completion Date"].fillna(_from_elapsed)
+
+email_sla_df["Is Answered"] = email_sla_df["Response DT"].notna()
+_age_hrs = (DATA_ASOF - email_sla_df["Date/Time Opened"]).dt.total_seconds() / 3600.0
+
+# Answered -> the real elapsed time. Unanswered -> how long it has been waiting.
+email_sla_df["Effective Elapsed"] = email_sla_df["Elapsed Time (Hours)"].where(
+    email_sla_df["Is Answered"], _age_hrs)
+email_sla_df["Counts Toward SLA"] = (
+    email_sla_df["Effective Elapsed"].notna()
+    & (email_sla_df["Is Answered"] | (_age_hrs > EMAIL_TARGET_HRS))
+)
+
+dq["email_unanswered_breach"] = int((~email_sla_df["Is Answered"] & (_age_hrs > EMAIL_TARGET_HRS)).sum())
+dq["email_unanswered_not_due"] = int((~email_sla_df["Is Answered"] & (_age_hrs <= EMAIL_TARGET_HRS)).sum())
+dq["email_no_response_time"] = int((~email_sla_df["Counts Toward SLA"]
+                                    & email_sla_df["Is Answered"]).sum())
+
+
+def email_window_slice(df: pd.DataFrame, w_start, w_end) -> pd.DataFrame:
+    """Emails OPENED **or** RESPONDED TO within [w_start, w_end).
+
+    An email opened before the window but answered inside it is this window's
+    work; an email opened inside the window but answered after it is also this
+    window's work. Each row is attributed to exactly ONE timestamp inside the
+    window — its open time if it was opened here, otherwise its response time —
+    so daily buckets partition the period slice instead of double-counting.
+    """
+    opened_in = (df["Date/Time Opened"] >= w_start) & (df["Date/Time Opened"] < w_end)
+    resp_in = df["Response DT"].notna() & (df["Response DT"] >= w_start) & (df["Response DT"] < w_end)
+    keep = opened_in | resp_in
+    sel = df.loc[keep].copy()
+    sel["SLA Timestamp"] = sel["Date/Time Opened"].where(opened_in.loc[keep], sel["Response DT"])
+    return sel
 
 
 # =============================================================================
@@ -770,6 +844,16 @@ with st.expander("ℹ️ Data files & quality"):
     if dq.get("elapsed_derived_from_completion"):
         notes.append(f"**{dq['elapsed_derived_from_completion']}** emails had a blank elapsed time, "
                      f"derived from Completion Date − Date/Time Opened.")
+    if dq.get("email_unanswered_breach"):
+        notes.append(f"**{dq['email_unanswered_breach']}** email(s) have no response and are already "
+                     f"past the {EMAIL_TARGET_HRS:.0f}hr target — counted as SLA breaches, using "
+                     f"time-waiting-so-far as their elapsed time.")
+    if dq.get("email_unanswered_not_due"):
+        notes.append(f"**{dq['email_unanswered_not_due']}** email(s) have no response but are not yet "
+                     f"past target — excluded from the SLA as 'not yet due'.")
+    if dq.get("email_no_response_time"):
+        notes.append(f"⚠️ **{dq['email_no_response_time']}** email(s) look answered but have no usable "
+                     f"response time and cannot be scored.")
     if dq.get("elapsed_disagrees_with_completion"):
         notes.append(f"⚠️ **{dq['elapsed_disagrees_with_completion']}** emails have an 'Elapsed Time (Hours)' "
                      f"that disagrees with Completion Date by more than 30 minutes.")
@@ -815,11 +899,17 @@ email_open_n = email_total - len(email_closed)
 chat_sla_p = chat_sla_df[
     (chat_sla_df["Date/Time Opened"] >= ts_start) & (chat_sla_df["Date/Time Opened"] < ts_end)
 ].copy()
-email_sla_p = email_sla_df[
+# Email SLA population: opened OR responded to within the period.
+email_sla_p = email_window_slice(email_sla_df, ts_start, ts_end)
+email_scored_p = email_scorable(email_sla_p)
+
+# Arrivals-only slice, for the contact-volume heatmap (that chart is about when
+# contacts ARRIVE, so it must not include emails that merely closed here).
+email_opened_p = email_sla_df[
     (email_sla_df["Date/Time Opened"] >= ts_start) & (email_sla_df["Date/Time Opened"] < ts_end)
 ].copy()
 
-avg_resp_hrs = email_sla_p["Elapsed Time (Hours)"].mean() if len(email_sla_p) else None
+avg_resp_hrs = email_scored_p["Effective Elapsed"].mean() if len(email_scored_p) else None
 # FIX #27: no emails now shows a dash, not a perfect 00:00:00.
 avg_resp_secs = None if (avg_resp_hrs is None or pd.isna(avg_resp_hrs)) else avg_resp_hrs * 3600
 
@@ -951,7 +1041,10 @@ for d in pd.date_range(start_date, end_date):
     day = d.date()
 
     cd = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == day]
-    ed = email_sla_p[email_sla_p["Date/Time Opened"].dt.date == day]
+    # Attributed to exactly one day inside the period, so daily weights sum to
+    # the period weight even though the slice is an opened-OR-responded union.
+    ed = email_sla_p[email_sla_p["SLA Timestamp"].dt.date == day]
+    ed_scored = email_scorable(ed)
 
     sla_c = chat_sla_from_slice(cd)
     sla_e = email_sla_from_slice(ed)
@@ -961,17 +1054,19 @@ for d in pd.date_range(start_date, end_date):
         "Date": d.normalize(),
         "Chat SLA": sla_c,
         "Email SLA": sla_e,
-        # FIX #14: weight by the population the score was computed from.
+        # Weight by the population each score was computed from...
         "Chat SLA Wt": len(cd),
-        "Email SLA Wt": len(ed),
-        # Work-item volumes, kept for reporting (different population).
+        "Email SLA Wt": len(ed_scored),
+        # ...and show the report_items work-item volume alongside it, so the two
+        # populations can be compared rather than silently conflated.
         "Chat Vol": int((chat_df["Start DT"].dt.date == day).sum()),
         "Email Vol": int((email_df["Start DT"].dt.date == day).sum()),
+        "Email Not Due": int(len(ed) - len(ed_scored)),
         "Chat ≤60s %": round(float((_ans["Wait Time"] <= CHAT_ANSWER_TARGET_SEC).mean() * 100), 1) if len(_ans) else None,
         "Chat Avg Wait (s)": round(float(_ans["Wait Time"].mean()), 1) if len(_ans) else None,
         "Chat Abandon %": round(float((cd["Abandoned After"] > CHAT_ABANDON_AFTER_SEC).mean() * 100), 1) if len(cd) else None,
-        "Email ≤1hr %": round(float((ed["Elapsed Time (Hours)"] <= EMAIL_TARGET_HRS).mean() * 100), 1) if len(ed) else None,
-        "Email Avg Resp (h)": round(float(ed["Elapsed Time (Hours)"].mean()), 3) if len(ed) else None,
+        "Email ≤1hr %": round(float((ed_scored["Effective Elapsed"] <= EMAIL_TARGET_HRS).mean() * 100), 1) if len(ed_scored) else None,
+        "Email Avg Resp (h)": round(float(ed_scored["Effective Elapsed"].mean()), 3) if len(ed_scored) else None,
     })
 
 df_daily = pd.DataFrame(daily)
@@ -1006,10 +1101,24 @@ sla_comp_chat_in_target_pct = (n_chat_in_target / n_chat_answered * 100) if n_ch
 sla_comp_chat_avg_wait_secs = _cw_p["Wait Time"].mean() if n_chat_answered else None
 sla_comp_chat_abandon_pct = (n_chat_abandoned / n_chat_total * 100) if n_chat_total else None
 
-n_email_total = len(email_sla_p)
-n_email_in_target = int((email_sla_p["Elapsed Time (Hours)"] <= EMAIL_TARGET_HRS).sum())
+n_email_total = len(email_scored_p)
+n_email_in_window = len(email_sla_p)
+n_email_not_due = n_email_in_window - n_email_total
+n_email_in_target = int((email_scored_p["Effective Elapsed"] <= EMAIL_TARGET_HRS).sum()) if n_email_total else 0
 sla_comp_email_in_target_pct = (n_email_in_target / n_email_total * 100) if n_email_total else None
-sla_comp_email_avg_resp_hrs = email_sla_p["Elapsed Time (Hours)"].mean() if n_email_total else None
+sla_comp_email_avg_resp_hrs = email_scored_p["Effective Elapsed"].mean() if n_email_total else None
+
+# Composition of the email SLA population, for the tooltip and the QA panel.
+if n_email_total:
+    _opened_here = ((email_scored_p["Date/Time Opened"] >= ts_start)
+                    & (email_scored_p["Date/Time Opened"] < ts_end))
+    n_email_opened_here = int(_opened_here.sum())
+    n_email_carried_in = int((~_opened_here).sum())
+    n_email_answered_after = int((_opened_here
+                                  & (email_scored_p["Response DT"] >= ts_end)).sum())
+    n_email_unanswered = int((~email_scored_p["Is Answered"]).sum())
+else:
+    n_email_opened_here = n_email_carried_in = n_email_answered_after = n_email_unanswered = 0
 
 
 # =============================================================================
@@ -1125,8 +1234,12 @@ with _bc2:
     _ec1, _ec2 = st.columns(2)
     _ec1.metric(
         "Replied ≤1hr", fmt_pct(sla_comp_email_in_target_pct),
-        help=f"{n_email_in_target:,} of {n_email_total:,} emails replied within "
-             f"{EMAIL_TARGET_HRS:.0f}hr (weight +{W_EMAIL_IN_TARGET})",
+        help=f"{n_email_in_target:,} of {n_email_total:,} scored emails replied within "
+             f"{EMAIL_TARGET_HRS:.0f}hr (weight +{W_EMAIL_IN_TARGET}). Population = emails "
+             f"opened OR responded to in the period: {n_email_opened_here:,} opened here "
+             f"({n_email_answered_after:,} of them answered after the period ends) and "
+             f"{n_email_carried_in:,} carried in from before. "
+             f"{n_email_not_due:,} unanswered email(s) are not yet past target and are excluded.",
     )
     _ec2.metric(
         "Avg Response Time", fmt_hhmm(sla_comp_email_avg_resp_hrs * 3600
@@ -1149,11 +1262,19 @@ if _wt_email and email_total and abs(_wt_email - email_total) / _wt_email > 0.05
 
 # FIX #22: the daily component columns used to be computed and never shown.
 with st.expander("Daily SLA detail"):
+    # Both populations are shown side by side: "SLA Wt" is what the score was
+    # computed on, "Vol" is the report_items work-item count for the same day.
     _detail = df_daily[[
-        "Date", "Chat SLA", "Chat SLA Wt", "Chat ≤60s %", "Chat Avg Wait (s)", "Chat Abandon %",
-        "Email SLA", "Email SLA Wt", "Email ≤1hr %", "Email Avg Resp (h)", "Weighted SLA",
+        "Date", "Chat SLA", "Chat SLA Wt", "Chat Vol", "Chat ≤60s %", "Chat Avg Wait (s)",
+        "Chat Abandon %", "Email SLA", "Email SLA Wt", "Email Vol", "Email Not Due",
+        "Email ≤1hr %", "Email Avg Resp (h)", "Weighted SLA",
     ]].copy()
     _detail["Date"] = _detail["Date"].dt.strftime("%a %d %b")
+    _detail = _detail.rename(columns={
+        "Chat SLA Wt": "Chat scored", "Chat Vol": "Chat items",
+        "Email SLA Wt": "Email scored", "Email Vol": "Email items",
+        "Email Not Due": "Email not due",
+    })
     st.dataframe(
         _detail.style.format({
             "Chat SLA": "{:.1f}", "Email SLA": "{:.1f}", "Weighted SLA": "{:.1f}",
@@ -1161,6 +1282,12 @@ with st.expander("Daily SLA detail"):
             "Email ≤1hr %": "{:.1f}", "Chat Avg Wait (s)": "{:.0f}", "Email Avg Resp (h)": "{:.2f}",
         }, na_rep="—"),
         width="stretch",
+    )
+    st.caption(
+        "**scored** = contacts the SLA was calculated on (chats opened that day; emails "
+        "opened *or* responded to that day, excluding any not yet past target). "
+        "**items** = work items from report_items.csv started that day. "
+        "The score is weighted by *scored*; *items* is shown so you can see when the two diverge."
     )
 
 
@@ -1225,7 +1352,7 @@ DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 HOUR_ORDER = [f"{h:02d}:00" for h in range(24)]
 
 _hm_parts = []
-for _src, _label in ((chat_sla_p, "Chat"), (email_sla_p, "Email")):
+for _src, _label in ((chat_sla_p, "Chat"), (email_opened_p, "Email")):
     if len(_src):
         _p = _src[["Date/Time Opened"]].copy()
         _p["Channel"] = _label
@@ -1816,8 +1943,9 @@ def compute_hourly_sla(sel_date) -> pd.DataFrame:
 
     chat_day = chat_sla_df[(chat_sla_df["Date/Time Opened"] >= day_start)
                            & (chat_sla_df["Date/Time Opened"] < day_end)].copy()
-    email_day = email_sla_df[(email_sla_df["Date/Time Opened"] >= day_start)
-                             & (email_sla_df["Date/Time Opened"] < day_end)].copy()
+    # Same opened-OR-responded union as the period view, attributed to one
+    # timestamp inside the day so hourly buckets don't double-count.
+    email_day = email_window_slice(email_sla_df, day_start, day_end)
 
     # FIX #18: build the per-hour series explicitly. The previous
     # `groupby(...).apply(...).rename("Chat SLA")` raised TypeError whenever the
@@ -1829,12 +1957,12 @@ def compute_hourly_sla(sel_date) -> pd.DataFrame:
     for h in hours:
         nxt = h + pd.Timedelta(hours=1)
         cslice = chat_day[(chat_day["Date/Time Opened"] >= h) & (chat_day["Date/Time Opened"] < nxt)]
-        eslice = email_day[(email_day["Date/Time Opened"] >= h) & (email_day["Date/Time Opened"] < nxt)]
+        eslice = email_day[(email_day["SLA Timestamp"] >= h) & (email_day["SLA Timestamp"] < nxt)]
         chat_scores.append(chat_sla_from_slice(cslice))
         email_scores.append(email_sla_from_slice(eslice))
         # SLA weights come from the same slices that produced the scores (FIX #14).
         chat_wts.append(len(cslice))
-        email_wts.append(len(eslice))
+        email_wts.append(len(email_scorable(eslice)))
 
     out["Chat SLA"] = chat_scores
     out["Email SLA"] = email_scores
