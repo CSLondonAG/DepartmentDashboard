@@ -397,11 +397,19 @@ def email_sla_from_slice(g: pd.DataFrame) -> Optional[float]:
 
     total = len(g)
     elapsed = g["Effective Elapsed"] if "Effective Elapsed" in g.columns else g["Elapsed Time (Hours)"]
-    frac_in_target = float((elapsed <= EMAIL_TARGET_HRS).sum()) / total
+    # Each case is measured against its OWN entitlement target.
+    target = g["Target Hrs"] if "Target Hrs" in g.columns else pd.Series(EMAIL_TARGET_HRS, index=g.index)
+
+    frac_in_target = float((elapsed <= target).sum()) / total
+    # Mean signed overage. With a uniform 1hr target this is identical to the
+    # previous max(mean(elapsed) - 1, 0), so existing scores are unchanged; it
+    # simply generalises to mixed targets.
+    avg_excess = (elapsed - target).mean()
+    avg_excess = 0.0 if pd.isna(avg_excess) else float(avg_excess)
     avg_resp_hr = elapsed.mean()
     avg_resp_hr = 0.0 if pd.isna(avg_resp_hr) else float(avg_resp_hr)
 
-    excess = max(avg_resp_hr - EMAIL_TARGET_HRS, 0.0)
+    excess = max(avg_excess, 0.0)
     wait_penalty = min(excess / EMAIL_RESP_TOLERANCE_HRS, 1.0) if EMAIL_RESP_TOLERANCE_HRS > 0 else (1.0 if excess else 0.0)
 
     raw = W_EMAIL_IN_TARGET * frac_in_target - W_EMAIL_RESP * wait_penalty
@@ -666,6 +674,27 @@ def _coerce_numeric(frame: pd.DataFrame, col: str, label: str):
 _coerce_numeric(chat_sla_df, "Wait Time", "wait_time")
 _coerce_numeric(chat_sla_df, "Abandoned After", "abandoned_after")
 _coerce_numeric(email_sla_df, "Elapsed Time (Hours)", "elapsed_hours")
+_coerce_numeric(df_items, "Handle Time", "handle_time")
+
+# ---------------------------------------------------------------------------
+# Per-case SLA target.
+#
+# email.csv carries 'Target Response (Hours)' per case (1hr for most, but some
+# are 4hr or 6hr). Judging every case against a single global 1hr target marks
+# the slower-target cases as breaches when they are comfortably inside their own
+# entitlement. Each case is now scored against its own target, falling back to
+# EMAIL_TARGET_HRS where the column is absent or blank.
+# ---------------------------------------------------------------------------
+if "Target Response (Hours)" in email_sla_df.columns:
+    email_sla_df["Target Hrs"] = pd.to_numeric(
+        email_sla_df["Target Response (Hours)"], errors="coerce")
+else:
+    email_sla_df["Target Hrs"] = pd.NA
+_missing_target = email_sla_df["Target Hrs"].isna() | (email_sla_df["Target Hrs"] <= 0)
+email_sla_df.loc[_missing_target, "Target Hrs"] = EMAIL_TARGET_HRS
+email_sla_df["Target Hrs"] = email_sla_df["Target Hrs"].astype(float)
+dq["email_target_defaulted"] = int(_missing_target.sum())
+dq["email_target_non_default"] = int((email_sla_df["Target Hrs"] != EMAIL_TARGET_HRS).sum())
 
 # FIX #4: 'Completion Date' was parsed and never used. Use it to fill any missing
 # elapsed time, so a blank pre-computed column no longer silently drops emails
@@ -729,15 +758,73 @@ _age_hrs = (DATA_ASOF - email_sla_df["Date/Time Opened"]).dt.total_seconds() / 3
 # Answered -> the real elapsed time. Unanswered -> how long it has been waiting.
 email_sla_df["Effective Elapsed"] = email_sla_df["Elapsed Time (Hours)"].where(
     email_sla_df["Is Answered"], _age_hrs)
+# "Not yet due" is judged against the case's OWN target, not a global 1hr.
 email_sla_df["Counts Toward SLA"] = (
     email_sla_df["Effective Elapsed"].notna()
-    & (email_sla_df["Is Answered"] | (_age_hrs > EMAIL_TARGET_HRS))
+    & (email_sla_df["Is Answered"] | (_age_hrs > email_sla_df["Target Hrs"]))
 )
 
-dq["email_unanswered_breach"] = int((~email_sla_df["Is Answered"] & (_age_hrs > EMAIL_TARGET_HRS)).sum())
-dq["email_unanswered_not_due"] = int((~email_sla_df["Is Answered"] & (_age_hrs <= EMAIL_TARGET_HRS)).sum())
+dq["email_unanswered_breach"] = int((~email_sla_df["Is Answered"]
+                                     & (_age_hrs > email_sla_df["Target Hrs"])).sum())
+dq["email_unanswered_not_due"] = int((~email_sla_df["Is Answered"]
+                                      & (_age_hrs <= email_sla_df["Target Hrs"])).sum())
 dq["email_no_response_time"] = int((~email_sla_df["Counts Toward SLA"]
                                     & email_sla_df["Is Answered"]).sum())
+
+
+# ---------------------------------------------------------------------------
+# Work-item rows -> CASES.
+#
+# report_items.csv has one row per routing event, not per contact. An email case
+# that is re-opened or handed on is routed again and produces another row, so
+# counting rows overstates email volume (1.24x on real data; chats are 1.00x
+# because a chat is one continuous conversation).
+#
+# Rolling up to the case gives: a true volume count, and a handle time that is
+# the TOTAL effort across every touch of that case — including re-opens handled
+# on a later day, and touches by different agents.
+#
+# Row duration prefers 'Handle Time' (exact seconds). Start DT / End DT are
+# built from minute-resolution fields, so deriving duration from them carries a
+# median error of ~18s per row (up to 59s). Individual rows matter for AHT even
+# though the error cancels out in the mean.
+# ---------------------------------------------------------------------------
+CASE_KEY = "Work Item: Name"
+HAS_CASE_KEY = CASE_KEY in df_items.columns
+
+_row_secs_from_ts = (df_items["End DT Clamped"] - df_items["Start DT"]).dt.total_seconds()
+if "Handle Time" in df_items.columns and df_items["Handle Time"].notna().any():
+    df_items["Row Secs"] = df_items["Handle Time"].where(
+        df_items["Handle Time"].notna() & (df_items["Handle Time"] >= 0), _row_secs_from_ts)
+    dq["handle_time_used"] = int(df_items["Handle Time"].notna().sum())
+else:
+    df_items["Row Secs"] = _row_secs_from_ts
+    dq["handle_time_used"] = 0
+
+if HAS_CASE_KEY:
+    df_cases = (
+        df_items.dropna(subset=["Start DT"])
+        .groupby(["Service Channel: Developer Name", CASE_KEY], as_index=False)
+        .agg(
+            First_Start=("Start DT", "min"),
+            Last_End=("End DT Clamped", "max"),
+            Touches=("Row Secs", "size"),
+            Total_Secs=("Row Secs", "sum"),
+            Agents=("User: Full Name", "nunique"),
+            Any_Open=("Is Open", "any"),
+        )
+    )
+    dq["cases_rolled_up"] = int(len(df_items) - len(df_cases))
+else:
+    # No case identifier: fall back to one case per row so the app still runs.
+    df_cases = df_items.dropna(subset=["Start DT"]).assign(
+        First_Start=lambda d: d["Start DT"], Last_End=lambda d: d["End DT Clamped"],
+        Touches=1, Total_Secs=lambda d: d["Row Secs"],
+        Agents=1, Any_Open=lambda d: d["Is Open"],
+    )[["Service Channel: Developer Name", "First_Start", "Last_End",
+       "Touches", "Total_Secs", "Agents", "Any_Open"]]
+    dq["cases_rolled_up"] = 0
+    dq["no_case_key"] = True
 
 
 def email_window_slice(df: pd.DataFrame, w_start, w_end) -> pd.DataFrame:
@@ -844,6 +931,21 @@ with st.expander("ℹ️ Data files & quality"):
     if dq.get("elapsed_derived_from_completion"):
         notes.append(f"**{dq['elapsed_derived_from_completion']}** emails had a blank elapsed time, "
                      f"derived from Completion Date − Date/Time Opened.")
+    if dq.get("cases_rolled_up"):
+        notes.append(f"**{dq['cases_rolled_up']:,}** report_items rows were repeat routings of a case "
+                     f"already counted. Volume counts distinct cases; handle time sums every touch.")
+    if dq.get("no_case_key"):
+        notes.append("⚠️ report_items.csv has no 'Work Item: Name' column, so rows could not be rolled "
+                     "up into cases — volume counts routing events and will overstate contacts.")
+    if dq.get("handle_time_used"):
+        notes.append(f"Handle time taken from the exact 'Handle Time' column for "
+                     f"**{dq['handle_time_used']:,}** rows (Start/End DT are minute-resolution).")
+    if dq.get("email_target_non_default"):
+        notes.append(f"**{dq['email_target_non_default']:,}** email case(s) have a response target "
+                     f"other than {EMAIL_TARGET_HRS:.0f}hr and are scored against their own target.")
+    if dq.get("email_target_defaulted"):
+        notes.append(f"**{dq['email_target_defaulted']:,}** email case(s) had no usable "
+                     f"'Target Response (Hours)' and defaulted to {EMAIL_TARGET_HRS:.0f}hr.")
     if dq.get("email_unanswered_breach"):
         notes.append(f"**{dq['email_unanswered_breach']}** email(s) have no response and are already "
                      f"past the {EMAIL_TARGET_HRS:.0f}hr target — counted as SLA breaches, using "
@@ -874,7 +976,6 @@ window_end = ts_end.to_pydatetime()
 # Volume basis: items STARTING in the window.
 mask_started = (df_items["Start DT"] >= ts_start) & (df_items["Start DT"] < ts_end)
 df_period = df_items.loc[mask_started].copy()
-df_period["Duration_sec"] = (df_period["End DT"] - df_period["Start DT"]).dt.total_seconds()
 
 # FIX #21: interval basis is OVERLAP with the window. Filtering on Start DT alone
 # excluded work that began just before the window while still counting the
@@ -882,19 +983,36 @@ df_period["Duration_sec"] = (df_period["End DT"] - df_period["Start DT"]).dt.tot
 mask_overlap = (df_items["Start DT"] < ts_end) & (df_items["End DT Clamped"] > ts_start)
 df_overlap = df_items.loc[mask_overlap].copy()
 
+# ---------------------------------------------------------------------------
+# Volume and AHT are CASE-level. A case belongs to the period in which it was
+# FIRST handled; its handle time is the total across every touch, including
+# re-opens that happen later. That is what "all time spent on this case" means.
+# ---------------------------------------------------------------------------
+cases_period = df_cases[(df_cases["First_Start"] >= ts_start) & (df_cases["First_Start"] < ts_end)]
+chat_cases = cases_period[cases_period["Service Channel: Developer Name"] == CHAT_DEVNAME]
+email_cases = cases_period[cases_period["Service Channel: Developer Name"] == EMAIL_DEVNAME]
+
+# Row-level slices are still needed for the utilisation intervals.
 chat_df = df_period[df_period["Service Channel: Developer Name"] == CHAT_DEVNAME]
 email_df = df_period[df_period["Service Channel: Developer Name"] == EMAIL_DEVNAME]
 
-# FIX #5: volume counts every item that started in the window, including
-# in-progress ones. Only the AHT average needs a completed end timestamp.
-chat_total = len(chat_df)
-email_total = len(email_df)
-chat_closed = chat_df[chat_df["Duration_sec"].notna()]
-email_closed = email_df[email_df["Duration_sec"].notna()]
-chat_aht = chat_closed["Duration_sec"].mean() if len(chat_closed) else None
-email_aht = email_closed["Duration_sec"].mean() if len(email_closed) else None
-chat_open_n = chat_total - len(chat_closed)
-email_open_n = email_total - len(email_closed)
+chat_total = len(chat_cases)
+email_total = len(email_cases)
+chat_aht = chat_cases["Total_Secs"].mean() if chat_total else None
+email_aht = email_cases["Total_Secs"].mean() if email_total else None
+
+# Re-work: how much of the volume is a case coming back round again.
+chat_touches = float(chat_cases["Touches"].mean()) if chat_total else None
+email_touches = float(email_cases["Touches"].mean()) if email_total else None
+chat_reopened = int((chat_cases["Touches"] > 1).sum())
+email_reopened = int((email_cases["Touches"] > 1).sum())
+email_multi_agent = int((email_cases["Agents"] > 1).sum())
+chat_open_n = int(chat_cases["Any_Open"].sum())
+email_open_n = int(email_cases["Any_Open"].sum())
+
+# Per-touch AHT, kept so the two definitions can be compared.
+chat_aht_touch = (chat_cases["Total_Secs"].sum() / chat_cases["Touches"].sum()) if chat_total else None
+email_aht_touch = (email_cases["Total_Secs"].sum() / email_cases["Touches"].sum()) if email_total else None
 
 chat_sla_p = chat_sla_df[
     (chat_sla_df["Date/Time Opened"] >= ts_start) & (chat_sla_df["Date/Time Opened"] < ts_end)
@@ -1059,13 +1177,13 @@ for d in pd.date_range(start_date, end_date):
         "Email SLA Wt": len(ed_scored),
         # ...and show the report_items work-item volume alongside it, so the two
         # populations can be compared rather than silently conflated.
-        "Chat Vol": int((chat_df["Start DT"].dt.date == day).sum()),
-        "Email Vol": int((email_df["Start DT"].dt.date == day).sum()),
+        "Chat Vol": int((chat_cases["First_Start"].dt.date == day).sum()),
+        "Email Vol": int((email_cases["First_Start"].dt.date == day).sum()),
         "Email Not Due": int(len(ed) - len(ed_scored)),
         "Chat ≤60s %": round(float((_ans["Wait Time"] <= CHAT_ANSWER_TARGET_SEC).mean() * 100), 1) if len(_ans) else None,
         "Chat Avg Wait (s)": round(float(_ans["Wait Time"].mean()), 1) if len(_ans) else None,
         "Chat Abandon %": round(float((cd["Abandoned After"] > CHAT_ABANDON_AFTER_SEC).mean() * 100), 1) if len(cd) else None,
-        "Email ≤1hr %": round(float((ed_scored["Effective Elapsed"] <= EMAIL_TARGET_HRS).mean() * 100), 1) if len(ed_scored) else None,
+        "Email ≤1hr %": round(float((ed_scored["Effective Elapsed"] <= ed_scored["Target Hrs"]).mean() * 100), 1) if len(ed_scored) else None,
         "Email Avg Resp (h)": round(float(ed_scored["Effective Elapsed"].mean()), 3) if len(ed_scored) else None,
     })
 
@@ -1104,7 +1222,8 @@ sla_comp_chat_abandon_pct = (n_chat_abandoned / n_chat_total * 100) if n_chat_to
 n_email_total = len(email_scored_p)
 n_email_in_window = len(email_sla_p)
 n_email_not_due = n_email_in_window - n_email_total
-n_email_in_target = int((email_scored_p["Effective Elapsed"] <= EMAIL_TARGET_HRS).sum()) if n_email_total else 0
+n_email_in_target = int((email_scored_p["Effective Elapsed"]
+                         <= email_scored_p["Target Hrs"]).sum()) if n_email_total else 0
 sla_comp_email_in_target_pct = (n_email_in_target / n_email_total * 100) if n_email_total else None
 sla_comp_email_avg_resp_hrs = email_scored_p["Effective Elapsed"].mean() if n_email_total else None
 
@@ -1131,17 +1250,37 @@ st.markdown("---")
 st.subheader("Core Metrics")
 c1, c2, c3, c4 = st.columns(4)
 render_custom_metric(c1, "💬 Total Chats", f"{chat_total:,}",
-                     "Chat work items started in the period (includes in-progress)",
-                     COLOR_GOOD, f"{chat_open_n} still open" if chat_open_n else "")
+                     "Distinct chat cases first handled in the period. Counted once even if "
+                     "the case was routed more than once.",
+                     COLOR_GOOD,
+                     f"{chat_reopened:,} re-handled" if chat_reopened else "")
 render_custom_metric(c2, "✉️ Total Emails", f"{email_total:,}",
-                     "Email work items started in the period (includes in-progress)",
-                     COLOR_GOOD, f"{email_open_n} still open" if email_open_n else "")
+                     "Distinct email cases first handled in the period. A case that is "
+                     "re-opened and routed again counts ONCE, not once per touch.",
+                     COLOR_GOOD,
+                     f"{email_reopened:,} re-opened" if email_reopened else "")
 render_custom_metric(c3, "⏳ Avg Chat Handle Time", fmt_mmss(chat_aht),
-                     "Mean handle time across completed chat work items", COLOR_GOOD,
-                     f"across {len(chat_closed):,} completed")
+                     "Total handle time per chat case, summed across every touch",
+                     COLOR_GOOD,
+                     f"{chat_touches:.2f} touches/case" if chat_touches else "")
 render_custom_metric(c4, "⏳ Avg Email Handle Time", fmt_mmss(email_aht),
-                     "Mean handle time across completed email work items", COLOR_GOOD,
-                     f"across {len(email_closed):,} completed")
+                     "Total handle time per email case, summed across EVERY touch — including "
+                     "re-opens handled later and by different agents",
+                     COLOR_GOOD,
+                     f"{email_touches:.2f} touches/case" if email_touches else "")
+
+# Re-work is invisible when volume counts rows; surfaced explicitly instead.
+if email_total and email_reopened:
+    _single = email_cases.loc[email_cases["Touches"] == 1, "Total_Secs"].mean()
+    _multi = email_cases.loc[email_cases["Touches"] > 1, "Total_Secs"].mean()
+    st.caption(
+        f"🔁 **{email_reopened:,} of {email_total:,} email cases ({email_reopened/email_total:.0%}) "
+        f"were handled more than once**, {email_multi_agent:,} of them by more than one agent. "
+        f"Those cases average **{fmt_mmss(_multi)}** of total handle time versus "
+        f"**{fmt_mmss(_single)}** for cases resolved in a single touch. "
+        f"Counting routing rows instead of cases would report "
+        f"{int(email_cases['Touches'].sum()):,} emails instead of {email_total:,}."
+    )
 
 st.markdown("---")
 st.subheader("Operational Metrics")
