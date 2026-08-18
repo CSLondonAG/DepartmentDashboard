@@ -115,7 +115,34 @@ W_CHAT_ABANDON = 0.20           # penalty: share of chats abandoned
 
 # ---- Email SLA ----------------------------------------------------------
 EMAIL_TARGET_HRS = 1.0          # no response penalty at or below this average
-EMAIL_RESP_TOLERANCE_HRS = 3.0  # FIX #7: average this far ABOVE target = full penalty
+# The penalty statistic is the 85th percentile of response time expressed in
+# multiples of each case's own target — "85% of emails were answered within this
+# many times their target".
+#
+# It replaces the mean, which a handful of stuck cases could drag high enough to
+# max out the penalty on its own: across 89 days of real data the mean floored
+# the score at zero on 25% of them while the hit rate was still moving. p85 is
+# as stable day to day as the mean (average swing 1.26 vs 1.27 multiples) but
+# floors on only 6%. p95+ is far too jumpy (swing 6.8) and p75 correlates so
+# closely with the hit rate that the penalty stops adding information.
+EMAIL_PENALTY_PERCENTILE = 0.85
+
+# ---- Reopened cases are measured differently -----------------------------
+# For a case routed only once, 'Elapsed Time (Hours)' matches time-to-first-
+# close within 0.02h — it genuinely is a first-response time, judged against the
+# case's own entitlement target.
+#
+# For a reopened case it tracks the LAST close instead (0.12h away, vs 2.37h
+# from the first), so it is a RESOLUTION time spanning every response cycle and
+# the customer's own reply time in between. Judging that against a 1-hour
+# response target measures the wrong thing. It gets its own resolution target,
+# and the two populations are scored separately then blended by volume.
+EMAIL_REOPENED_TARGET_HRS = 12.0
+
+# Tolerance in MULTIPLES OF TARGET, not hours, so a 4-hour entitlement gets
+# proportionate slack instead of being judged on an absolute hour count.
+# 6.0 => full penalty once p85 reaches 7x target.
+EMAIL_RESP_TOLERANCE_TARGETS = 6.0
 
 W_EMAIL_IN_TARGET = 0.60        # reward: share replied within target
 W_EMAIL_RESP = 0.40             # penalty: average response above target
@@ -432,31 +459,52 @@ def email_scorable(g: pd.DataFrame) -> pd.DataFrame:
     return g[g["Counts Toward SLA"]]
 
 
-def email_sla_from_slice(g: pd.DataFrame) -> Optional[float]:
-    """Email SLA score 0-100 for a slice of email.csv. None if nothing scorable."""
-    g = email_scorable(g)
-    if g is None or len(g) == 0:
+def _email_score_core(elapsed: pd.Series, target: pd.Series) -> Optional[float]:
+    """Score one homogeneous population against its own target column."""
+    total = len(elapsed)
+    if not total:
         return None
 
-    total = len(g)
-    elapsed = g["Effective Elapsed"] if "Effective Elapsed" in g.columns else g["Elapsed Time (Hours)"]
-    # Each case is measured against its OWN entitlement target.
-    target = g["Target Hrs"] if "Target Hrs" in g.columns else pd.Series(EMAIL_TARGET_HRS, index=g.index)
-
     frac_in_target = float((elapsed <= target).sum()) / total
-    # Mean signed overage. With a uniform 1hr target this is identical to the
-    # previous max(mean(elapsed) - 1, 0), so existing scores are unchanged; it
-    # simply generalises to mixed targets.
-    avg_excess = (elapsed - target).mean()
-    avg_excess = 0.0 if pd.isna(avg_excess) else float(avg_excess)
-    avg_resp_hr = elapsed.mean()
-    avg_resp_hr = 0.0 if pd.isna(avg_resp_hr) else float(avg_resp_hr)
 
-    excess = max(avg_excess, 0.0)
-    wait_penalty = min(excess / EMAIL_RESP_TOLERANCE_HRS, 1.0) if EMAIL_RESP_TOLERANCE_HRS > 0 else (1.0 if excess else 0.0)
+    # Penalty statistic: p85 of elapsed in multiples of target. A few very slow
+    # cases can no longer set the score by themselves, while a genuine shift in
+    # the bulk of the distribution still moves it.
+    ratio = (elapsed / target).replace([float("inf"), float("-inf")], pd.NA).dropna()
+    stat = float(ratio.quantile(EMAIL_PENALTY_PERCENTILE)) if len(ratio) else 1.0
+    excess = max(stat - 1.0, 0.0)
+    resp_penalty = (min(excess / EMAIL_RESP_TOLERANCE_TARGETS, 1.0)
+                    if EMAIL_RESP_TOLERANCE_TARGETS > 0 else (1.0 if excess else 0.0))
 
-    raw = W_EMAIL_IN_TARGET * frac_in_target - W_EMAIL_RESP * wait_penalty
+    raw = W_EMAIL_IN_TARGET * frac_in_target - W_EMAIL_RESP * resp_penalty
     return clamp((raw / EMAIL_RESCALE_K) * SLA_SCALE)
+
+
+def email_sla_parts(g: pd.DataFrame):
+    """(first-contact score, n), (reopened score, n) for a slice."""
+    g = email_scorable(g)
+    if g is None or len(g) == 0:
+        return (None, 0), (None, 0)
+    elapsed = g["Effective Elapsed"] if "Effective Elapsed" in g.columns else g["Elapsed Time (Hours)"]
+    target = g["Effective Target"] if "Effective Target" in g.columns else (
+        g["Target Hrs"] if "Target Hrs" in g.columns else pd.Series(EMAIL_TARGET_HRS, index=g.index))
+    if "Reopened" not in g.columns:
+        return (_email_score_core(elapsed, target), len(g)), (None, 0)
+    m = g["Reopened"].astype(bool)
+    first = (_email_score_core(elapsed[~m], target[~m]), int((~m).sum()))
+    reop = (_email_score_core(elapsed[m], target[m]), int(m.sum()))
+    return first, reop
+
+
+def email_sla_from_slice(g: pd.DataFrame) -> Optional[float]:
+    """Email SLA 0-100: first-contact response and reopened resolution, blended by volume."""
+    (sf, nf), (sr, nr) = email_sla_parts(g)
+    num = den = 0.0
+    for s, n in ((sf, nf), (sr, nr)):
+        if s is not None and n:
+            num += s * n
+            den += n
+    return (num / den) if den else None
 
 
 # =============================================================================
@@ -1019,6 +1067,41 @@ else:
     dq["no_case_key"] = True
 
 
+# ---------------------------------------------------------------------------
+# Attach the routing touch count to each email case.
+#
+# 'Elapsed Time (Hours)' runs from ORIGINAL case open to milestone completion,
+# so for a case that was reopened it accumulates every response cycle instead of
+# resetting. That is a Salesforce entitlement setting (the response milestone is
+# 'No Recurrence'; 'Independent' would create a fresh milestone record per
+# reopen). Until that changes, the touch count from report_items is the only way
+# to tell which cases are affected — so it is attached here and reported, rather
+# than the distortion being left invisible.
+# ---------------------------------------------------------------------------
+if HAS_CASE_KEY and EMAIL_CASE_KEY in email_sla_df.columns:
+    _email_cases = df_cases[df_cases["Service Channel: Developer Name"] == EMAIL_DEVNAME]
+    _touch_map = pd.Series(
+        _email_cases["Touches"].values,
+        index=_email_cases[CASE_KEY].astype(str).str.strip().values,
+    )
+    _touch_map = _touch_map[~_touch_map.index.duplicated()]
+    _keys = email_sla_df[EMAIL_CASE_KEY].astype(str).str.strip()
+    email_sla_df["Touches"] = _keys.map(_touch_map)
+    dq["email_no_routing_record"] = int(email_sla_df["Touches"].isna().sum())
+    # A case with no routing record was never re-routed, so it cannot have been
+    # reopened through Omni-Channel — treat it as a single response cycle.
+    email_sla_df["Touches"] = email_sla_df["Touches"].fillna(1).astype(int)
+    email_sla_df["Reopened"] = email_sla_df["Touches"] > 1
+else:
+    email_sla_df["Touches"] = 1
+    email_sla_df["Reopened"] = False
+
+# First contact keeps its entitlement response target; a reopened case is judged
+# against the resolution target, because that is what its elapsed figure is.
+email_sla_df["Effective Target"] = email_sla_df["Target Hrs"].where(
+    ~email_sla_df["Reopened"], EMAIL_REOPENED_TARGET_HRS)
+
+
 def email_window_slice(df: pd.DataFrame, w_start, w_end) -> pd.DataFrame:
     """Emails OPENED **or** RESPONDED TO within [w_start, w_end).
 
@@ -1422,7 +1505,7 @@ for d in pd.date_range(start_date, end_date):
         "Chat ≤60s %": round(float((_ans["Wait Time"] <= CHAT_ANSWER_TARGET_SEC).mean() * 100), 1) if len(_ans) else None,
         "Chat Avg Wait (s)": round(float(_ans["Wait Time"].mean()), 1) if len(_ans) else None,
         "Chat Abandon %": round(float((cd["Abandoned After"] > CHAT_ABANDON_AFTER_SEC).mean() * 100), 1) if len(cd) else None,
-        "Email ≤1hr %": round(float((ed_scored["Effective Elapsed"] <= ed_scored["Target Hrs"]).mean() * 100), 1) if len(ed_scored) else None,
+        "Email in target %": round(float((ed_scored["Effective Elapsed"] <= ed_scored["Effective Target"]).mean() * 100), 1) if len(ed_scored) else None,
         "Email Avg Resp (h)": round(float(ed_scored["Effective Elapsed"].mean()), 3) if len(ed_scored) else None,
     })
 
@@ -1462,7 +1545,7 @@ n_email_total = len(email_scored_p)
 n_email_in_window = len(email_sla_p)
 n_email_not_due = n_email_in_window - n_email_total
 n_email_in_target = int((email_scored_p["Effective Elapsed"]
-                         <= email_scored_p["Target Hrs"]).sum()) if n_email_total else 0
+                         <= email_scored_p["Effective Target"]).sum()) if n_email_total else 0
 sla_comp_email_in_target_pct = (n_email_in_target / n_email_total * 100) if n_email_total else None
 sla_comp_email_avg_resp_hrs = email_scored_p["Effective Elapsed"].mean() if n_email_total else None
 
@@ -1611,41 +1694,123 @@ with _bc2:
     st.markdown("**✉️ Email SLA components**")
     _ec1, _ec2 = st.columns(2)
     _ec1.metric(
-        "Replied ≤1hr", fmt_pct(sla_comp_email_in_target_pct),
-        help=f"{n_email_in_target:,} of {n_email_total:,} scored emails replied within "
-             f"{EMAIL_TARGET_HRS:.0f}hr (weight +{W_EMAIL_IN_TARGET}). Population = emails "
-             f"opened OR responded to in the period: {n_email_opened_here:,} opened here "
-             f"({n_email_answered_after:,} of them answered after the period ends) and "
-             f"{n_email_carried_in:,} carried in from before. "
+        "Within target", fmt_pct(sla_comp_email_in_target_pct),
+        help=f"{n_email_in_target:,} of {n_email_total:,} scored emails met their target "
+             f"(weight +{W_EMAIL_IN_TARGET}). First-contact cases are measured against their "
+             f"entitlement response target ({EMAIL_TARGET_HRS:.0f}hr for most); reopened cases "
+             f"against the {EMAIL_REOPENED_TARGET_HRS:.0f}hr resolution target, because their "
+             f"elapsed figure spans every response cycle. Population = emails opened OR responded "
+             f"to in the period: {n_email_opened_here:,} opened here ({n_email_answered_after:,} "
+             f"answered after the period ends) and {n_email_carried_in:,} carried in from before. "
              f"{n_email_not_due:,} unanswered email(s) are not yet past target and are excluded.",
     )
-    # The penalty term uses the MEAN response time by choice. On a long-tailed
-    # distribution the mean can sit far above the median and max out the penalty
-    # on its own, which pins the score near zero regardless of the hit rate.
-    # Say so, rather than letting it read as a data fault.
+    # Report the actual penalty statistic (p85 of response time in multiples of
+    # target) so the number driving the penalty is visible, not just the mean.
     if n_email_total:
-        _med = float(email_scored_p["Effective Elapsed"].median())
-        _mean = float(sla_comp_email_avg_resp_hrs or 0.0)
-        _excess = max(_mean - float(email_scored_p["Target Hrs"].mean()), 0.0)
-        _pen_frac = min(_excess / EMAIL_RESP_TOLERANCE_HRS, 1.0) if EMAIL_RESP_TOLERANCE_HRS else 0.0
-        if _pen_frac >= 0.5 and _mean > 2 * max(_med, 0.01):
+        _ratio = (email_scored_p["Effective Elapsed"] / email_scored_p["Effective Target"]).dropna()
+        _p85 = float(_ratio.quantile(EMAIL_PENALTY_PERCENTILE)) if len(_ratio) else 1.0
+        _pen_frac = min(max(_p85 - 1.0, 0.0) / EMAIL_RESP_TOLERANCE_TARGETS, 1.0) \
+            if EMAIL_RESP_TOLERANCE_TARGETS else 0.0
+        _p85_hrs = _p85 * float(email_scored_p["Effective Target"].median())
+        st.caption(
+            f"Penalty statistic: **p{EMAIL_PENALTY_PERCENTILE * 100:.0f} = {_p85:.2f}× target** "
+            f"(≈{_p85_hrs:.1f}h at the median {float(email_scored_p['Effective Target'].median()):.0f}h target) — "
+            f"{EMAIL_PENALTY_PERCENTILE * 100:.0f}% of emails were answered within that. "
+            f"Penalty is at **{_pen_frac:.0%} of maximum**, reaching 100% at "
+            f"{1 + EMAIL_RESP_TOLERANCE_TARGETS:.0f}× target."
+        )
+        if _pen_frac >= 1.0:
             st.caption(
-                f"⚠️ The response-time penalty is at **{_pen_frac:.0%} of maximum**: the mean is {_mean:.1f}h against a "
-                f"median of {_med:.1f}h, so a small number of long-running cases are setting the "
-                f"score on their own. {sla_comp_email_in_target_pct:.0f}% of cases still met target. "
-                f"To make the score track typical performance, change the penalty statistic from the "
-                f"mean to a percentile, or cap each case before averaging "
-                f"(`email_sla_from_slice`)."
+                f"⚠️ The penalty is maxed out, so further deterioration in response times will not "
+                f"move the score — only the {sla_comp_email_in_target_pct:.0f}% hit rate will. "
+                f"Raise `EMAIL_RESP_TOLERANCE_TARGETS` if you want headroom below this level."
             )
 
     _ec2.metric(
         "Avg Response Time", fmt_hhmm(sla_comp_email_avg_resp_hrs * 3600
                                       if sla_comp_email_avg_resp_hrs is not None
                                       and not pd.isna(sla_comp_email_avg_resp_hrs) else None),
-        help=f"No penalty at or below {EMAIL_TARGET_HRS:.0f}hr. Full penalty "
-             f"(−{W_EMAIL_RESP}) at {EMAIL_TARGET_HRS + EMAIL_RESP_TOLERANCE_HRS:.0f}hr, "
-             f"scaled linearly between. Across {n_email_total:,} emails.",
+        help=f"Shown as the mean for reference, but the SLA penalty uses the "
+             f"p{EMAIL_PENALTY_PERCENTILE * 100:.0f} of response time in multiples of each case's "
+             f"own target — the mean was too easily dominated by a few stuck cases. No penalty at "
+             f"or below 1× target; full penalty (−{W_EMAIL_RESP}) at "
+             f"{1 + EMAIL_RESP_TOLERANCE_TARGETS:.0f}× target, scaled linearly between. "
+             f"Across {n_email_total:,} emails.",
     )
+
+# ---------------------------------------------------------------------------
+# First contact vs reopened.
+#
+# These are two different measurements, not one metric split in half:
+#   - first contact -> 'Elapsed' IS the first-response time (matches time-to-
+#     first-close within 0.02h), judged against the entitlement response target.
+#   - reopened      -> 'Elapsed' tracks the LAST close, so it is a RESOLUTION
+#     time spanning every cycle plus the customer's own reply time, judged
+#     against EMAIL_REOPENED_TARGET_HRS.
+# The headline blends the two scores by case volume.
+# ---------------------------------------------------------------------------
+if n_email_total and "Reopened" in email_scored_p.columns:
+    (_sla_first, _n_first), (_sla_reop, _n_reop) = email_sla_parts(email_scored_p)
+    _first = email_scored_p[~email_scored_p["Reopened"].astype(bool)]
+    _reop = email_scored_p[email_scored_p["Reopened"].astype(bool)]
+
+    def _row(label, g, score, measure, tgt_label):
+        if not len(g):
+            return None
+        return {
+            "Population": label,
+            "Measures": measure,
+            "Target": tgt_label,
+            "Cases": len(g),
+            "Median (h)": float(g["Effective Elapsed"].median()),
+            "% within target": float((g["Effective Elapsed"] <= g["Effective Target"]).mean() * 100),
+            "SLA": score,
+        }
+
+    _rows = [r for r in (
+        _row("First contact", _first, _sla_first, "First response time",
+             f"{EMAIL_TARGET_HRS:.0f}h (entitlement)"),
+        _row("Reopened", _reop, _sla_reop, "Resolution time",
+             f"{EMAIL_REOPENED_TARGET_HRS:.0f}h"),
+    ) if r]
+
+    if _rows:
+        _split = pd.DataFrame(_rows)
+        _hdr = ("📬 First contact vs reopened — blended into the headline by volume"
+                if _n_reop else "📬 First contact vs reopened")
+        with st.expander(_hdr, expanded=bool(_n_reop)):
+            st.dataframe(
+                _split.style.format({"Cases": "{:,}", "Median (h)": "{:.2f}",
+                                     "% within target": "{:.1f}", "SLA": "{:.1f}"}, na_rep="—"),
+                width="stretch", hide_index=True,
+            )
+            if _n_reop:
+                _share = _n_reop / (_n_first + _n_reop) * 100
+                st.markdown(
+                    f"""
+The two rows measure **different things**, so they carry different targets.
+
+For a case routed once, `Elapsed Time (Hours)` matches time-to-first-close almost exactly — it is a
+genuine **first-response** time. For a reopened case it tracks the **last** close instead, so it
+spans every response cycle *and* the customer's own reply time in between. Scoring that against a
+1-hour response target would measure something the team cannot control, so reopened cases are
+judged against a **{EMAIL_REOPENED_TARGET_HRS:.0f}-hour resolution** target instead.
+
+Reopened cases are **{_share:.1f}%** of scored volume, so the headline Email SLA of
+**{email_weighted:.1f}** is mostly the first-contact figure.
+
+*This is a workaround.* The underlying cause is that the response milestone is set to
+**No Recurrence** in Salesforce, so one milestone record covers the whole case life. Setting it to
+**Independent** creates a fresh record per reopen, at which point reopened cases can be measured on
+response time like everything else and this split becomes unnecessary.
+"""
+                )
+            if dq.get("email_no_routing_record"):
+                st.caption(
+                    f"{dq['email_no_routing_record']:,} case(s) have no routing record in "
+                    f"report_items.csv and are counted as first contact — a case never routed "
+                    f"cannot have been re-routed."
+                )
 
 # ---------------------------------------------------------------------------
 # Email SLA split by Case Origin.
@@ -1794,7 +1959,7 @@ with st.expander("Daily SLA detail"):
     _detail = df_daily[[
         "Date", "Chat SLA", "Chat SLA Wt", "Chat Vol", "Chat ≤60s %", "Chat Avg Wait (s)",
         "Chat Abandon %", "Email SLA", "Email SLA Wt", "Email Vol", "Email Not Due",
-        "Email ≤1hr %", "Email Avg Resp (h)", "Weighted SLA",
+        "Email in target %", "Email Avg Resp (h)", "Weighted SLA",
     ]].copy()
     _detail["Date"] = _detail["Date"].dt.strftime("%a %d %b")
     _detail = _detail.rename(columns={
@@ -1806,7 +1971,7 @@ with st.expander("Daily SLA detail"):
         _detail.style.format({
             "Chat SLA": "{:.1f}", "Email SLA": "{:.1f}", "Weighted SLA": "{:.1f}",
             "Chat ≤60s %": "{:.1f}", "Chat Abandon %": "{:.1f}",
-            "Email ≤1hr %": "{:.1f}", "Chat Avg Wait (s)": "{:.0f}", "Email Avg Resp (h)": "{:.2f}",
+            "Email in target %": "{:.1f}", "Chat Avg Wait (s)": "{:.0f}", "Email Avg Resp (h)": "{:.2f}",
         }, na_rep="—"),
         width="stretch",
     )
