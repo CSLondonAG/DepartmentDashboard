@@ -4,11 +4,17 @@ Department Performance Dashboard
 
 Revision notes (this version fixes 27 issues found in a full calculation review):
 
+CAPACITY MODEL
+  28. Chat utilisation now models two concurrent chat slots per agent. One
+      active chat consumes 50% of chat capacity, two consume 100%, and any
+      additional overlap is capped rather than pushing utilisation above the
+      configured operational capacity.
+
 CRITICAL
-  1.  Chat & Email Utilization now share ONE definition (proportional split of
-      shared 'Available_All' time). Previously chat used full availability and
-      email used a proportional share, making the two tiles differ by ~2x for
-      identical workloads.
+  1.  Chat & Email Utilization now share ONE definition: channel work divided
+      by the full availability eligible for that channel. 'Available_All' is
+      eligible for both channels, so the two standalone percentages must not be
+      added together.
   2.  FCR is now averaged over surveys that actually answered the FCR question
       (was counting unanswered surveys as failures).
   3.  shifts.csv is now OPTIONAL and is actually used -> Schedule Adherence tile.
@@ -163,6 +169,11 @@ AVAILABLE_STATUSES = {STATUS_CHAT_ONLY, STATUS_EMAIL_ONLY, STATUS_SHARED}
 
 CHAT_DEVNAME = "sfdc_liveagent"
 EMAIL_DEVNAME = "casesChannel"
+
+# One agent can actively work up to two chats at once. Chat utilisation is
+# therefore measured against two chat slots: one active chat consumes 50% of
+# the agent's chat capacity and two active chats consume 100%.
+CHAT_CONCURRENCY_CAPACITY = 2
 
 # ---- Excluded people ----------------------------------------------------
 # Names listed here are removed from every metric: their work items drop out of
@@ -394,6 +405,59 @@ def intersect_sum(a_ints, b_ints) -> float:
         else:
             j += 1
     return tot
+
+
+def concurrent_slot_seconds(work_intervals, available_intervals,
+                            capacity: int = CHAT_CONCURRENCY_CAPACITY) -> float:
+    """Return used slot-seconds inside availability, capped at ``capacity``.
+
+    Unlike ``merge_intervals``, this deliberately preserves overlapping work
+    items. With a capacity of two, one active chat for an hour contributes one
+    slot-hour, while two simultaneous chats contribute two slot-hours. Any
+    third overlapping chat is ignored for utilisation rather than allowing the
+    KPI to exceed the configured operational capacity.
+    """
+    if capacity <= 0:
+        raise ValueError("capacity must be greater than zero")
+
+    available = merge_intervals(available_intervals)
+    if not work_intervals or not available:
+        return 0.0
+
+    events = []
+    for pair in work_intervals:
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+            continue
+        start = pd.to_datetime(pair[0], errors="coerce")
+        end = pd.to_datetime(pair[1], errors="coerce")
+        if pd.isna(start) or pd.isna(end) or end <= start:
+            continue
+
+        for av_start, av_end in available:
+            overlap_start = max(start, av_start)
+            overlap_end = min(end, av_end)
+            if overlap_end > overlap_start:
+                events.append((overlap_start, 1))
+                events.append((overlap_end, -1))
+
+    if not events:
+        return 0.0
+
+    # Process end events before start events at the same timestamp. There is no
+    # elapsed time between them, but this keeps the active count intuitive.
+    events.sort(key=lambda event: (event[0], event[1]))
+    active = 0
+    previous = None
+    slot_seconds = 0.0
+
+    for timestamp, change in events:
+        if previous is not None and timestamp > previous:
+            elapsed = (timestamp - previous).total_seconds()
+            slot_seconds += elapsed * min(active, capacity)
+        active += change
+        previous = timestamp
+
+    return float(slot_seconds)
 
 
 def _norm_person_key(s: str) -> str:
@@ -1369,8 +1433,13 @@ avg_resp_secs = None if (avg_resp_hrs is None or pd.isna(avg_resp_hrs)) else avg
 
 # =============================================================================
 # Availability & utilisation
-# FIX #1: ONE definition for both channels. Shared 'Available_All' time is split
-# between chat and email in proportion to the work actually handled on each.
+# FIX #1: ONE definition for both channels. 'Available_All' is fully eligible
+# for each standalone channel KPI; it is not proportionally split, because that
+# can make a channel denominator smaller than work performed during the same
+# interval and produce utilisation above 100%. Chat work uses two concurrent
+# slots: one active chat consumes half an agent's capacity and two consume the
+# full capacity. Because shared availability appears in both denominators, the
+# chat and email percentages are independent and must not be added together.
 # =============================================================================
 presence_win = df_presence[
     (df_presence["Start DT"] < ts_end) & (df_presence["End DT Clamped"] > ts_start)
@@ -1397,7 +1466,10 @@ for ag, grp in presence_win.groupby("Created By: Full Name"):
     if sh:
         shared_map[ag] = merge_intervals(sh)
 
-# Handling intervals, built from the OVERLAP slice (FIX #21).
+# Handling intervals, built from the OVERLAP slice (FIX #21). Chat intervals
+# remain unmerged so concurrent chats can consume separate capacity slots;
+# email intervals are merged because email capacity is measured as occupied
+# wall-clock time.
 chat_handles_map, email_handles_map = {}, {}
 for devname, target in ((CHAT_DEVNAME, chat_handles_map), (EMAIL_DEVNAME, email_handles_map)):
     sub = df_overlap[df_overlap["Service Channel: Developer Name"] == devname]
@@ -1406,9 +1478,9 @@ for devname, target in ((CHAT_DEVNAME, chat_handles_map), (EMAIL_DEVNAME, email_
                 for s, e in zip(grp["Start DT"], grp["End DT Clamped"])]
         ints = [x for x in ints if x]
         if ints:
-            target[ag] = merge_intervals(ints)
+            target[ag] = ints if devname == CHAT_DEVNAME else merge_intervals(ints)
 
-dept_chat_handle = dept_email_handle = 0.0
+dept_chat_load = dept_email_handle = 0.0
 dept_chat_avail = dept_email_avail = 0.0
 util_rows = []
 
@@ -1423,42 +1495,39 @@ for ag in agents:
     chat_av_union = merge_intervals(co + sh)
     email_av_union = merge_intervals(eo + sh)
 
-    chat_hand = intersect_sum(chat_handles_map.get(ag, []), chat_av_union) if chat_av_union else 0.0
+    chat_slot_secs = concurrent_slot_seconds(
+        chat_handles_map.get(ag, []), chat_av_union, CHAT_CONCURRENCY_CAPACITY
+    )
+    # Convert slot-seconds to agent-equivalent load. At capacity two, one
+    # active chat for an hour is 0.5 load-hours and two are 1.0 load-hours.
+    chat_load = chat_slot_secs / CHAT_CONCURRENCY_CAPACITY
     email_hand = intersect_sum(email_handles_map.get(ag, []), email_av_union) if email_av_union else 0.0
 
-    co_secs, eo_secs, sh_secs = sum_secs(co), sum_secs(eo), sum_secs(sh)
-    total_hand = chat_hand + email_hand
+    # Use the complete channel-eligible availability. Proportionally allocating
+    # shared time makes the denominator depend on the numerator and can push a
+    # correctly capped capacity metric above 100%.
+    chat_av = sum_secs(chat_av_union)
+    email_av = sum_secs(email_av_union)
 
-    if sh_secs > 0:
-        if total_hand > 0:
-            sh_to_chat = sh_secs * (chat_hand / total_hand)
-            sh_to_email = sh_secs * (email_hand / total_hand)
-        else:
-            sh_to_chat = sh_to_email = sh_secs / 2.0
-    else:
-        sh_to_chat = sh_to_email = 0.0
-
-    chat_av = co_secs + sh_to_chat
-    email_av = eo_secs + sh_to_email
-
-    dept_chat_handle += chat_hand
+    dept_chat_load += chat_load
     dept_email_handle += email_hand
     dept_chat_avail += chat_av
     dept_email_avail += email_av
 
     util_rows.append({
         "Agent": ag,
-        "Chat handled (h)": chat_hand / 3600,
+        "Chat load (h)": chat_load / 3600,
+        "Chat slot-hours": chat_slot_secs / 3600,
         "Chat available (h)": chat_av / 3600,
-        "Chat util": (chat_hand / chat_av) if chat_av else None,
+        "Chat util": (chat_load / chat_av) if chat_av else None,
         "Email handled (h)": email_hand / 3600,
         "Email available (h)": email_av / 3600,
         "Email util": (email_hand / email_av) if email_av else None,
-        "_avail_secs": co_secs + eo_secs + sh_secs,
+        "_avail_secs": sum_secs(merge_intervals(co + eo + sh)),
         "_key": _norm_person_key(ag),
     })
 
-chat_util = (dept_chat_handle / dept_chat_avail) if dept_chat_avail else None
+chat_util = (dept_chat_load / dept_chat_avail) if dept_chat_avail else None
 email_util = (dept_email_handle / dept_email_avail) if dept_email_avail else None
 
 df_util = pd.DataFrame(util_rows)
@@ -1620,19 +1689,28 @@ if email_total and email_reopened:
 st.markdown("---")
 st.subheader("Operational Metrics")
 
-_util_tooltip = ("Time handling contacts ∩ time available, divided by availability. "
-                 "Shared 'Available_All' time is split between chat and email in "
-                 "proportion to the work handled on each — the SAME method for both tiles.")
+_chat_util_tooltip = (
+    f"Capacity-adjusted chat load divided by all chat-eligible availability. Each agent has "
+    f"{CHAT_CONCURRENCY_CAPACITY} chat slots: one active chat uses "
+    f"{1 / CHAT_CONCURRENCY_CAPACITY:.0%} capacity and "
+    f"{CHAT_CONCURRENCY_CAPACITY} simultaneous chats use 100%. 'Available_All' counts as "
+    "chat-eligible; chat and email percentages are independent and should not be added."
+)
+_email_util_tooltip = (
+    "Time handling email contacts ∩ time available, divided by all email-eligible "
+    "availability. 'Available_All' counts as email-eligible; chat and email percentages "
+    "are independent and should not be added."
+)
 
 _n_op_cols = 4 if adherence is not None else 3
 _op = st.columns(_n_op_cols)
 render_custom_metric(_op[0], "📈 Chat Utilization",
                      f"{chat_util:.1%}" if chat_util is not None else "—",
-                     _util_tooltip, get_utilization_color(chat_util),
-                     f"{dept_chat_handle/3600:,.1f}h of {dept_chat_avail/3600:,.1f}h")
+                     _chat_util_tooltip, get_utilization_color(chat_util),
+                     f"{dept_chat_load/3600:,.1f} load-h of {dept_chat_avail/3600:,.1f}h")
 render_custom_metric(_op[1], "📈 Email Utilization",
                      f"{email_util:.1%}" if email_util is not None else "—",
-                     _util_tooltip, get_utilization_color(email_util),
+                     _email_util_tooltip, get_utilization_color(email_util),
                      f"{dept_email_handle/3600:,.1f}h of {dept_email_avail/3600:,.1f}h")
 render_custom_metric(_op[2], "⏱️ Avg Email Resp Time", fmt_hms(avg_resp_secs),
                      "Mean email response time across the period",
@@ -1651,7 +1729,8 @@ with st.expander("Per-agent utilisation"):
         _show = df_util.drop(columns=["_avail_secs", "_key"]).sort_values("Agent")
         st.dataframe(
             _show.style.format({
-                "Chat handled (h)": "{:,.2f}", "Chat available (h)": "{:,.2f}",
+                "Chat load (h)": "{:,.2f}", "Chat slot-hours": "{:,.2f}",
+                "Chat available (h)": "{:,.2f}",
                 "Email handled (h)": "{:,.2f}", "Email available (h)": "{:,.2f}",
                 "Chat util": "{:.1%}", "Email util": "{:.1%}",
             }, na_rep="—"),
