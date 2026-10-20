@@ -679,7 +679,12 @@ def file_signature(p: Path):
 
 @st.cache_data(show_spinner=False)
 def load_csv_cached(path_str: str, sig: tuple, **read_kwargs):
-    return pd.read_csv(path_str, **read_kwargs)
+    if "encoding" in read_kwargs:
+        return pd.read_csv(path_str, **read_kwargs)
+    try:
+        return pd.read_csv(path_str, encoding="utf-8-sig", **read_kwargs)
+    except UnicodeDecodeError:
+        return pd.read_csv(path_str, encoding="cp1252", **read_kwargs)
 
 
 chat_path = resolve_path_case_insensitive("chat.csv")
