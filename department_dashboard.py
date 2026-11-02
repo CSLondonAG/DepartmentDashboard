@@ -872,12 +872,11 @@ def canonicalise_columns(frame: pd.DataFrame, wanted, label: str) -> pd.DataFram
 
 
 def parse_dt(frame: pd.DataFrame, cols, *, dayfirst: bool = True):
-    """Coerce mixed-format datetimes. Excel error strings become NaT.
+    """Parse Salesforce dates using UK day-first order by default.
 
-    Salesforce exports use day-first dates, but report_items.csv contains
-    month-first values for ambiguous dates (for example 10/12/2026 means
-    12 October). ``format='mixed'`` lets pandas parse each value independently,
-    so unambiguous day-first values such as 20/07/2026 still parse correctly.
+    Ambiguous values such as 12/10/2026 mean 12 October, not 10 December.
+    Mixed-format parsing supports differing timestamp precision and ISO dates.
+    Excel error strings become NaT.
     """
     for c in cols:
         if c in frame.columns:
@@ -907,7 +906,7 @@ email_sla_df = canonicalise_columns(
     ["Date/Time Opened", "Completion Date", "Elapsed Time (Hours)",
      "Target Response (Hours)", "Status", "Case Origin", EMAIL_CASE_KEY], "email.csv")
 
-df_items = parse_dt(df_items, ["Start DT", "End DT"], dayfirst=False)
+df_items = parse_dt(df_items, ["Start DT", "End DT"], dayfirst=True)
 df_presence = parse_dt(df_presence, ["Start DT", "End DT"])
 chat_sla_df = parse_dt(chat_sla_df, ["Date/Time Opened"])
 email_sla_df = parse_dt(email_sla_df, ["Date/Time Opened", "Completion Date"])
