@@ -4,6 +4,15 @@ Department Performance Dashboard
 
 Revision notes (this version fixes 27 issues found in a full calculation review):
 
+ENHANCED MESSAGING
+  30. Loads Agent Work and Messaging Session Metrics as separate sources joined
+      at session level, preventing transfers from duplicating response metrics.
+  31. Adds Messaging volume, handled/abandoned sessions, AHT, transfers,
+      first-response performance, speed to answer and message counts.
+  32. Legacy Chat and Enhanced Messaging share the observed two-slot real-time
+      conversation capacity; their customer and SLA metrics remain separate.
+  33. Adds daily Messaging detail, heatmap coverage and data-quality checks.
+
 CAPACITY MODEL
   28. Chat utilisation now models two concurrent chat slots per agent. One
       active chat consumes 50% of chat capacity, two consume 100%, and any
@@ -171,7 +180,13 @@ STATUS_SHARED = "Available_All"
 AVAILABLE_STATUSES = {STATUS_CHAT_ONLY, STATUS_EMAIL_ONLY, STATUS_SHARED}
 
 CHAT_DEVNAME = "sfdc_liveagent"
+MESSAGING_DEVNAME = "sfdc_livemessage"
 EMAIL_DEVNAME = "casesChannel"
+
+# Enhanced Messaging uses the same real-time conversation availability pool as
+# legacy Chat in this org. The supplied presence and Agent Work exports show a
+# maximum of two simultaneous assignments, matching the existing Chat capacity.
+MESSAGING_FIRST_RESPONSE_TARGET_SEC = 60.0
 
 # One agent can actively work up to two chats at once. Chat utilisation is
 # therefore measured against two chat slots: one active chat consumes 50% of
@@ -820,12 +835,15 @@ chat_path = resolve_path_case_insensitive("chat.csv")
 email_path = resolve_path_case_insensitive("email.csv")
 survey_path = resolve_path_case_insensitive("survey.csv")
 items_path = resolve_path_case_insensitive("report_items.csv")
+messaging_items_path = resolve_path_case_insensitive("report_messaging_agent_work.csv")
+messaging_metrics_path = resolve_path_case_insensitive("report_messaging_metrics.csv")
 pres_path = resolve_path_case_insensitive("report_presence.csv")
 shifts_path = resolve_path_case_insensitive("shifts.csv")
 
 # FIX #3: shifts.csv is no longer required. It used to block startup while
 # contributing nothing; it is now optional AND actually used (adherence tile).
-REQUIRED = (chat_path, email_path, items_path, pres_path)
+REQUIRED = (chat_path, email_path, items_path, messaging_items_path,
+            messaging_metrics_path, pres_path)
 missing = [p.name for p in REQUIRED if not p.exists()]
 if missing:
     st.error(f"Missing required files in the app folder: {', '.join(missing)}")
@@ -905,11 +923,32 @@ email_sla_df = canonicalise_columns(
     load_csv_cached(str(email_path), file_signature(email_path)),
     ["Date/Time Opened", "Completion Date", "Elapsed Time (Hours)",
      "Target Response (Hours)", "Status", "Case Origin", EMAIL_CASE_KEY], "email.csv")
+messaging_items_df = canonicalise_columns(
+    load_csv_cached(str(messaging_items_path), file_signature(messaging_items_path)),
+    ["Agent Work ID", "Messaging Session Name", "User: Full Name",
+     "Service Channel: Developer Name", "Queue: Name", "Assign Date",
+     "Accept Date", "Close Date", "Handle Time", "Speed To Answer", "Status"],
+    "report_messaging_agent_work.csv")
+messaging_metrics_long = canonicalise_columns(
+    load_csv_cached(str(messaging_metrics_path), file_signature(messaging_metrics_path)),
+    ["Messaging Session ID", "Messaging Session Name", "Start Time", "End Time",
+     "Messaging Session Metric Type", "Messaging Session Metric Value"],
+    "report_messaging_metrics.csv")
 
 df_items = parse_dt(df_items, ["Start DT", "End DT"], dayfirst=True)
 df_presence = parse_dt(df_presence, ["Start DT", "End DT"])
 chat_sla_df = parse_dt(chat_sla_df, ["Date/Time Opened"])
 email_sla_df = parse_dt(email_sla_df, ["Date/Time Opened", "Completion Date"])
+messaging_items_df = parse_dt(
+    messaging_items_df, ["Assign Date", "Accept Date", "Close Date"])
+messaging_metrics_long = parse_dt(
+    messaging_metrics_long, ["Start Time", "End Time"])
+
+# Normalise Agent Work to the interval names used by the utilisation engine.
+# An unaccepted routing attempt deliberately has no Start DT and cannot consume
+# handling capacity, but remains available for abandonment/routing analysis.
+messaging_items_df["Start DT"] = messaging_items_df["Accept Date"]
+messaging_items_df["End DT"] = messaging_items_df["Close Date"]
 
 df_shifts = pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
 if shifts_path.exists():
@@ -931,7 +970,10 @@ if SOURCE_UTC_OFFSET_HOURS:
     for _df, _cols in ((df_items, ["Start DT", "End DT"]),
                        (df_presence, ["Start DT", "End DT"]),
                        (chat_sla_df, ["Date/Time Opened"]),
-                       (email_sla_df, ["Date/Time Opened", "Completion Date"])):
+                       (email_sla_df, ["Date/Time Opened", "Completion Date"]),
+                       (messaging_items_df,
+                        ["Assign Date", "Accept Date", "Close Date", "Start DT", "End DT"]),
+                       (messaging_metrics_long, ["Start Time", "End Time"])):
         for _c in _cols:
             if _c in _df.columns:
                 _df[_c] = _df[_c] + _shift
@@ -987,6 +1029,7 @@ def _apply_owner_exclusion(frame: pd.DataFrame, label: str) -> pd.DataFrame:
 
 
 df_items = _apply_owner_exclusion(df_items, "items")
+messaging_items_df = _apply_owner_exclusion(messaging_items_df, "messaging items")
 df_presence = _apply_owner_exclusion(df_presence, "presence")
 chat_sla_df = _apply_owner_exclusion(chat_sla_df, "chat")
 email_sla_df = _apply_owner_exclusion(email_sla_df, "email")
@@ -1002,6 +1045,77 @@ _coerce_numeric(chat_sla_df, "Wait Time", "wait_time")
 _coerce_numeric(chat_sla_df, "Abandoned After", "abandoned_after")
 _coerce_numeric(email_sla_df, "Elapsed Time (Hours)", "elapsed_hours")
 _coerce_numeric(df_items, "Handle Time", "handle_time")
+_coerce_numeric(messaging_items_df, "Handle Time", "messaging_handle_time")
+_coerce_numeric(messaging_items_df, "Speed To Answer", "messaging_speed_to_answer")
+_coerce_numeric(
+    messaging_metrics_long, "Messaging Session Metric Value", "messaging_metric_value")
+
+# ---------------------------------------------------------------------------
+# Enhanced Messaging: one session row joined to its Agent Work roll-up.
+#
+# The Salesforce metrics export is long-form (one row per metric type). Pivot it
+# once and keep all session-level calculations on this table. Never join the
+# metric values directly to Agent Work rows: transferred sessions have several
+# assignments and doing so would duplicate message counts and response times.
+# ---------------------------------------------------------------------------
+_metric_dupes = messaging_metrics_long.duplicated(
+    subset=["Messaging Session Name", "Messaging Session Metric Type"], keep=False)
+dq["messaging_duplicate_metric_rows"] = int(_metric_dupes.sum())
+
+_messaging_session_base = (
+    messaging_metrics_long.sort_values("Start Time")
+    .drop_duplicates(subset=["Messaging Session Name"], keep="first")
+    [["Messaging Session Name", "Messaging Session ID", "Start Time", "End Time"]]
+)
+_messaging_metric_wide = messaging_metrics_long.pivot_table(
+    index="Messaging Session Name",
+    columns="Messaging Session Metric Type",
+    values="Messaging Session Metric Value",
+    aggfunc="first",
+).reset_index()
+_messaging_metric_wide.columns.name = None
+
+messaging_items_df["Human Agent"] = messaging_items_df["User: Full Name"].where(
+    messaging_items_df["User: Full Name"].astype(str).str.strip().str.casefold()
+    != "automated process"
+)
+messaging_items_df["Is Closed Assignment"] = (
+    messaging_items_df["Status"].astype(str).str.strip().str.casefold() == "closed")
+messaging_items_df["Is Abandoned Assignment"] = (
+    messaging_items_df["Status"].astype(str).str.strip().str.casefold() == "abandoned")
+messaging_items_df["Is Canceled Assignment"] = (
+    messaging_items_df["Status"].astype(str).str.strip().str.casefold() == "canceled")
+
+_messaging_work_by_session = (
+    messaging_items_df.groupby("Messaging Session Name", as_index=False)
+    .agg(
+        First_Assign=("Assign Date", "min"),
+        First_Accept=("Accept Date", "min"),
+        Last_Close=("Close Date", "max"),
+        Assignments=("Agent Work ID", "size"),
+        Accepted_Assignments=("Accept Date", "count"),
+        Total_Handle_Secs=("Handle Time", lambda s: s.sum(min_count=1)),
+        Avg_Speed_To_Answer=("Speed To Answer", "mean"),
+        Human_Agents=("Human Agent", "nunique"),
+        Any_Closed=("Is Closed Assignment", "any"),
+        Any_Abandoned=("Is Abandoned Assignment", "any"),
+        Any_Canceled=("Is Canceled Assignment", "any"),
+    )
+)
+
+messaging_sessions = (
+    _messaging_session_base
+    .merge(_messaging_metric_wide, on="Messaging Session Name", how="left")
+    .merge(_messaging_work_by_session, on="Messaging Session Name", how="left")
+)
+for _c in ("Assignments", "Accepted_Assignments", "Human_Agents"):
+    messaging_sessions[_c] = messaging_sessions[_c].fillna(0).astype(int)
+for _c in ("Any_Closed", "Any_Abandoned", "Any_Canceled"):
+    messaging_sessions[_c] = messaging_sessions[_c].fillna(False).astype(bool)
+
+dq["messaging_sessions"] = int(len(messaging_sessions))
+dq["messaging_sessions_without_agent_work"] = int(
+    (messaging_sessions["Assignments"] == 0).sum())
 
 # ---------------------------------------------------------------------------
 # Per-case SLA target.
@@ -1064,10 +1178,12 @@ if "Completion Date" in email_sla_df.columns:
 # from availability (NaT > ts is False) and from volume. Clamp instead, to the
 # latest end timestamp seen anywhere in the export ("as of").
 # ---------------------------------------------------------------------------
-_ends = [s.max() for s in (df_items["End DT"], df_presence["End DT"],
+_ends = [s.max() for s in (df_items["End DT"], messaging_items_df["End DT"],
+                           messaging_metrics_long["End Time"], df_presence["End DT"],
                            email_sla_df.get("Completion Date", pd.Series(dtype="datetime64[ns]")))
          if s.notna().any()]
-_starts = [s.max() for s in (df_items["Start DT"], df_presence["Start DT"],
+_starts = [s.max() for s in (df_items["Start DT"], messaging_items_df["Assign Date"],
+                             messaging_metrics_long["Start Time"], df_presence["Start DT"],
                              chat_sla_df["Date/Time Opened"], email_sla_df["Date/Time Opened"])
            if s.notna().any()]
 DATA_ASOF = max(_ends + _starts) if (_ends or _starts) else pd.Timestamp.now()
@@ -1094,7 +1210,19 @@ if dq["items_unaccepted"]:
     dq["items_unaccepted_chat_pct"] = (dq["items_unaccepted_chat"] / _tot_chat * 100) if _tot_chat else 0.0
     dq["items_unaccepted_email_pct"] = (dq["items_unaccepted_email"] / _tot_email * 100) if _tot_email else 0.0
 
-for _df, _label in ((df_items, "items"), (df_presence, "presence")):
+_messaging_unaccepted = messaging_items_df["Start DT"].isna()
+if "Handle Time" in messaging_items_df.columns:
+    _messaging_unaccepted = _messaging_unaccepted | messaging_items_df["Handle Time"].isna()
+dq["messaging_items_unaccepted"] = int(_messaging_unaccepted.sum())
+dq["messaging_items_total"] = int(len(messaging_items_df))
+dq["messaging_items_unaccepted_pct"] = (
+    dq["messaging_items_unaccepted"] / dq["messaging_items_total"] * 100
+    if dq["messaging_items_total"] else 0.0
+)
+
+for _df, _label in ((df_items, "items"),
+                    (messaging_items_df, "messaging items"),
+                    (df_presence, "presence")):
     _open = _df["End DT"].isna() & _df["Start DT"].notna()
     dq[f"open_{_label}"] = int(_open.sum())
     _df["End DT Clamped"] = _df["End DT"].where(~_open, DATA_ASOF)
@@ -1276,11 +1404,12 @@ _all_dates = [
     chat_sla_df["Date/Time Opened"],
     email_sla_df["Date/Time Opened"],
     df_items["Start DT"],
+    messaging_sessions["Start Time"],
 ]
 _mins = [s.min().date() for s in _all_dates if s.notna().any()]
 _maxs = [s.max().date() for s in _all_dates if s.notna().any()]
 if not _mins:
-    st.error("No usable dates found in chat.csv, email.csv or report_items.csv.")
+    st.error("No usable dates found in the Chat, Email, work-item or Messaging exports.")
     st.stop()
 min_date, max_date = min(_mins), max(_maxs)
 
@@ -1314,7 +1443,8 @@ with st.expander("ℹ️ Data files & quality"):
         mtime = _dt.datetime.fromtimestamp(p.stat().st_mtime)
         return f"{p.name} • {p.stat().st_size:,} bytes • {mtime:%Y-%m-%d %H:%M:%S}"
 
-    _files = [chat_path, email_path, items_path, pres_path]
+    _files = [chat_path, email_path, items_path, messaging_items_path,
+              messaging_metrics_path, pres_path]
     if shifts_path.exists():
         _files.append(shifts_path)
     if survey_path.exists():
@@ -1331,6 +1461,7 @@ with st.expander("ℹ️ Data files & quality"):
         notes.append(f"**{dedup_stats['unkeyed']}** missed chats had no email or IP and "
                      f"were left un-deduplicated (they are not assumed to be the same visitor).")
     for lbl, singular, plural in (("items", "work item", "work items"),
+                                  ("messaging items", "Messaging work item", "Messaging work items"),
                                   ("presence", "presence record", "presence records")):
         _n = dq.get(f"open_{lbl}", 0)
         if _n:
@@ -1345,6 +1476,9 @@ with st.expander("ℹ️ Data files & quality"):
         ("uncoercible_wait_time", "chat 'Wait Time' values were not numeric and became blank"),
         ("uncoercible_abandoned_after", "chat 'Abandoned After' values were not numeric and became blank"),
         ("uncoercible_elapsed_hours", "email 'Elapsed Time (Hours)' values were not numeric and became blank"),
+        ("uncoercible_messaging_handle_time", "Messaging 'Handle Time' values were not numeric and became blank"),
+        ("uncoercible_messaging_speed_to_answer", "Messaging 'Speed To Answer' values were not numeric and became blank"),
+        ("uncoercible_messaging_metric_value", "Messaging metric values were not numeric and became blank"),
     ):
         if dq.get(key):
             notes.append(f"⚠️ **{dq[key]}** {msg}.")
@@ -1365,6 +1499,24 @@ with st.expander("ℹ️ Data files & quality"):
             f"and {dq.get('items_unaccepted_email', 0):,} email ({dq.get('items_unaccepted_email_pct', 0):.2f}% of email). "
             f"They cannot be timed so they are excluded from AHT and utilisation, but the rate is "
             f"worth watching — these are routing attempts an agent declined or let time out."
+        )
+    if dq.get("messaging_items_unaccepted"):
+        notes.append(
+            f"**{dq['messaging_items_unaccepted']:,}** of "
+            f"**{dq.get('messaging_items_total', 0):,}** Messaging routing attempts "
+            f"({dq.get('messaging_items_unaccepted_pct', 0):.1f}%) were not accepted. "
+            "They remain in session abandonment analysis but are excluded from AHT and utilization."
+        )
+    if dq.get("messaging_sessions_without_agent_work"):
+        notes.append(
+            f"**{dq['messaging_sessions_without_agent_work']:,}** Messaging session(s) have metrics "
+            "but no matching Agent Work row. They remain in total session volume but are unclassified "
+            "for human handling and abandonment."
+        )
+    if dq.get("messaging_duplicate_metric_rows"):
+        notes.append(
+            f"⚠️ **{dq['messaging_duplicate_metric_rows']:,}** Messaging metric row(s) repeat a "
+            "session/metric pair; the first value is used."
         )
     if _excluded_keys:
         _hits = {n: c for n, c in dq.get("excluded_hits", {}).items() if c}
@@ -1435,6 +1587,77 @@ ts_start = pd.Timestamp(start_date)
 ts_end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
 window_start = ts_start.to_pydatetime()
 window_end = ts_end.to_pydatetime()
+
+# Enhanced Messaging sessions are attributed to the day they started. Metric
+# rows are available only after a session ends, so this is a historical view,
+# not a live queue monitor.
+messaging_period = messaging_sessions[
+    (messaging_sessions["Start Time"] >= ts_start)
+    & (messaging_sessions["Start Time"] < ts_end)
+].copy()
+_messaging_period_names = set(messaging_period["Messaging Session Name"])
+messaging_work_period = messaging_items_df[
+    messaging_items_df["Messaging Session Name"].isin(_messaging_period_names)
+].copy()
+
+
+def _positive_metric(frame: pd.DataFrame, column: str) -> pd.Series:
+    """Numeric, strictly-positive Messaging metric values.
+
+    Salesforce emits zero when a response or message does not exist. Treating
+    that as a genuine zero-second response would incorrectly improve the SLA.
+    """
+    if column not in frame.columns:
+        return pd.Series(dtype="float64")
+    values = pd.to_numeric(frame[column], errors="coerce")
+    return values[values > 0]
+
+
+messaging_total = int(len(messaging_period))
+messaging_handled = int(messaging_period["Any_Closed"].sum())
+messaging_abandoned = int(
+    ((~messaging_period["Any_Closed"]) & messaging_period["Any_Abandoned"]).sum())
+messaging_unclassified = int((messaging_period["Assignments"] == 0).sum())
+messaging_transfers = int((messaging_period["Human_Agents"] > 1).sum())
+messaging_assignments = int(messaging_period["Assignments"].sum())
+
+_messaging_handle = pd.to_numeric(
+    messaging_period.loc[messaging_period["Any_Closed"], "Total_Handle_Secs"],
+    errors="coerce",
+).dropna()
+messaging_aht = _messaging_handle.mean() if len(_messaging_handle) else None
+
+_messaging_first_response = _positive_metric(
+    messaging_period, "Service Rep First Response Time")
+messaging_first_response_mean = (
+    _messaging_first_response.mean() if len(_messaging_first_response) else None)
+messaging_first_response_median = (
+    _messaging_first_response.median() if len(_messaging_first_response) else None)
+messaging_first_response_in_target = int(
+    (_messaging_first_response <= MESSAGING_FIRST_RESPONSE_TARGET_SEC).sum())
+messaging_first_response_target_pct = (
+    messaging_first_response_in_target / len(_messaging_first_response) * 100
+    if len(_messaging_first_response) else None)
+
+_messaging_accept_to_response = _positive_metric(
+    messaging_period, "Service Rep Accept To First Response Time")
+messaging_accept_to_response_median = (
+    _messaging_accept_to_response.median() if len(_messaging_accept_to_response) else None)
+
+_messaging_speed = pd.to_numeric(
+    messaging_work_period["Speed To Answer"], errors="coerce").dropna()
+messaging_speed_to_answer = _messaging_speed.mean() if len(_messaging_speed) else None
+
+_agent_messages = pd.to_numeric(
+    messaging_period.get("Agent Message Count", pd.Series(dtype="float64")),
+    errors="coerce",
+).fillna(0)
+_customer_messages = pd.to_numeric(
+    messaging_period.get("End User Message Count", pd.Series(dtype="float64")),
+    errors="coerce",
+).fillna(0)
+messaging_agent_messages = int(_agent_messages.sum())
+messaging_customer_messages = int(_customer_messages.sum())
 
 # Volume basis: items STARTING in the window.
 mask_started = (df_items["Start DT"] >= ts_start) & (df_items["Start DT"] < ts_end)
@@ -1528,10 +1751,10 @@ for ag, grp in presence_win.groupby("Created By: Full Name"):
     if sh:
         shared_map[ag] = merge_intervals(sh)
 
-# Handling intervals, built from the OVERLAP slice (FIX #21). Chat intervals
-# remain unmerged so concurrent chats can consume separate capacity slots;
-# email intervals are merged because email capacity is measured as occupied
-# wall-clock time.
+# Handling intervals, built from the OVERLAP slice (FIX #21). Conversation
+# intervals (legacy Chat plus Enhanced Messaging) remain unmerged so concurrent
+# conversations consume separate capacity slots; email intervals are merged
+# because email capacity is measured as occupied wall-clock time.
 chat_handles_map, email_handles_map = {}, {}
 for devname, target in ((CHAT_DEVNAME, chat_handles_map), (EMAIL_DEVNAME, email_handles_map)):
     sub = df_overlap[df_overlap["Service Channel: Developer Name"] == devname]
@@ -1541,6 +1764,21 @@ for devname, target in ((CHAT_DEVNAME, chat_handles_map), (EMAIL_DEVNAME, email_
         ints = [x for x in ints if x]
         if ints:
             target[ag] = ints if devname == CHAT_DEVNAME else merge_intervals(ints)
+
+# Enhanced Messaging shares the same Available_Chat / Available_All pool and
+# two-slot capacity as legacy Chat. Add accepted Messaging intervals to the
+# conversation workload before utilization and residual email capacity are
+# calculated.
+_messaging_overlap = messaging_items_df[
+    (messaging_items_df["Start DT"] < ts_end)
+    & (messaging_items_df["End DT Clamped"] > ts_start)
+]
+for ag, grp in _messaging_overlap.groupby("User: Full Name"):
+    ints = [clip_to_window(s, e, window_start, window_end)
+            for s, e in zip(grp["Start DT"], grp["End DT Clamped"])]
+    ints = [x for x in ints if x]
+    if ints:
+        chat_handles_map.setdefault(ag, []).extend(ints)
 
 dept_chat_load = dept_email_load = dept_email_excess = 0.0
 dept_chat_avail = dept_email_avail = 0.0
@@ -1585,10 +1823,10 @@ for ag in agents:
 
     util_rows.append({
         "Agent": ag,
-        "Chat load (h)": chat_load / 3600,
-        "Chat slot-hours": chat_slot_secs / 3600,
-        "Chat available (h)": chat_av / 3600,
-        "Chat util": (chat_load / chat_av) if chat_av else None,
+        "Conversation load (h)": chat_load / 3600,
+        "Conversation slot-hours": chat_slot_secs / 3600,
+        "Conversation available (h)": chat_av / 3600,
+        "Conversation util": (chat_load / chat_av) if chat_av else None,
         "Email load (h)": email_load / 3600,
         "Email residual capacity (h)": email_av / 3600,
         "Email excess demand (h)": email_excess / 3600,
@@ -1743,6 +1981,105 @@ render_custom_metric(c4, "⏳ Avg Email Handle Time", fmt_mmss(email_aht),
                      COLOR_GOOD,
                      f"{email_touches:.2f} touches/case" if email_touches else "")
 
+st.markdown("#### 💬 Enhanced Messaging")
+_m1, _m2, _m3, _m4 = st.columns(4)
+render_custom_metric(
+    _m1, "Messaging Sessions", f"{messaging_total:,}",
+    "Unique Messaging sessions started in the selected period. Counted once even when "
+    "routing, cancellation or transfer creates several Agent Work rows.",
+    COLOR_GOOD,
+    f"{messaging_assignments:,} routing assignments",
+)
+render_custom_metric(
+    _m2, "Sessions Handled", f"{messaging_handled:,}",
+    "Sessions with at least one closed human Agent Work assignment.",
+    COLOR_GOOD,
+    f"{messaging_abandoned:,} unhandled/abandoned"
+    + (f" • {messaging_unclassified:,} unclassified" if messaging_unclassified else ""),
+)
+render_custom_metric(
+    _m3, "Messaging AHT", fmt_mmss(messaging_aht),
+    "Mean total Agent Work handle time per handled Messaging session. Multiple assignments "
+    "for the same session are summed before averaging.",
+    COLOR_GOOD,
+    "Agent Work Handle Time",
+)
+render_custom_metric(
+    _m4, "Transferred Sessions", f"{messaging_transfers:,}",
+    "Sessions handled by more than one human agent.",
+    COLOR_WARN if messaging_transfers else COLOR_GOOD,
+    f"{(messaging_transfers / messaging_handled):.1%} of handled"
+    if messaging_handled else "",
+)
+
+_mr1, _mr2, _mr3, _mr4 = st.columns(4)
+render_custom_metric(
+    _mr1, "First Response ≤60s", fmt_pct(messaging_first_response_target_pct),
+    "Share of sessions with a positive Service Rep First Response Time at or below 60 seconds. "
+    "Zero means no measurable agent response and is excluded from this denominator.",
+    COLOR_GOOD if messaging_first_response_target_pct is not None
+    and messaging_first_response_target_pct >= 85 else COLOR_WARN,
+    f"{messaging_first_response_in_target:,} of {len(_messaging_first_response):,} measurable",
+)
+render_custom_metric(
+    _mr2, "Median First Response", fmt_mmss(messaging_first_response_median),
+    "Median route-to-first-agent-response time. Median is used because asynchronous sessions "
+    "create a substantial long tail.",
+    COLOR_GOOD,
+    f"mean {fmt_mmss(messaging_first_response_mean)}",
+)
+render_custom_metric(
+    _mr3, "Avg Speed to Answer", fmt_mmss(messaging_speed_to_answer),
+    "Mean routing-request-to-acceptance time from Agent Work. This is different from the "
+    "time until the first written response.",
+    COLOR_GOOD,
+    f"median post-accept response {fmt_mmss(messaging_accept_to_response_median)}",
+)
+render_custom_metric(
+    _mr4, "Messages Sent", f"{messaging_agent_messages:,}",
+    "Total agent messages sent in sessions started in the selected period.",
+    COLOR_GOOD,
+    f"{messaging_customer_messages:,} customer messages",
+)
+
+with st.expander("Daily Enhanced Messaging detail"):
+    _messaging_daily_rows = []
+    for _d, _g in messaging_period.groupby(messaging_period["Start Time"].dt.date):
+        _fr = _positive_metric(_g, "Service Rep First Response Time")
+        _handled = _g[_g["Any_Closed"]]
+        _aht = pd.to_numeric(_handled["Total_Handle_Secs"], errors="coerce").dropna()
+        _messaging_daily_rows.append({
+            "Date": pd.Timestamp(_d),
+            "Sessions": len(_g),
+            "Handled": int(_g["Any_Closed"].sum()),
+            "Abandoned": int(((~_g["Any_Closed"]) & _g["Any_Abandoned"]).sum()),
+            "Transfers": int((_g["Human_Agents"] > 1).sum()),
+            "AHT (s)": _aht.mean() if len(_aht) else None,
+            "First response ≤60s %":
+                float((_fr <= MESSAGING_FIRST_RESPONSE_TARGET_SEC).mean() * 100)
+                if len(_fr) else None,
+            "Median first response (s)": _fr.median() if len(_fr) else None,
+            "Agent messages": int(pd.to_numeric(
+                _g.get("Agent Message Count", pd.Series(0, index=_g.index)),
+                errors="coerce").fillna(0).sum()),
+            "Customer messages": int(pd.to_numeric(
+                _g.get("End User Message Count", pd.Series(0, index=_g.index)),
+                errors="coerce").fillna(0).sum()),
+        })
+    _messaging_daily = pd.DataFrame(_messaging_daily_rows)
+    if _messaging_daily.empty:
+        st.info("No completed Messaging sessions started in this period.")
+    else:
+        st.dataframe(
+            _messaging_daily.sort_values("Date").style.format({
+                "Date": lambda x: x.strftime("%d %b %Y"),
+                "AHT (s)": "{:,.1f}",
+                "First response ≤60s %": "{:.1f}",
+                "Median first response (s)": "{:,.1f}",
+            }, na_rep="—"),
+            width="stretch",
+        )
+
 # Re-work is invisible when volume counts rows; surfaced explicitly instead.
 if email_total and email_reopened:
     _single = email_cases.loc[email_cases["Touches"] == 1, "Total_Secs"].mean()
@@ -1760,11 +2097,12 @@ st.markdown("---")
 st.subheader("Operational Metrics")
 
 _chat_util_tooltip = (
-    f"Capacity-adjusted chat load divided by all chat-eligible availability. Each agent has "
-    f"{CHAT_CONCURRENCY_CAPACITY} chat slots: one active chat uses "
+    f"Capacity-adjusted legacy Chat plus Enhanced Messaging load divided by all "
+    f"conversation-eligible availability. Each agent has {CHAT_CONCURRENCY_CAPACITY} slots: "
+    f"one active conversation uses "
     f"{1 / CHAT_CONCURRENCY_CAPACITY:.0%} capacity and "
-    f"{CHAT_CONCURRENCY_CAPACITY} simultaneous chats use 100%. 'Available_All' counts as "
-    "chat-eligible; its residual capacity is used for the email KPI."
+    f"{CHAT_CONCURRENCY_CAPACITY} simultaneous conversations use 100%. 'Available_Chat' "
+    "and 'Available_All' are eligible; residual shared capacity is used for the email KPI."
 )
 _email_util_tooltip = (
     "Email load divided by assignable email capacity. Email-only presence supplies "
@@ -1774,7 +2112,7 @@ _email_util_tooltip = (
 
 _n_op_cols = 4 if adherence is not None else 3
 _op = st.columns(_n_op_cols)
-render_custom_metric(_op[0], "📈 Chat Utilization",
+render_custom_metric(_op[0], "📈 Conversation Utilization",
                      f"{chat_util:.1%}" if chat_util is not None else "—",
                      _chat_util_tooltip, get_utilization_color(chat_util),
                      f"{dept_chat_load/3600:,.1f} load-h of {dept_chat_avail/3600:,.1f}h")
@@ -1785,7 +2123,7 @@ render_custom_metric(_op[1], "📈 Email Utilization",
                      f"{dept_email_avail/3600:,.1f} residual-h")
 if dept_email_excess > 0:
     st.caption(
-        f"⚠️ {dept_email_excess/3600:,.1f} email-hours were recorded while chat load "
+        f"⚠️ {dept_email_excess/3600:,.1f} email-hours were recorded while conversation load "
         "made shared status unavailable for email. These hours are shown as excess "
         "demand and are not allowed to push email utilisation above 100%."
     )
@@ -1806,12 +2144,13 @@ with st.expander("Per-agent utilisation"):
         _show = df_util.drop(columns=["_avail_secs", "_key"]).sort_values("Agent")
         st.dataframe(
             _show.style.format({
-                "Chat load (h)": "{:,.2f}", "Chat slot-hours": "{:,.2f}",
-                "Chat available (h)": "{:,.2f}",
+                "Conversation load (h)": "{:,.2f}",
+                "Conversation slot-hours": "{:,.2f}",
+                "Conversation available (h)": "{:,.2f}",
                 "Email load (h)": "{:,.2f}",
                 "Email residual capacity (h)": "{:,.2f}",
                 "Email excess demand (h)": "{:,.2f}",
-                "Chat util": "{:.1%}", "Email util": "{:.1%}",
+                "Conversation util": "{:.1%}", "Email util": "{:.1%}",
             }, na_rep="—"),
             width="stretch",
         )
@@ -2220,6 +2559,11 @@ for _src, _label in ((chat_sla_p, "Chat"), (email_opened_p, "Email")):
         _p = _src[["Date/Time Opened"]].copy()
         _p["Channel"] = _label
         _hm_parts.append(_p)
+if len(messaging_period):
+    _p = messaging_period[["Start Time"]].rename(
+        columns={"Start Time": "Date/Time Opened"})
+    _p["Channel"] = "Messaging"
+    _hm_parts.append(_p)
 
 _hm = pd.concat(_hm_parts, ignore_index=True) if _hm_parts else pd.DataFrame(
     columns=["Date/Time Opened", "Channel"])
@@ -2259,11 +2603,14 @@ def _build_heatmap(df_src: pd.DataFrame, title: str, color_scheme: str = "blues"
     )
 
 
-_tab_all, _tab_chat, _tab_email = st.tabs(["Combined", "Chat only", "Email only"])
+_tab_all, _tab_chat, _tab_messaging, _tab_email = st.tabs(
+    ["Combined", "Chat only", "Messaging only", "Email only"])
 for _tab, _sub, _title, _scheme in (
-    (_tab_all, _hm, "All Contacts (Chat + Email)", "blues"),
+    (_tab_all, _hm, "All Contacts (Chat + Messaging + Email)", "blues"),
     (_tab_chat, _hm[_hm["Channel"] == "Chat"] if not _hm.empty else _hm,
      "Chat Contacts (incl. missed)", "greens"),
+    (_tab_messaging, _hm[_hm["Channel"] == "Messaging"] if not _hm.empty else _hm,
+     "Enhanced Messaging Sessions", "purples"),
     (_tab_email, _hm[_hm["Channel"] == "Email"] if not _hm.empty else _hm,
      "Email Contacts", "oranges"),
 ):
