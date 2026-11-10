@@ -10,8 +10,10 @@ ENHANCED MESSAGING
   31. Adds Messaging volume, handled/abandoned sessions, AHT, transfers,
       first-response performance, speed to answer and message counts.
   32. Legacy Chat and Enhanced Messaging share the observed two-slot real-time
-      conversation capacity; their customer and SLA metrics remain separate.
+      conversation capacity; their channel-level metrics remain separate.
   33. Adds daily Messaging detail, heatmap coverage and data-quality checks.
+  34. Weighted SLA now transitions from legacy Chat through 31 October 2026 to
+      Enhanced Messaging from 1 November, with Email included throughout.
 
 CAPACITY MODEL
   28. Chat utilisation now models two concurrent chat slots per agent. One
@@ -187,6 +189,13 @@ EMAIL_DEVNAME = "casesChannel"
 # legacy Chat in this org. The supplied presence and Agent Work exports show a
 # maximum of two simultaneous assignments, matching the existing Chat capacity.
 MESSAGING_FIRST_RESPONSE_TARGET_SEC = 60.0
+MESSAGING_SLA_START_DATE = datetime(2026, 11, 1).date()
+MESSAGING_TARGET_RESPONSE_MIN = 1.0
+MESSAGING_RESPONSE_TOLERANCE_MIN = 4.0
+W_MESSAGING_IN_TARGET = 0.50
+W_MESSAGING_RESPONSE = 0.30
+W_MESSAGING_ABANDON = 0.20
+MESSAGING_RESCALE_K = W_MESSAGING_IN_TARGET
 
 # One agent can actively work up to two chats at once. Chat utilisation is
 # therefore measured against two chat slots: one active chat consumes 50% of
@@ -555,7 +564,7 @@ def _norm_person_key(s: str) -> str:
 
 # =============================================================================
 # SLA scoring
-# FIX #7 / #8: bounded penalties, single-counted abandonment. These two functions
+# FIX #7 / #8: bounded penalties, single-counted abandonment. These scoring functions
 # are the ONLY place the formulas live, so the daily and hourly views can never
 # drift apart (previously the logic was duplicated).
 # =============================================================================
@@ -586,6 +595,51 @@ def chat_sla_from_slice(g: pd.DataFrame) -> Optional[float]:
            - W_CHAT_WAIT * wait_penalty
            - W_CHAT_ABANDON * abandon_frac)
     return clamp((raw / CHAT_RESCALE_K) * SLA_SCALE)
+
+
+def messaging_scorable(g: pd.DataFrame) -> pd.DataFrame:
+    """Messaging sessions with a matching, classifiable Agent Work record."""
+    if g is None or len(g) == 0:
+        return g
+    if "Assignments" not in g.columns:
+        return g.iloc[0:0]
+    return g[g["Assignments"] > 0]
+
+
+def messaging_sla_from_slice(g: pd.DataFrame) -> Optional[float]:
+    """Enhanced Messaging SLA score, 0-100, for session-level metrics.
+
+    The structure intentionally mirrors the legacy Chat score: first-response
+    target attainment supplies the positive term, response delay and abandoned
+    sessions supply bounded penalties. Median response replaces the mean because
+    asynchronous Messaging has a long inactivity tail.
+    """
+    g = messaging_scorable(g)
+    if g is None or len(g) == 0:
+        return None
+
+    response = pd.to_numeric(
+        g.get("Service Rep First Response Time", pd.Series(index=g.index, dtype="float64")),
+        errors="coerce",
+    )
+    answered = response[response > 0]
+    n_answered = len(answered)
+    frac_in_target = (
+        float((answered <= MESSAGING_FIRST_RESPONSE_TARGET_SEC).sum()) / n_answered
+        if n_answered else 0.0
+    )
+    median_response_min = (float(answered.median()) / 60.0) if n_answered else 0.0
+    abandon_frac = float(((~g["Any_Closed"]) & g["Any_Abandoned"]).sum()) / len(g)
+
+    excess = max(median_response_min - MESSAGING_TARGET_RESPONSE_MIN, 0.0)
+    response_penalty = (
+        min(excess / MESSAGING_RESPONSE_TOLERANCE_MIN, 1.0)
+        if MESSAGING_RESPONSE_TOLERANCE_MIN > 0 else (1.0 if excess else 0.0)
+    )
+    raw = (W_MESSAGING_IN_TARGET * frac_in_target
+           - W_MESSAGING_RESPONSE * response_penalty
+           - W_MESSAGING_ABANDON * abandon_frac)
+    return clamp((raw / MESSAGING_RESCALE_K) * SLA_SCALE)
 
 
 def email_scorable(g: pd.DataFrame) -> pd.DataFrame:
@@ -1594,6 +1648,7 @@ window_end = ts_end.to_pydatetime()
 messaging_period = messaging_sessions[
     (messaging_sessions["Start Time"] >= ts_start)
     & (messaging_sessions["Start Time"] < ts_end)
+    & (messaging_sessions["Start Time"] >= pd.Timestamp(MESSAGING_SLA_START_DATE))
 ].copy()
 _messaging_period_names = set(messaging_period["Messaging Session Name"])
 messaging_work_period = messaging_items_df[
@@ -1675,11 +1730,17 @@ df_overlap = df_items.loc[mask_overlap].copy()
 # re-opens that happen later. That is what "all time spent on this case" means.
 # ---------------------------------------------------------------------------
 cases_period = df_cases[(df_cases["First_Start"] >= ts_start) & (df_cases["First_Start"] < ts_end)]
-chat_cases = cases_period[cases_period["Service Channel: Developer Name"] == CHAT_DEVNAME]
+chat_cases = cases_period[
+    (cases_period["Service Channel: Developer Name"] == CHAT_DEVNAME)
+    & (cases_period["First_Start"] < pd.Timestamp(MESSAGING_SLA_START_DATE))
+]
 email_cases = cases_period[cases_period["Service Channel: Developer Name"] == EMAIL_DEVNAME]
 
 # Row-level slices are still needed for the utilisation intervals.
-chat_df = df_period[df_period["Service Channel: Developer Name"] == CHAT_DEVNAME]
+chat_df = df_period[
+    (df_period["Service Channel: Developer Name"] == CHAT_DEVNAME)
+    & (df_period["Start DT"] < pd.Timestamp(MESSAGING_SLA_START_DATE))
+]
 email_df = df_period[df_period["Service Channel: Developer Name"] == EMAIL_DEVNAME]
 
 chat_total = len(chat_cases)
@@ -1702,6 +1763,7 @@ email_aht_touch = (email_cases["Total_Secs"].sum() / email_cases["Touches"].sum(
 
 chat_sla_p = chat_sla_df[
     (chat_sla_df["Date/Time Opened"] >= ts_start) & (chat_sla_df["Date/Time Opened"] < ts_end)
+    & (chat_sla_df["Date/Time Opened"] < pd.Timestamp(MESSAGING_SLA_START_DATE))
 ].copy()
 # Email SLA population: opened OR responded to within the period.
 email_sla_p = email_window_slice(email_sla_df, ts_start, ts_end)
@@ -1758,6 +1820,8 @@ for ag, grp in presence_win.groupby("Created By: Full Name"):
 chat_handles_map, email_handles_map = {}, {}
 for devname, target in ((CHAT_DEVNAME, chat_handles_map), (EMAIL_DEVNAME, email_handles_map)):
     sub = df_overlap[df_overlap["Service Channel: Developer Name"] == devname]
+    if devname == CHAT_DEVNAME:
+        sub = sub[sub["Start DT"] < pd.Timestamp(MESSAGING_SLA_START_DATE)]
     for ag, grp in sub.groupby("User: Full Name"):
         ints = [clip_to_window(s, e, window_start, window_end)
                 for s, e in zip(grp["Start DT"], grp["End DT Clamped"])]
@@ -1871,30 +1935,40 @@ for d in pd.date_range(start_date, end_date):
     day = d.date()
 
     cd = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == day]
+    md = messaging_period[messaging_period["Start Time"].dt.date == day]
+    md_scored = messaging_scorable(md)
     # Attributed to exactly one day inside the period, so daily weights sum to
     # the period weight even though the slice is an opened-OR-responded union.
     ed = email_sla_p[email_sla_p["SLA Timestamp"].dt.date == day]
     ed_scored = email_scorable(ed)
 
     sla_c = chat_sla_from_slice(cd)
+    sla_m = messaging_sla_from_slice(md)
     sla_e = email_sla_from_slice(ed)
 
     _ans = cd[cd["Wait Time"].notna()]
+    _mresp = _positive_metric(md_scored, "Service Rep First Response Time")
     daily.append({
         "Date": d.normalize(),
         "Chat SLA": sla_c,
+        "Messaging SLA": sla_m,
         "Email SLA": sla_e,
         # Weight by the population each score was computed from...
         "Chat SLA Wt": len(cd),
+        "Messaging SLA Wt": len(md_scored),
         "Email SLA Wt": len(ed_scored),
         # ...and show the report_items work-item volume alongside it, so the two
         # populations can be compared rather than silently conflated.
         "Chat Vol": int((chat_cases["First_Start"].dt.date == day).sum()),
+        "Messaging Vol": len(md),
         "Email Vol": int((email_cases["First_Start"].dt.date == day).sum()),
         "Email Not Due": int(len(ed) - len(ed_scored)),
         "Chat ≤60s %": round(float((_ans["Wait Time"] <= CHAT_ANSWER_TARGET_SEC).mean() * 100), 1) if len(_ans) else None,
         "Chat Avg Wait (s)": round(float(_ans["Wait Time"].mean()), 1) if len(_ans) else None,
         "Chat Abandon %": round(float((cd["Abandoned After"] > CHAT_ABANDON_AFTER_SEC).mean() * 100), 1) if len(cd) else None,
+        "Messaging ≤60s %": round(float((_mresp <= MESSAGING_FIRST_RESPONSE_TARGET_SEC).mean() * 100), 1) if len(_mresp) else None,
+        "Messaging Median Resp (s)": round(float(_mresp.median()), 1) if len(_mresp) else None,
+        "Messaging Abandon %": round(float(((~md_scored["Any_Closed"]) & md_scored["Any_Abandoned"]).mean() * 100), 1) if len(md_scored) else None,
         "Email in target %": round(float((ed_scored["Effective Elapsed"] <= ed_scored["Effective Target"]).mean() * 100), 1) if len(ed_scored) else None,
         "Email Avg Resp (h)": round(float(ed_scored["Effective Elapsed"].mean()), 3) if len(ed_scored) else None,
     })
@@ -1904,17 +1978,27 @@ df_daily = pd.DataFrame(daily)
 # FIX #13: a day with no contacts is a GAP, not a zero. The old fillna(0) drew
 # weekends and closure days as genuine 0-score days and dragged the trend down.
 _cw = df_daily["Chat SLA Wt"].fillna(0)
+_mw = df_daily["Messaging SLA Wt"].fillna(0)
 _ew = df_daily["Email SLA Wt"].fillna(0)
-_num = df_daily["Chat SLA"].fillna(0) * _cw + df_daily["Email SLA"].fillna(0) * _ew
-_den = _cw.where(df_daily["Chat SLA"].notna(), 0) + _ew.where(df_daily["Email SLA"].notna(), 0)
+_num = (df_daily["Chat SLA"].fillna(0) * _cw
+        + df_daily["Messaging SLA"].fillna(0) * _mw
+        + df_daily["Email SLA"].fillna(0) * _ew)
+_den = (_cw.where(df_daily["Chat SLA"].notna(), 0)
+        + _mw.where(df_daily["Messaging SLA"].notna(), 0)
+        + _ew.where(df_daily["Email SLA"].notna(), 0))
 # Mask the denominator BEFORE dividing. Dividing first and masking after raises
 # ZeroDivisionError on pandas 3.x for a day with no contacts at all.
 df_daily["Weighted SLA"] = _num / _den.where(_den > 0)
 
 _ok_c = df_daily["Chat SLA"].notna()
+_ok_m = df_daily["Messaging SLA"].notna()
 _ok_e = df_daily["Email SLA"].notna()
 chat_weighted = ((df_daily.loc[_ok_c, "Chat SLA"] * df_daily.loc[_ok_c, "Chat SLA Wt"]).sum()
                  / df_daily.loc[_ok_c, "Chat SLA Wt"].sum()) if df_daily.loc[_ok_c, "Chat SLA Wt"].sum() else None
+messaging_weighted = (
+    (df_daily.loc[_ok_m, "Messaging SLA"] * df_daily.loc[_ok_m, "Messaging SLA Wt"]).sum()
+    / df_daily.loc[_ok_m, "Messaging SLA Wt"].sum()
+) if df_daily.loc[_ok_m, "Messaging SLA Wt"].sum() else None
 email_weighted = ((df_daily.loc[_ok_e, "Email SLA"] * df_daily.loc[_ok_e, "Email SLA Wt"]).sum()
                   / df_daily.loc[_ok_e, "Email SLA Wt"].sum()) if df_daily.loc[_ok_e, "Email SLA Wt"].sum() else None
 _tot_wt = _den.sum()
@@ -1930,6 +2014,20 @@ n_chat_abandoned = int((chat_sla_p["Abandoned After"] > CHAT_ABANDON_AFTER_SEC).
 sla_comp_chat_in_target_pct = (n_chat_in_target / n_chat_answered * 100) if n_chat_answered else None
 sla_comp_chat_avg_wait_secs = _cw_p["Wait Time"].mean() if n_chat_answered else None
 sla_comp_chat_abandon_pct = (n_chat_abandoned / n_chat_total * 100) if n_chat_total else None
+
+messaging_scored_p = messaging_scorable(messaging_period)
+n_messaging_sla_total = len(messaging_scored_p)
+n_messaging_answered = len(_messaging_first_response)
+n_messaging_in_target = messaging_first_response_in_target
+n_messaging_abandoned = int(
+    ((~messaging_scored_p["Any_Closed"]) & messaging_scored_p["Any_Abandoned"]).sum()
+) if n_messaging_sla_total else 0
+sla_comp_messaging_in_target_pct = messaging_first_response_target_pct
+sla_comp_messaging_median_resp_secs = messaging_first_response_median
+sla_comp_messaging_abandon_pct = (
+    n_messaging_abandoned / n_messaging_sla_total * 100
+    if n_messaging_sla_total else None
+)
 
 n_email_total = len(email_scored_p)
 n_email_in_window = len(email_sla_p)
@@ -2161,22 +2259,29 @@ with st.expander("Per-agent utilisation"):
 # ---- SLA summary --------------------------------------------------------
 st.markdown("---")
 st.subheader("🎯 SLA Score Summary")
-s1, s2, s3 = st.columns(3)
+s1, s2, s3, s4 = st.columns(4)
 render_custom_metric(s1, "Chat SLA Score",
                      f"{chat_weighted:.1f}" if chat_weighted is not None else "—",
-                     "Daily chat SLA, weighted by daily chat volume", get_sla_score_color(chat_weighted),
-                     f"0–100, {SLA_TARGET:.0f} = target")
-render_custom_metric(s2, "Email SLA Score",
+                     "Legacy Live Chat SLA through 31 October 2026, weighted by daily volume",
+                     get_sla_score_color(chat_weighted),
+                     f"through 31 Oct • {SLA_TARGET:.0f} = target")
+render_custom_metric(s2, "Messaging SLA Score",
+                     f"{messaging_weighted:.1f}" if messaging_weighted is not None else "—",
+                     "Enhanced Messaging SLA from 1 November 2026, weighted by session volume",
+                     get_sla_score_color(messaging_weighted),
+                     f"from 1 Nov • {SLA_TARGET:.0f} = target")
+render_custom_metric(s3, "Email SLA Score",
                      f"{email_weighted:.1f}" if email_weighted is not None else "—",
                      "Daily email SLA, weighted by daily email volume", get_sla_score_color(email_weighted),
                      f"0–100, {SLA_TARGET:.0f} = target")
-render_custom_metric(s3, "Weighted SLA Score",
+render_custom_metric(s4, "Weighted SLA Score",
                      f"{weighted_sla:.1f}" if weighted_sla is not None else "—",
-                     "Volume-weighted blend of chat and email", get_sla_score_color(weighted_sla),
+                     "Volume-weighted blend of legacy Chat (before 1 Nov), Messaging (from 1 Nov) and Email",
+                     get_sla_score_color(weighted_sla),
                      f"0–100, {SLA_TARGET:.0f} = target")
 
 st.markdown("#### Score breakdown")
-_bc1, _bc2 = st.columns(2)
+_bc1, _bc2, _bc3 = st.columns(3)
 
 with _bc1:
     st.markdown("**💬 Chat SLA components**")
@@ -2201,6 +2306,28 @@ with _bc1:
     )
 
 with _bc2:
+    st.markdown("**💬 Messaging SLA components**")
+    _mc1, _mc2, _mc3 = st.columns(3)
+    _mc1.metric(
+        "First response ≤60s", fmt_pct(sla_comp_messaging_in_target_pct),
+        help=f"{n_messaging_in_target:,} of {n_messaging_answered:,} sessions with a "
+             f"measurable first response were within {MESSAGING_FIRST_RESPONSE_TARGET_SEC:.0f}s "
+             f"(weight +{W_MESSAGING_IN_TARGET}).",
+    )
+    _mc2.metric(
+        "Median first response", fmt_mmss(sla_comp_messaging_median_resp_secs),
+        help=f"No response-time penalty at or below {MESSAGING_TARGET_RESPONSE_MIN:.0f}:00. "
+             f"Full penalty (−{W_MESSAGING_RESPONSE}) at "
+             f"{MESSAGING_TARGET_RESPONSE_MIN + MESSAGING_RESPONSE_TOLERANCE_MIN:.0f}:00. "
+             "Median is used because asynchronous sessions have a long inactivity tail.",
+    )
+    _mc3.metric(
+        "Abandon Rate", fmt_pct(sla_comp_messaging_abandon_pct),
+        help=f"{n_messaging_abandoned:,} of {n_messaging_sla_total:,} classifiable sessions "
+             f"had no closed Agent Work assignment and were abandoned (weight −{W_MESSAGING_ABANDON}).",
+    )
+
+with _bc3:
     st.markdown("**✉️ Email SLA components**")
     _ec1, _ec2 = st.columns(2)
     _ec1.metric(
@@ -2365,14 +2492,17 @@ if n_email_total and "Case Origin" in email_scored_p.columns and email_scored_p[
                 f"separately, or setting different targets per origin."
             )
 
-# FIX #14: surface the two populations so a divergence is visible.
-_wt_chat, _wt_email = int(df_daily["Chat SLA Wt"].sum()), int(df_daily["Email SLA Wt"].sum())
+# FIX #14: surface each channel population so a divergence is visible.
+_wt_chat = int(df_daily["Chat SLA Wt"].sum())
+_wt_messaging = int(df_daily["Messaging SLA Wt"].sum())
+_wt_email = int(df_daily["Email SLA Wt"].sum())
 
 # ---------------------------------------------------------------------------
 # Volume vs SLA-population reconciliation.
 #
 # The volume tiles come from report_items.csv (cases an agent handled) while the
-# SLA comes from chat.csv / email.csv. Neither file is a subset of the other, so
+# SLA comes from chat.csv, Messaging metrics and email.csv. These sources are not
+# subsets of one another, so
 # the two counts legitimately differ — but a LARGE positive gap on email means
 # cases were routed and then never appeared in email.csv, which in a
 # resolved-only export means they are still open. Those cases are by definition
@@ -2385,6 +2515,10 @@ with st.expander("🧮 Volume vs SLA population — why these two numbers differ
          "Cases handled (tile)": chat_total,
          "Contacts scored for SLA": _wt_chat,
          "Difference": _wt_chat - chat_total},
+        {"Channel": "Messaging",
+         "Cases handled (tile)": messaging_handled,
+         "Contacts scored for SLA": _wt_messaging,
+         "Difference": _wt_messaging - messaging_handled},
         {"Channel": "Email",
          "Cases handled (tile)": email_total,
          "Contacts scored for SLA": _wt_email,
@@ -2395,11 +2529,11 @@ with st.expander("🧮 Volume vs SLA population — why these two numbers differ
 
     st.markdown(
         f"""
-The two columns count different things and **neither file is a subset of the other**:
+The two columns count different things and **the source files are not subsets of one another**:
 
 - **Cases handled** — distinct cases in `report_items.csv` first picked up by an agent in this
-  period. A case appears here only if it was routed through Omni-Channel.
-- **Contacts scored** — rows in `chat.csv` / `email.csv` for this period. For email that is
+  period. For Messaging this is a session with a closed Agent Work assignment.
+- **Contacts scored** — rows in `chat.csv`, Messaging Session Metrics or `email.csv` for this period. For email that is
   {n_email_opened_here:,} opened in the period plus {n_email_carried_in:,} opened earlier but
   answered inside it.
 
@@ -2468,25 +2602,32 @@ with st.expander("Daily SLA detail"):
     # computed on, "Vol" is the report_items work-item count for the same day.
     _detail = df_daily[[
         "Date", "Chat SLA", "Chat SLA Wt", "Chat Vol", "Chat ≤60s %", "Chat Avg Wait (s)",
-        "Chat Abandon %", "Email SLA", "Email SLA Wt", "Email Vol", "Email Not Due",
+        "Chat Abandon %", "Messaging SLA", "Messaging SLA Wt", "Messaging Vol",
+        "Messaging ≤60s %", "Messaging Median Resp (s)", "Messaging Abandon %",
+        "Email SLA", "Email SLA Wt", "Email Vol", "Email Not Due",
         "Email in target %", "Email Avg Resp (h)", "Weighted SLA",
     ]].copy()
     _detail["Date"] = _detail["Date"].dt.strftime("%a %d %b")
     _detail = _detail.rename(columns={
         "Chat SLA Wt": "Chat scored", "Chat Vol": "Chat items",
+        "Messaging SLA Wt": "Messaging scored", "Messaging Vol": "Messaging sessions",
         "Email SLA Wt": "Email scored", "Email Vol": "Email items",
         "Email Not Due": "Email not due",
     })
     st.dataframe(
         _detail.style.format({
-            "Chat SLA": "{:.1f}", "Email SLA": "{:.1f}", "Weighted SLA": "{:.1f}",
+            "Chat SLA": "{:.1f}", "Messaging SLA": "{:.1f}",
+            "Email SLA": "{:.1f}", "Weighted SLA": "{:.1f}",
             "Chat ≤60s %": "{:.1f}", "Chat Abandon %": "{:.1f}",
+            "Messaging ≤60s %": "{:.1f}", "Messaging Median Resp (s)": "{:.0f}",
+            "Messaging Abandon %": "{:.1f}",
             "Email in target %": "{:.1f}", "Chat Avg Wait (s)": "{:.0f}", "Email Avg Resp (h)": "{:.2f}",
         }, na_rep="—"),
         width="stretch",
     )
     st.caption(
-        "**scored** = contacts the SLA was calculated on (chats opened that day; emails "
+        "**scored** = contacts the SLA was calculated on (legacy chats through 31 October; "
+        "Messaging sessions from 1 November; emails "
         "opened *or* responded to that day, excluding any not yet past target). "
         "**items** = work items from report_items.csv started that day. "
         "The score is weighted by *scored*; *items* is shown so you can see when the two diverge."
@@ -2499,7 +2640,8 @@ with st.expander("Daily SLA detail"):
 st.markdown("---")
 st.subheader("Weighted SLA Trend")
 
-_trend_df = df_daily[["Date", "Chat SLA", "Email SLA", "Weighted SLA", "Chat SLA Wt", "Email SLA Wt"]].copy()
+_trend_df = df_daily[["Date", "Chat SLA", "Messaging SLA", "Email SLA", "Weighted SLA",
+                      "Chat SLA Wt", "Messaging SLA Wt", "Email SLA Wt"]].copy()
 
 # FIX #25: symmetric padding. datetime.max.time() overshot the right edge by
 # ~36 hours because it is 23:59:59.999999, not midnight.
@@ -2522,8 +2664,10 @@ else:
                 alt.Tooltip("Date:T", format="%d %b"),
                 alt.Tooltip("Weighted SLA:Q", format=".1f"),
                 alt.Tooltip("Chat SLA:Q", format=".1f"),
+                alt.Tooltip("Messaging SLA:Q", format=".1f"),
                 alt.Tooltip("Email SLA:Q", format=".1f"),
                 alt.Tooltip("Chat SLA Wt:Q", title="Chats", format=",.0f"),
+                alt.Tooltip("Messaging SLA Wt:Q", title="Messaging", format=",.0f"),
                 alt.Tooltip("Email SLA Wt:Q", title="Emails", format=",.0f"),
             ],
         )
@@ -2535,8 +2679,18 @@ else:
     rule_lb = alt.Chart(pd.DataFrame({"y": [SLA_TARGET]})).mark_text(
         align="left", color="red", dy=-8).encode(
         y="y:Q", text=alt.value(f"Target: {SLA_TARGET:.0f}"))
+    _layers = trend_chart + labels + rule + rule_lb
+    _transition_ts = pd.Timestamp(MESSAGING_SLA_START_DATE)
+    if x_min <= _transition_ts <= x_max:
+        _transition_df = pd.DataFrame({"Date": [_transition_ts]})
+        _transition_rule = alt.Chart(_transition_df).mark_rule(
+            color="#9C27B0", strokeDash=[3, 3]).encode(x="Date:T")
+        _transition_label = alt.Chart(_transition_df).mark_text(
+            color="#9C27B0", angle=270, align="right", dx=-5, dy=-5
+        ).encode(x="Date:T", y=alt.value(20), text=alt.value("Messaging from 1 Nov"))
+        _layers = _layers + _transition_rule + _transition_label
 
-    altair_chart((trend_chart + labels + rule + rule_lb).properties(height=350))
+    altair_chart(_layers.properties(height=350))
 
     _gaps = int(_trend_df["Weighted SLA"].isna().sum())
     if _gaps:
@@ -3152,7 +3306,14 @@ def compute_hourly_sla(sel_date) -> pd.DataFrame:
     out = pd.DataFrame({"Hour": hours})
 
     chat_day = chat_sla_df[(chat_sla_df["Date/Time Opened"] >= day_start)
-                           & (chat_sla_df["Date/Time Opened"] < day_end)].copy()
+                           & (chat_sla_df["Date/Time Opened"] < day_end)
+                           & (chat_sla_df["Date/Time Opened"]
+                              < pd.Timestamp(MESSAGING_SLA_START_DATE))].copy()
+    messaging_day = messaging_sessions[
+        (messaging_sessions["Start Time"] >= day_start)
+        & (messaging_sessions["Start Time"] < day_end)
+        & (messaging_sessions["Start Time"] >= pd.Timestamp(MESSAGING_SLA_START_DATE))
+    ].copy()
     # Same opened-OR-responded union as the period view, attributed to one
     # timestamp inside the day so hourly buckets don't double-count.
     email_day = email_window_slice(email_sla_df, day_start, day_end)
@@ -3163,21 +3324,30 @@ def compute_hourly_sla(sel_date) -> pd.DataFrame:
     # DataFrame.rename(str) is invalid), so any day with only one channel of
     # activity crashed the whole page. This also avoids the pandas 2.2+
     # groupby.apply deprecation warning.
-    chat_scores, email_scores, chat_wts, email_wts = [], [], [], []
+    chat_scores, messaging_scores, email_scores = [], [], []
+    chat_wts, messaging_wts, email_wts, messaging_vols = [], [], [], []
     for h in hours:
         nxt = h + pd.Timedelta(hours=1)
         cslice = chat_day[(chat_day["Date/Time Opened"] >= h) & (chat_day["Date/Time Opened"] < nxt)]
+        mslice = messaging_day[(messaging_day["Start Time"] >= h)
+                               & (messaging_day["Start Time"] < nxt)]
         eslice = email_day[(email_day["SLA Timestamp"] >= h) & (email_day["SLA Timestamp"] < nxt)]
         chat_scores.append(chat_sla_from_slice(cslice))
+        messaging_scores.append(messaging_sla_from_slice(mslice))
         email_scores.append(email_sla_from_slice(eslice))
         # SLA weights come from the same slices that produced the scores (FIX #14).
         chat_wts.append(len(cslice))
+        messaging_wts.append(len(messaging_scorable(mslice)))
+        messaging_vols.append(len(mslice))
         email_wts.append(len(email_scorable(eslice)))
 
     out["Chat SLA"] = chat_scores
+    out["Messaging SLA"] = messaging_scores
     out["Email SLA"] = email_scores
     out["Chat SLA Wt"] = chat_wts
+    out["Messaging SLA Wt"] = messaging_wts
     out["Email SLA Wt"] = email_wts
+    out["Messaging Vol"] = messaging_vols
 
     items_day = df_items[(df_items["Start DT"] >= day_start) & (df_items["Start DT"] < day_end)].copy()
     if not items_day.empty:
@@ -3191,15 +3361,19 @@ def compute_hourly_sla(sel_date) -> pd.DataFrame:
     else:
         out["Chat Vol"] = 0
         out["Email Vol"] = 0
-    out[["Chat Vol", "Email Vol"]] = out[["Chat Vol", "Email Vol"]].fillna(0).astype(int)
+    out[["Chat Vol", "Messaging Vol", "Email Vol"]] = out[
+        ["Chat Vol", "Messaging Vol", "Email Vol"]].fillna(0).astype(int)
 
     out = out.merge(compute_hourly_availability(sel_date), on="Hour", how="left")
 
     # FIX #13 (hourly): an hour with no contacts is a gap, not a zero.
     cw = out["Chat SLA Wt"].where(out["Chat SLA"].notna(), 0).fillna(0)
+    mw = out["Messaging SLA Wt"].where(out["Messaging SLA"].notna(), 0).fillna(0)
     ew = out["Email SLA Wt"].where(out["Email SLA"].notna(), 0).fillna(0)
-    num = out["Chat SLA"].fillna(0) * cw + out["Email SLA"].fillna(0) * ew
-    den = cw + ew
+    num = (out["Chat SLA"].fillna(0) * cw
+           + out["Messaging SLA"].fillna(0) * mw
+           + out["Email SLA"].fillna(0) * ew)
+    den = cw + mw + ew
     # Mask the denominator BEFORE dividing (see the daily calculation above).
     out["Weighted SLA"] = num / den.where(den > 0)
 
@@ -3211,7 +3385,7 @@ df_hourly = compute_hourly_sla(hourly_date)
 if df_hourly["Weighted SLA"].notna().sum() == 0 and df_hourly["Avail (min)"].sum() == 0:
     st.info("No activity for the selected day.")
 else:
-    show_breakdown = st.checkbox("Show Chat & Email lines", value=False)
+    show_breakdown = st.checkbox("Show Chat, Messaging & Email lines", value=False)
     show_avail = st.checkbox("Overlay available minutes (bars)", value=True)
 
     _hplot = df_hourly.dropna(subset=["Weighted SLA"])
@@ -3228,6 +3402,7 @@ else:
                 tooltip=[alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
                          alt.Tooltip("Weighted SLA:Q", format=".1f"),
                          alt.Tooltip("Chat SLA Wt:Q", title="Chats", format=",.0f"),
+                         alt.Tooltip("Messaging SLA Wt:Q", title="Messaging", format=",.0f"),
                          alt.Tooltip("Email SLA Wt:Q", title="Emails", format=",.0f")],
             )
         )
@@ -3235,6 +3410,7 @@ else:
 
         if show_breakdown:
             for _col, _colour, _wt in (("Chat SLA", "#4CAF50", "Chat SLA Wt"),
+                                       ("Messaging SLA", "#9C27B0", "Messaging SLA Wt"),
                                        ("Email SLA", "#F44336", "Email SLA Wt")):
                 _sub = df_hourly.dropna(subset=[_col])
                 if _sub.empty:
