@@ -190,6 +190,9 @@ EMAIL_DEVNAME = "casesChannel"
 # maximum of two simultaneous assignments, matching the existing Chat capacity.
 MESSAGING_FIRST_RESPONSE_TARGET_SEC = 60.0
 MESSAGING_SLA_START_DATE = datetime(2026, 11, 1).date()
+MESSAGING_CHANNEL_FIELD = "Messaging Channel: Channel Name"
+MESSAGING_CHANNEL_FIELD_CANDIDATES = (
+    MESSAGING_CHANNEL_FIELD, "Messaging Channel Name", "Channel Name", "Country")
 MESSAGING_TARGET_RESPONSE_MIN = 1.0
 MESSAGING_RESPONSE_TOLERANCE_MIN = 4.0
 W_MESSAGING_IN_TARGET = 0.50
@@ -986,8 +989,30 @@ messaging_items_df = canonicalise_columns(
 messaging_metrics_long = canonicalise_columns(
     load_csv_cached(str(messaging_metrics_path), file_signature(messaging_metrics_path)),
     ["Messaging Session ID", "Messaging Session Name", "Start Time", "End Time",
-     "Messaging Session Metric Type", "Messaging Session Metric Value"],
+     "Messaging Session Metric Type", "Messaging Session Metric Value",
+     MESSAGING_CHANNEL_FIELD],
     "report_messaging_metrics.csv")
+
+# Salesforce orgs and custom report types expose Channel Name under slightly
+# different labels. Normalise the common variants without making the field
+# mandatory for the rest of the Messaging dashboard.
+_messaging_channel_source = next(
+    (c for c in MESSAGING_CHANNEL_FIELD_CANDIDATES if c in messaging_metrics_long.columns),
+    None,
+)
+if _messaging_channel_source and _messaging_channel_source != MESSAGING_CHANNEL_FIELD:
+    messaging_metrics_long = messaging_metrics_long.rename(
+        columns={_messaging_channel_source: MESSAGING_CHANNEL_FIELD})
+    _messaging_channel_source = MESSAGING_CHANNEL_FIELD
+if _messaging_channel_source:
+    # A recognised alias satisfies the requirement, so do not leave the
+    # preferred Salesforce label showing as a false missing-column warning.
+    _missing = _col_missing.get("report_messaging_metrics.csv", [])
+    _missing = [c for c in _missing if c != MESSAGING_CHANNEL_FIELD]
+    if _missing:
+        _col_missing["report_messaging_metrics.csv"] = _missing
+    else:
+        _col_missing.pop("report_messaging_metrics.csv", None)
 
 df_items = parse_dt(df_items, ["Start DT", "End DT"], dayfirst=True)
 df_presence = parse_dt(df_presence, ["Start DT", "End DT"])
@@ -1116,10 +1141,16 @@ _metric_dupes = messaging_metrics_long.duplicated(
     subset=["Messaging Session Name", "Messaging Session Metric Type"], keep=False)
 dq["messaging_duplicate_metric_rows"] = int(_metric_dupes.sum())
 
+_messaging_base_columns = [
+    "Messaging Session Name", "Messaging Session ID", "Start Time", "End Time"
+]
+if _messaging_channel_source:
+    _messaging_base_columns.append(MESSAGING_CHANNEL_FIELD)
+
 _messaging_session_base = (
     messaging_metrics_long.sort_values("Start Time")
     .drop_duplicates(subset=["Messaging Session Name"], keep="first")
-    [["Messaging Session Name", "Messaging Session ID", "Start Time", "End Time"]]
+    [_messaging_base_columns]
 )
 _messaging_metric_wide = messaging_metrics_long.pivot_table(
     index="Messaging Session Name",
@@ -3088,10 +3119,10 @@ else:
 
 
 # =============================================================================
-# Chats by country
+# Conversation volume by country
 # =============================================================================
 st.markdown("---")
-st.subheader("🌍 Chats by Country (volume)")
+st.subheader("🌍 Conversation Volume by Country")
 
 DEVNAME_COL = "Chat Button: Developer Name"
 
@@ -3145,7 +3176,7 @@ NAME_STOPWORDS = {
 
 def _country_from_devname(devname: str) -> str:
     """
-    Map a chat-button developer name to a country.
+    Map a legacy chat-button or Messaging channel name to a country.
 
     FIX #24: bare two-letter codes must be a standalone token AND must not be a
     known false friend (a button containing "na" for 'not applicable' used to be
@@ -3178,58 +3209,102 @@ def _country_from_devname(devname: str) -> str:
     return "Unknown"
 
 
-if DEVNAME_COL not in chat_sla_p.columns:
-    st.info("Column 'Chat Button: Developer Name' not found in chat.csv.")
-elif chat_sla_p.empty:
-    st.info("No chats in the selected period.")
+_selected_has_live_chat = start_date < MESSAGING_SLA_START_DATE
+_selected_has_messaging = end_date >= MESSAGING_SLA_START_DATE
+_country_parts = []
+
+# Retain the historical Live Chat view, but never count it on/after the
+# migration date. chat_sla_p already applies that cut-off.
+if _selected_has_live_chat:
+    if DEVNAME_COL not in chat_sla_p.columns:
+        st.info("Column 'Chat Button: Developer Name' not found in chat.csv.")
+    elif not chat_sla_p.empty:
+        _legacy_country = chat_sla_p[[DEVNAME_COL]].rename(
+            columns={DEVNAME_COL: "Source Name"})
+        _legacy_country["Channel"] = "Live Chat"
+        _country_parts.append(_legacy_country)
+
+# From 1 November, country comes from the Messaging Channel Name. The org's
+# naming convention includes a country in every channel name, so the same
+# mapping logic used for legacy chat buttons can classify each session.
+if _selected_has_messaging:
+    if MESSAGING_CHANNEL_FIELD not in messaging_period.columns:
+        st.info(
+            "To enable Messaging by country from 1 November, add "
+            f"'{MESSAGING_CHANNEL_FIELD}' to report_messaging_metrics.csv and "
+            "re-export the Salesforce report."
+        )
+    elif not messaging_period.empty:
+        _messaging_country = messaging_period[[MESSAGING_CHANNEL_FIELD]].rename(
+            columns={MESSAGING_CHANNEL_FIELD: "Source Name"})
+        _messaging_country["Channel"] = "Messaging"
+        _country_parts.append(_messaging_country)
+
+if not _country_parts:
+    st.info("No conversations with country information in the selected period.")
 else:
-    dfc = chat_sla_p.copy()
-    # FIX #23: no .str.title() — it turned "Congo (DRC)" into "Congo (Drc)" and
-    # "São Tomé and Príncipe" into "São Tomé And Príncipe".
-    dfc["Country"] = dfc[DEVNAME_COL].apply(_country_from_devname)
+    dfc = pd.concat(_country_parts, ignore_index=True)
+    # No .str.title(): it corrupts canonical names such as "Congo (DRC)" and
+    # "São Tomé and Príncipe".
+    dfc["Country"] = dfc["Source Name"].apply(_country_from_devname)
 
-    counts = (dfc.groupby("Country", dropna=False).size().reset_index(name="Chats")
-              .sort_values("Chats", ascending=False).reset_index(drop=True))
+    counts = (
+        dfc.groupby("Country", dropna=False).size()
+        .reset_index(name="Conversations")
+        .sort_values("Conversations", ascending=False)
+        .reset_index(drop=True)
+    )
 
-    if counts["Chats"].sum() == 0:
-        st.info("No chats in the selected period.")
+    if counts["Conversations"].sum() == 0:
+        st.info("No conversations in the selected period.")
     else:
         top_n = st.sidebar.slider("Pie chart: top countries", 3, 12, 8, 1)
         min_share = st.sidebar.slider("Label slices ≥ this share", 0.0, 0.1, 0.02, 0.01)
 
-        grand_total = int(counts["Chats"].sum())
+        grand_total = int(counts["Conversations"].sum())
         plot_counts = counts.copy()
         if len(plot_counts) > top_n:
             top = plot_counts.head(top_n)
-            others = int(plot_counts["Chats"].iloc[top_n:].sum())
+            others = int(plot_counts["Conversations"].iloc[top_n:].sum())
             plot_counts = pd.concat(
-                [top, pd.DataFrame({"Country": ["Other"], "Chats": [others]})], ignore_index=True)
-        plot_counts["Share"] = plot_counts["Chats"] / grand_total
+                [top, pd.DataFrame({"Country": ["Other"], "Conversations": [others]})],
+                ignore_index=True,
+            )
+        plot_counts["Share"] = plot_counts["Conversations"] / grand_total
+
+        if _selected_has_live_chat and _selected_has_messaging:
+            _country_chart_title = "Conversation Volume by Country"
+        elif _selected_has_messaging:
+            _country_chart_title = "Messaging Volume by Country"
+        else:
+            _country_chart_title = "Live Chat Volume by Country"
 
         pie = (
             alt.Chart(plot_counts)
             .mark_arc(outerRadius=180, innerRadius=100, stroke="#f8f9fa", strokeWidth=2)
             .encode(
-                theta=alt.Theta("Chats:Q", stack=True),
+                theta=alt.Theta("Conversations:Q", stack=True),
                 color=alt.Color("Country:N", legend=alt.Legend(title="Country"),
                                 scale=alt.Scale(scheme="tableau10")),
-                order=alt.Order("Chats:Q", sort="descending"),
+                order=alt.Order("Conversations:Q", sort="descending"),
                 tooltip=[alt.Tooltip("Country:N", title="Country"),
-                         alt.Tooltip("Chats:Q", title="Chats", format=","),
+                         alt.Tooltip("Conversations:Q", title="Conversations", format=","),
                          alt.Tooltip("Share:Q", title="Share", format=".1%")],
             )
             .properties(width=550, height=450,
-                        title=alt.TitleParams("Chat Volume by Country (from Chat Button)",
+                        title=alt.TitleParams(_country_chart_title,
                                               anchor="middle", fontSize=16))
         )
 
         label_df = plot_counts[plot_counts["Share"] >= min_share].copy()
-        label_df["Label"] = label_df.apply(lambda r: f"{r['Country']} ({r['Share']:.0%})", axis=1)
+        label_df["Label"] = label_df.apply(
+            lambda r: f"{r['Country']} ({r['Share']:.0%})", axis=1)
         labels = (
             alt.Chart(label_df)
             .mark_text(radius=205, size=12)
-            .encode(theta=alt.Theta("Chats:Q", stack=True), text="Label:N",
-                    order=alt.Order("Chats:Q", sort="descending"), color=alt.value("black"))
+            .encode(theta=alt.Theta("Conversations:Q", stack=True), text="Label:N",
+                    order=alt.Order("Conversations:Q", sort="descending"),
+                    color=alt.value("black"))
         )
         center_text = alt.Chart(
             pd.DataFrame({"text": [f"Total: {grand_total:,}"], "x": [0], "y": [0]})
@@ -3240,17 +3315,24 @@ else:
 
         with st.expander("View country breakdown table"):
             _tbl = counts.copy()
-            _tbl["Share"] = _tbl["Chats"] / grand_total
-            st.dataframe(_tbl.style.format({"Chats": "{:,}", "Share": "{:.1%}"}), width="stretch")
+            _tbl["Share"] = _tbl["Conversations"] / grand_total
+            st.dataframe(
+                _tbl.style.format({"Conversations": "{:,}", "Share": "{:.1%}"}),
+                width="stretch",
+            )
 
-            # FIX #24: make mapping gaps visible instead of burying them in "Unknown".
-            _unknown = dfc.loc[dfc["Country"] == "Unknown", DEVNAME_COL]
+            # Keep naming gaps visible so a new Salesforce channel cannot be
+            # silently buried in the Unknown slice.
+            _unknown = dfc.loc[dfc["Country"] == "Unknown", ["Channel", "Source Name"]]
             if len(_unknown):
-                _names = _unknown.value_counts()
-                st.markdown(f"**{len(_unknown):,} chats did not map to a country.** "
-                            f"Unmapped chat buttons:")
-                st.dataframe(_names.rename("Chats").reset_index().rename(
-                    columns={"index": DEVNAME_COL}), width="stretch")
+                _names = (
+                    _unknown.value_counts(dropna=False).rename("Conversations").reset_index()
+                )
+                st.markdown(
+                    f"**{len(_unknown):,} conversations did not map to a country.** "
+                    "Unmapped chat buttons or Messaging channel names:"
+                )
+                st.dataframe(_names, width="stretch")
 
 
 # =============================================================================
