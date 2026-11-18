@@ -2113,6 +2113,7 @@ email_df = df_period[df_period["Service Channel: Developer Name"] == EMAIL_DEVNA
 
 chat_total = len(chat_cases)
 email_total = len(email_cases)
+has_chat_data = chat_total > 0
 chat_aht = chat_cases["Total_Secs"].mean() if chat_total else None
 email_aht = email_cases["Total_Secs"].mean() if email_total else None
 
@@ -2434,26 +2435,39 @@ st.markdown(
 )
 
 st.subheader(":material/dashboard: Core Metrics")
-c1, c2, c3, c4 = st.columns(4)
-render_custom_metric(c1, "💬 Total Chats", f"{chat_total:,}",
-                     "Distinct chat cases first handled in the period. Counted once even if "
-                     "the case was routed more than once.",
-                     COLOR_GOOD,
-                     f"{chat_reopened:,} re-handled" if chat_reopened else "")
-render_custom_metric(c2, "✉️ Total Emails", f"{email_total:,}",
-                     "Distinct email cases first handled in the period. A case that is "
-                     "re-opened and routed again counts ONCE, not once per touch.",
-                     COLOR_GOOD,
-                     f"{email_reopened:,} re-opened" if email_reopened else "")
-render_custom_metric(c3, "⏳ Avg Chat Handle Time", fmt_mmss(chat_aht),
-                     "Total handle time per chat case, summed across every touch",
-                     COLOR_GOOD,
-                     f"{chat_touches:.2f} touches/case" if chat_touches else "")
-render_custom_metric(c4, "⏳ Avg Email Handle Time", fmt_mmss(email_aht),
-                     "Total handle time per email case, summed across EVERY touch — including "
-                     "re-opens handled later and by different agents",
-                     COLOR_GOOD,
-                     f"{email_touches:.2f} touches/case" if email_touches else "")
+if has_chat_data:
+    c1, c2, c3, c4 = st.columns(4)
+    render_custom_metric(c1, "💬 Total Chats", f"{chat_total:,}",
+                         "Distinct chat cases first handled in the period. Counted once even if "
+                         "the case was routed more than once.",
+                         COLOR_GOOD,
+                         f"{chat_reopened:,} re-handled" if chat_reopened else "")
+    render_custom_metric(c2, "✉️ Total Emails", f"{email_total:,}",
+                         "Distinct email cases first handled in the period. A case that is "
+                         "re-opened and routed again counts ONCE, not once per touch.",
+                         COLOR_GOOD,
+                         f"{email_reopened:,} re-opened" if email_reopened else "")
+    render_custom_metric(c3, "⏳ Avg Chat Handle Time", fmt_mmss(chat_aht),
+                         "Total handle time per chat case, summed across every touch",
+                         COLOR_GOOD,
+                         f"{chat_touches:.2f} touches/case" if chat_touches else "")
+    render_custom_metric(c4, "⏳ Avg Email Handle Time", fmt_mmss(email_aht),
+                         "Total handle time per email case, summed across EVERY touch — including "
+                         "re-opens handled later and by different agents",
+                         COLOR_GOOD,
+                         f"{email_touches:.2f} touches/case" if email_touches else "")
+else:
+    _ce1, _ce2 = st.columns(2)
+    render_custom_metric(_ce1, "✉️ Total Emails", f"{email_total:,}",
+                         "Distinct email cases first handled in the period. A case that is "
+                         "re-opened and routed again counts ONCE, not once per touch.",
+                         COLOR_GOOD,
+                         f"{email_reopened:,} re-opened" if email_reopened else "")
+    render_custom_metric(_ce2, "⏳ Avg Email Handle Time", fmt_mmss(email_aht),
+                         "Total handle time per email case, summed across EVERY touch — including "
+                         "re-opens handled later and by different agents",
+                         COLOR_GOOD,
+                         f"{email_touches:.2f} touches/case" if email_touches else "")
 
 st.markdown("#### :material/forum: Enhanced Messaging")
 _m1, _m2, _m3, _m4 = st.columns(4)
@@ -2635,12 +2649,15 @@ with st.expander("Per-agent utilisation"):
 # ---- SLA summary --------------------------------------------------------
 st.markdown("---")
 st.subheader(":material/adjust: SLA Score Summary")
-s1, s2, s3, s4 = st.columns(4)
-render_custom_metric(s1, "Chat SLA Score",
-                     f"{chat_weighted:.1f}" if chat_weighted is not None else "—",
-                     "Legacy Live Chat SLA through 31 October 2026, weighted by daily volume",
-                     get_sla_score_color(chat_weighted),
-                     f"through 31 Oct • {SLA_TARGET:.0f} = target")
+if has_chat_data:
+    s1, s2, s3, s4 = st.columns(4)
+    render_custom_metric(s1, "Chat SLA Score",
+                         f"{chat_weighted:.1f}" if chat_weighted is not None else "—",
+                         "Legacy Live Chat SLA through 31 October 2026, weighted by daily volume",
+                         get_sla_score_color(chat_weighted),
+                         f"through 31 Oct • {SLA_TARGET:.0f} = target")
+else:
+    s2, s3, s4 = st.columns(3)
 render_custom_metric(s2, "Messaging SLA Score",
                      f"{messaging_weighted:.1f}" if messaging_weighted is not None else "—",
                      "Enhanced Messaging SLA from 1 November 2026, weighted by session volume",
@@ -2657,29 +2674,32 @@ render_custom_metric(s4, "Weighted SLA Score",
                      f"0–100, {SLA_TARGET:.0f} = target")
 
 st.markdown("#### Score breakdown")
-_bc1, _bc2, _bc3 = st.columns(3)
+if has_chat_data:
+    _bc1, _bc2, _bc3 = st.columns(3)
 
-with _bc1:
-    st.markdown(":material/chat: **Chat SLA components**")
-    _cc1, _cc2, _cc3 = st.columns(3)
-    _cc1.metric(
-        "Answered ≤60s", fmt_pct(sla_comp_chat_in_target_pct),
-        # FIX #27: the numbers in the tooltip now reconcile with the percentage.
-        help=f"{n_chat_in_target:,} of {n_chat_answered:,} answered chats waited ≤60s "
-             f"(weight +{W_CHAT_ANSWER}). Abandoned chats are excluded here and counted "
-             f"once, in the abandon term.",
-    )
-    _cc2.metric(
-        "Avg Wait Time", fmt_mmss(sla_comp_chat_avg_wait_secs),
-        help=f"No penalty at or below {CHAT_TARGET_WAIT_MIN:.0f}:00. Full penalty "
-             f"(−{W_CHAT_WAIT}) at {CHAT_TARGET_WAIT_MIN + CHAT_WAIT_TOLERANCE_MIN:.0f}:00, "
-             f"scaled linearly between. Based on {n_chat_answered:,} answered chats.",
-    )
-    _cc3.metric(
-        "Abandon Rate", fmt_pct(sla_comp_chat_abandon_pct),
-        help=f"{n_chat_abandoned:,} of {n_chat_total:,} chats abandoned after "
-             f"{CHAT_ABANDON_AFTER_SEC:.0f}s (weight −{W_CHAT_ABANDON})",
-    )
+    with _bc1:
+        st.markdown(":material/chat: **Chat SLA components**")
+        _cc1, _cc2, _cc3 = st.columns(3)
+        _cc1.metric(
+            "Answered ≤60s", fmt_pct(sla_comp_chat_in_target_pct),
+            # FIX #27: the numbers in the tooltip now reconcile with the percentage.
+            help=f"{n_chat_in_target:,} of {n_chat_answered:,} answered chats waited ≤60s "
+                 f"(weight +{W_CHAT_ANSWER}). Abandoned chats are excluded here and counted "
+                 f"once, in the abandon term.",
+        )
+        _cc2.metric(
+            "Avg Wait Time", fmt_mmss(sla_comp_chat_avg_wait_secs),
+            help=f"No penalty at or below {CHAT_TARGET_WAIT_MIN:.0f}:00. Full penalty "
+                 f"(−{W_CHAT_WAIT}) at {CHAT_TARGET_WAIT_MIN + CHAT_WAIT_TOLERANCE_MIN:.0f}:00, "
+                 f"scaled linearly between. Based on {n_chat_answered:,} answered chats.",
+        )
+        _cc3.metric(
+            "Abandon Rate", fmt_pct(sla_comp_chat_abandon_pct),
+            help=f"{n_chat_abandoned:,} of {n_chat_total:,} chats abandoned after "
+                 f"{CHAT_ABANDON_AFTER_SEC:.0f}s (weight −{W_CHAT_ABANDON})",
+        )
+else:
+    _bc2, _bc3 = st.columns(2)
 
 with _bc2:
     st.markdown(":material/forum: **Messaging SLA components**")
@@ -2886,20 +2906,21 @@ _wt_email = int(df_daily["Email SLA Wt"].sum())
 # of that blind spot explicit instead of leaving it to be discovered.
 # ---------------------------------------------------------------------------
 with st.expander(":material/calculate: Volume vs SLA population — why these two numbers differ"):
-    _rec = pd.DataFrame([
-        {"Channel": "Chat",
-         "Cases handled (tile)": chat_total,
-         "Contacts scored for SLA": _wt_chat,
-         "Difference": _wt_chat - chat_total},
-        {"Channel": "Messaging",
-         "Cases handled (tile)": messaging_handled,
-         "Contacts scored for SLA": _wt_messaging,
-         "Difference": _wt_messaging - messaging_handled},
-        {"Channel": "Email",
-         "Cases handled (tile)": email_total,
-         "Contacts scored for SLA": _wt_email,
-         "Difference": _wt_email - email_total},
-    ])
+    _rec_rows = []
+    if has_chat_data:
+        _rec_rows.append({"Channel": "Chat",
+                          "Cases handled (tile)": chat_total,
+                          "Contacts scored for SLA": _wt_chat,
+                          "Difference": _wt_chat - chat_total})
+    _rec_rows.append({"Channel": "Messaging",
+                      "Cases handled (tile)": messaging_handled,
+                      "Contacts scored for SLA": _wt_messaging,
+                      "Difference": _wt_messaging - messaging_handled})
+    _rec_rows.append({"Channel": "Email",
+                      "Cases handled (tile)": email_total,
+                      "Contacts scored for SLA": _wt_email,
+                      "Difference": _wt_email - email_total})
+    _rec = pd.DataFrame(_rec_rows)
     st.dataframe(_rec.style.format({c: "{:,}" for c in _rec.columns if c != "Channel"}),
                  width="stretch", hide_index=True)
 
@@ -3039,10 +3060,11 @@ else:
             tooltip=[
                 alt.Tooltip("Date:T", format="%d %b"),
                 alt.Tooltip("Weighted SLA:Q", format=".1f"),
-                alt.Tooltip("Chat SLA:Q", format=".1f"),
+            ] + ([alt.Tooltip("Chat SLA:Q", format=".1f"),
+                  alt.Tooltip("Chat SLA Wt:Q", title="Chats", format=",.0f")]
+                 if has_chat_data else []) + [
                 alt.Tooltip("Messaging SLA:Q", format=".1f"),
                 alt.Tooltip("Email SLA:Q", format=".1f"),
-                alt.Tooltip("Chat SLA Wt:Q", title="Chats", format=",.0f"),
                 alt.Tooltip("Messaging SLA Wt:Q", title="Messaging", format=",.0f"),
                 alt.Tooltip("Email SLA Wt:Q", title="Emails", format=",.0f"),
             ],
@@ -3133,17 +3155,29 @@ def _build_heatmap(df_src: pd.DataFrame, title: str, color_scheme: str = "blues"
     )
 
 
-_tab_all, _tab_chat, _tab_messaging, _tab_email = st.tabs(
-    ["Combined", "Chat only", "Messaging only", "Email only"])
-for _tab, _sub, _title, _scheme in (
-    (_tab_all, _hm, "All Contacts (Chat + Messaging + Email)", "greens"),
-    (_tab_chat, _hm[_hm["Channel"] == "Chat"] if not _hm.empty else _hm,
-     "Chat Contacts (incl. missed)", "yellowgreen"),
-    (_tab_messaging, _hm[_hm["Channel"] == "Messaging"] if not _hm.empty else _hm,
-     "Enhanced Messaging Sessions", "goldgreen"),
-    (_tab_email, _hm[_hm["Channel"] == "Email"] if not _hm.empty else _hm,
-     "Email Contacts", "oranges"),
-):
+if has_chat_data:
+    _hm_tab_names = ["Combined", "Chat only", "Messaging only", "Email only"]
+    _hm_tabs = st.tabs(_hm_tab_names)
+    _hm_tab_data = [
+        (_hm_tabs[0], _hm, "All Contacts (Chat + Messaging + Email)", "greens"),
+        (_hm_tabs[1], _hm[_hm["Channel"] == "Chat"] if not _hm.empty else _hm,
+         "Chat Contacts (incl. missed)", "yellowgreen"),
+        (_hm_tabs[2], _hm[_hm["Channel"] == "Messaging"] if not _hm.empty else _hm,
+         "Enhanced Messaging Sessions", "goldgreen"),
+        (_hm_tabs[3], _hm[_hm["Channel"] == "Email"] if not _hm.empty else _hm,
+         "Email Contacts", "oranges"),
+    ]
+else:
+    _hm_tab_names = ["Combined", "Messaging only", "Email only"]
+    _hm_tabs = st.tabs(_hm_tab_names)
+    _hm_tab_data = [
+        (_hm_tabs[0], _hm, "All Contacts (Messaging + Email)", "greens"),
+        (_hm_tabs[1], _hm[_hm["Channel"] == "Messaging"] if not _hm.empty else _hm,
+         "Enhanced Messaging Sessions", "goldgreen"),
+        (_hm_tabs[2], _hm[_hm["Channel"] == "Email"] if not _hm.empty else _hm,
+         "Email Contacts", "oranges"),
+    ]
+for _tab, _sub, _title, _scheme in _hm_tab_data:
     with _tab:
         if _sub.empty:
             st.info("No data in this period.")
