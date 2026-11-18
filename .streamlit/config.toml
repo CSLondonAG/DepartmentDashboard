@@ -1,0 +1,8 @@
+# Premier Bet palette (Editec/GOAT brand guidelines)
+[theme]
+base = "dark"
+primaryColor = "#FAE100"            # Bet Yellow — CTAs, sliders, toggles
+backgroundColor = "#003806"         # Dark Green
+secondaryBackgroundColor = "#0A4D1F" # Dark Green, lifted for tables/inputs
+textColor = "#FFFFFF"               # White
+font = "sans serif"
