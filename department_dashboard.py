@@ -100,7 +100,17 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Urbanist:wght@300;400;500;600;700&display=swap');
+/* Brand font: Proxima Nova, served from static/fonts (see .streamlit/config.toml) */
+@font-face { font-family: 'Proxima Nova'; font-weight: 300; font-style: normal; font-display: swap;
+    src: url('app/static/fonts/ProximaNova-light.woff2') format('woff2'); }
+@font-face { font-family: 'Proxima Nova'; font-weight: 400; font-style: normal; font-display: swap;
+    src: url('app/static/fonts/ProximaNova-regular.woff2') format('woff2'); }
+@font-face { font-family: 'Proxima Nova'; font-weight: 500; font-style: normal; font-display: swap;
+    src: url('app/static/fonts/ProximaNova-medium.woff2') format('woff2'); }
+@font-face { font-family: 'Proxima Nova'; font-weight: 600; font-style: normal; font-display: swap;
+    src: url('app/static/fonts/ProximaNova-semibold.woff2') format('woff2'); }
+@font-face { font-family: 'Proxima Nova'; font-weight: 700; font-style: normal; font-display: swap;
+    src: url('app/static/fonts/ProximaNova-bold.woff2') format('woff2'); }
 
 :root {
     /* Premier Bet palette (Editec/GOAT brand guidelines) */
@@ -136,7 +146,7 @@ st.markdown(
         linear-gradient(160deg, #009A44 0%, #007A36 45%, #003806 100%);
     background-attachment: fixed;
     color: var(--text-main);
-    font-family: 'Urbanist', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-family: 'Proxima Nova', 'Segoe UI', system-ui, -apple-system, sans-serif;
 }
 [data-testid="stHeader"] { background: transparent; }
 .main .block-container, [data-testid="stMainBlockContainer"] { padding-top: 2rem; }
@@ -144,7 +154,7 @@ st.markdown(
 /* ---------- Typography ---------- */
 .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5,
 .stApp p, .stApp li, .stApp label, .stApp summary {
-    font-family: 'Urbanist', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-family: 'Proxima Nova', 'Segoe UI', system-ui, -apple-system, sans-serif;
 }
 .stApp h1, .stApp h2, .stApp h3, .stApp h4 {
     color: var(--text-main);
@@ -152,6 +162,9 @@ st.markdown(
     letter-spacing: -0.01em;
 }
 .stApp h3 { font-size: 1.4rem; padding-top: 0.4rem; }
+.stApp h3 [data-testid="stIconMaterial"], .stApp h4 [data-testid="stIconMaterial"] {
+    color: var(--pb-bright-green); vertical-align: -0.12em; margin-right: 0.15em;
+}
 .stApp h4 { font-size: 1.1rem; color: var(--text-soft); }
 [data-testid="stCaptionContainer"], .stCaption { color: var(--text-soft) !important; }
 .stApp hr {
@@ -248,7 +261,10 @@ st.markdown(
     font-size: 1.1rem;
     border: 1px solid rgba(255,255,255,0.38);
     background: rgba(255,255,255,0.06);
+    color: var(--pb-white);
 }
+.gt-icon svg { display: block; }
+.gh-arrow svg { display: block; }
 .gt-title  { flex: 1; font-size: 0.98rem; font-weight: 500; line-height: 1.18; }
 .gt-status {
     flex: none; align-self: flex-start; margin-top: 4px;
@@ -298,7 +314,7 @@ st.markdown(
     border: 1px solid var(--glass-border) !important;
     border-radius: 12px !important;
     backdrop-filter: blur(14px);
-    font-family: 'Urbanist', system-ui, sans-serif !important;
+    font-family: 'Proxima Nova', system-ui, sans-serif !important;
 }
 
 /* ---------- Tabs (pill segmented control) ---------- */
@@ -568,12 +584,65 @@ def fmt_pct(v, dp: int = 1) -> str:
     return "—" if v is None or pd.isna(v) else f"{v:.{dp}f}%"
 
 
+# UI: thin line icons (24px grid, white stroke) to match the glass theme.
+_ICON_PATHS = {
+    "chat": '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>',
+    "mail": '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
+    "timer": '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/>',
+    "messages": '<path d="M14 9a2 2 0 0 1-2 2H6l-3 3V4a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2z"/>'
+                '<path d="M18 9h1a2 2 0 0 1 2 2v10l-3-3h-6a2 2 0 0 1-2-2v-1"/>',
+    "check": '<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
+    "transfer": '<path d="M4 7h16l-4-4M20 17H4l4 4"/>',
+    "zap": '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+    "reply": '<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 6 6v5"/>',
+    "gauge": '<path d="M4 18a9 9 0 1 1 16 0"/><path d="m12 14 4-5"/><circle cx="12" cy="14" r="1.2"/>',
+    "send": '<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/>',
+    "pie": '<circle cx="12" cy="12" r="9"/><path d="M12 3v9l6.4 6.4"/>',
+    "bars": '<path d="M4 20h16M7 16v-4M12 16V7M17 16v-6"/>',
+    "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    "calendar": '<rect x="3" y="5" width="18" height="16" rx="2"/>'
+                '<path d="M3 10h18M8 3v4M16 3v4M9 15l2 2 4-4"/>',
+    "target": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+    "layers": '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
+    "clipboard": '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1M9 11h6M9 15h4"/>',
+    "smile": '<circle cx="12" cy="12" r="9"/><path d="M8.5 14a4 4 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/>',
+    "star": '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
+    "shield": '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m8.5 12 2.5 2.5 4.5-5"/>',
+    "chart": '<path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 6-6"/>',
+    "arrow": '<path d="M7 17 17 7M8 7h9v9"/>',
+    "spark": '<path d="M12 3c.6 4.5 1.5 5.4 6 6-4.5.6-5.4 1.5-6 6-.6-4.5-1.5-5.4-6-6 4.5-.6 5.4-1.5 6-6z"/>',
+}
+
+# Tile label -> icon. Unlisted labels fall back to "spark".
+_TILE_ICONS = {
+    "Total Chats": "chat", "Total Emails": "mail",
+    "Avg Chat Handle Time": "timer", "Avg Email Handle Time": "timer",
+    "Messaging Sessions": "messages", "Sessions Handled": "check",
+    "Messaging AHT": "timer", "Transferred Sessions": "transfer",
+    "First Response ≤60s": "zap", "Median First Response": "reply",
+    "Avg Speed to Answer": "gauge", "Messages Sent": "send",
+    "Conversation Utilization": "pie", "Email Utilization": "bars",
+    "Avg Email Resp Time": "clock", "Schedule Adherence": "calendar",
+    "Chat SLA Score": "target", "Messaging SLA Score": "target",
+    "Email SLA Score": "target", "Weighted SLA Score": "layers",
+    "Surveys": "clipboard", "CSAT (avg %)": "smile", "NPS": "star", "FCR": "shield",
+}
+
+
+def _icon_svg(name: str, size: int = 20) -> str:
+    return (f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" '
+            f'stroke="currentColor" stroke-width="1.6" stroke-linecap="round" '
+            f'stroke-linejoin="round" aria-hidden="true">'
+            f'{_ICON_PATHS.get(name, _ICON_PATHS["spark"])}</svg>')
+
+
 def render_custom_metric(container, title, value, tooltip, color, sub: str = ""):
-    # Presentation only: same inputs as before, rendered as a glass tile. A
-    # leading emoji in the title becomes the round icon chip; a trailing '%'
-    # on the value is set as a small unit; `color` drives the status glow.
-    _m = re.match(r"^\s*([^\w\s]+)\s*(.*)$", str(title))
-    icon, label = (_m.group(1), _m.group(2)) if _m else ("✦", str(title))
+    # Presentation only: same inputs as before, rendered as a glass tile. Any
+    # leading emoji in the title is dropped in favour of a line icon chosen by
+    # label; a trailing '%' on the value is set as a small unit; `color`
+    # drives the status glow.
+    label = re.sub(r"^[^\w\s]+\s*", "", str(title)).strip()
+    icon = _icon_svg(_TILE_ICONS.get(label, "spark"))
     value = str(value)
     if value.endswith("%") and len(value) > 1:
         value = f'{value[:-1]}<span class="gt-unit">%</span>'
@@ -633,7 +702,8 @@ def altair_chart(chart, **kwargs):
             chart = chart.configure_axis(
                 gridColor="rgba(255,255,255,0.14)", domainColor="rgba(255,255,255,0.30)",
                 tickColor="rgba(255,255,255,0.30)", labelColor="#FFFFFF",
-                titleColor="rgba(255,255,255,0.80)")
+                titleColor="rgba(255,255,255,0.80)",
+                labelFont="Proxima Nova", titleFont="Proxima Nova")
     except Exception:
         pass
     try:
@@ -1174,7 +1244,7 @@ if missing:
     st.stop()
 
 st.sidebar.markdown("---")
-if st.sidebar.button("🔄 Reload data now"):
+if st.sidebar.button(":material/refresh: Reload data now"):
     st.cache_data.clear()
     st.rerun()
 
@@ -1790,7 +1860,7 @@ chat_sla_df, dedup_stats = exclude_repeat_missed_chats(
 # =============================================================================
 # Data quality panel  (FIX #5: exclusions are now visible instead of silent)
 # =============================================================================
-with st.expander("ℹ️ Data files & quality"):
+with st.expander(":material/info: Data files & quality"):
     def fmt_sig(p: Path):
         mtime = _dt.datetime.fromtimestamp(p.stat().st_mtime)
         return f"{p.name} • {p.stat().st_size:,} bytes • {mtime:%Y-%m-%d %H:%M:%S}"
@@ -2353,7 +2423,8 @@ else:
 # =============================================================================
 st.markdown(
     '<div class="glass-hero">'
-    '<div class="gh-top"><div class="gt-icon">📊</div><div class="gh-arrow">↗</div></div>'
+    f'<div class="gh-top"><div class="gt-icon">{_icon_svg("chart")}</div>'
+    f'<div class="gh-arrow">{_icon_svg("arrow", 22)}</div></div>'
     '<div class="gh-kicker">Customer Service</div>'
     '<div class="gh-title">Department Performance Dashboard</div>'
     f'<div class="gh-bottom"><div class="gh-period">{start_date:%d %b %Y} — {end_date:%d %b %Y}</div>'
@@ -2362,7 +2433,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.subheader("Core Metrics")
+st.subheader(":material/dashboard: Core Metrics")
 c1, c2, c3, c4 = st.columns(4)
 render_custom_metric(c1, "💬 Total Chats", f"{chat_total:,}",
                      "Distinct chat cases first handled in the period. Counted once even if "
@@ -2384,7 +2455,7 @@ render_custom_metric(c4, "⏳ Avg Email Handle Time", fmt_mmss(email_aht),
                      COLOR_GOOD,
                      f"{email_touches:.2f} touches/case" if email_touches else "")
 
-st.markdown("#### 💬 Enhanced Messaging")
+st.markdown("#### :material/forum: Enhanced Messaging")
 _m1, _m2, _m3, _m4 = st.columns(4)
 render_custom_metric(
     _m1, "Messaging Sessions", f"{messaging_total:,}",
@@ -2488,7 +2559,7 @@ if email_total and email_reopened:
     _single = email_cases.loc[email_cases["Touches"] == 1, "Total_Secs"].mean()
     _multi = email_cases.loc[email_cases["Touches"] > 1, "Total_Secs"].mean()
     st.caption(
-        f"🔁 **{email_reopened:,} of {email_total:,} email cases ({email_reopened/email_total:.0%}) "
+        f":material/repeat: **{email_reopened:,} of {email_total:,} email cases ({email_reopened/email_total:.0%}) "
         f"were handled more than once**, {email_multi_agent:,} of them by more than one agent. "
         f"Those cases average **{fmt_mmss(_multi)}** of total handle time versus "
         f"**{fmt_mmss(_single)}** for cases resolved in a single touch. "
@@ -2497,7 +2568,7 @@ if email_total and email_reopened:
     )
 
 st.markdown("---")
-st.subheader("Operational Metrics")
+st.subheader(":material/speed: Operational Metrics")
 
 _chat_util_tooltip = (
     f"Capacity-adjusted legacy Chat plus Enhanced Messaging load divided by all "
@@ -2563,7 +2634,7 @@ with st.expander("Per-agent utilisation"):
 
 # ---- SLA summary --------------------------------------------------------
 st.markdown("---")
-st.subheader("🎯 SLA Score Summary")
+st.subheader(":material/adjust: SLA Score Summary")
 s1, s2, s3, s4 = st.columns(4)
 render_custom_metric(s1, "Chat SLA Score",
                      f"{chat_weighted:.1f}" if chat_weighted is not None else "—",
@@ -2589,7 +2660,7 @@ st.markdown("#### Score breakdown")
 _bc1, _bc2, _bc3 = st.columns(3)
 
 with _bc1:
-    st.markdown("**💬 Chat SLA components**")
+    st.markdown(":material/chat: **Chat SLA components**")
     _cc1, _cc2, _cc3 = st.columns(3)
     _cc1.metric(
         "Answered ≤60s", fmt_pct(sla_comp_chat_in_target_pct),
@@ -2611,7 +2682,7 @@ with _bc1:
     )
 
 with _bc2:
-    st.markdown("**💬 Messaging SLA components**")
+    st.markdown(":material/forum: **Messaging SLA components**")
     _mc1, _mc2, _mc3 = st.columns(3)
     _mc1.metric(
         "First response ≤60s", fmt_pct(sla_comp_messaging_in_target_pct),
@@ -2633,7 +2704,7 @@ with _bc2:
     )
 
 with _bc3:
-    st.markdown("**✉️ Email SLA components**")
+    st.markdown(":material/mail: **Email SLA components**")
     _ec1, _ec2 = st.columns(2)
     _ec1.metric(
         "Within target", fmt_pct(sla_comp_email_in_target_pct),
@@ -2718,8 +2789,8 @@ if n_email_total and "Reopened" in email_scored_p.columns:
 
     if _rows:
         _split = pd.DataFrame(_rows)
-        _hdr = ("📬 First contact vs reopened — blended into the headline by volume"
-                if _n_reop else "📬 First contact vs reopened")
+        _hdr = (":material/mark_email_read: First contact vs reopened — blended into the headline by volume"
+                if _n_reop else ":material/mark_email_read: First contact vs reopened")
         with st.expander(_hdr, expanded=bool(_n_reop)):
             st.dataframe(
                 _split.style.format({"Cases": "{:,}", "Median (h)": "{:.2f}",
@@ -2776,7 +2847,7 @@ if n_email_total and "Case Origin" in email_scored_p.columns and email_scored_p[
     _orig = pd.DataFrame(_orig_rows).sort_values("Cases", ascending=False)
 
     _spread = _orig["SLA"].max() - _orig["SLA"].min()
-    with st.expander(f"📬 Email SLA by case origin"
+    with st.expander(f":material/alt_route: Email SLA by case origin"
                      f"{'  ⚠️ origins differ by ' + f'{_spread:.0f}' + ' points' if _spread >= 20 else ''}",
                      expanded=bool(_spread >= 40)):
         st.dataframe(
@@ -2814,7 +2885,7 @@ _wt_email = int(df_daily["Email SLA Wt"].sum())
 # past target, so excluding them flatters the score. This panel makes the size
 # of that blind spot explicit instead of leaving it to be discovered.
 # ---------------------------------------------------------------------------
-with st.expander("🧮 Volume vs SLA population — why these two numbers differ"):
+with st.expander(":material/calculate: Volume vs SLA population — why these two numbers differ"):
     _rec = pd.DataFrame([
         {"Channel": "Chat",
          "Cases handled (tile)": chat_total,
@@ -2943,7 +3014,7 @@ with st.expander("Daily SLA detail"):
 # Weighted SLA trend
 # =============================================================================
 st.markdown("---")
-st.subheader("Weighted SLA Trend")
+st.subheader(":material/show_chart: Weighted SLA Trend")
 
 _trend_df = df_daily[["Date", "Chat SLA", "Messaging SLA", "Email SLA", "Weighted SLA",
                       "Chat SLA Wt", "Messaging SLA Wt", "Email SLA Wt"]].copy()
@@ -3007,7 +3078,7 @@ else:
 # Contact volume heatmap
 # =============================================================================
 st.markdown("---")
-st.subheader("📅 Contact Volume Heatmap")
+st.subheader(":material/grid_view: Contact Volume Heatmap")
 
 DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 HOUR_ORDER = [f"{h:02d}:00" for h in range(24)]
@@ -3132,7 +3203,7 @@ st.markdown("---")
 if survey_q is None:
     st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
 else:
-    st.subheader("Customer Feedback")
+    st.subheader(":material/sentiment_satisfied: Customer Feedback")
 
     _qtitle = survey_q["Survey Question: Question Title"].astype(str).str.lower()
 
@@ -3237,7 +3308,7 @@ else:
     # metric. This table shows every distinct question title, what it mapped
     # to, and how many answers were parsed, so both failure modes are visible.
     # ---------------------------------------------------------------------
-    with st.expander("🔍 Survey question mapping — check this if CSAT/NPS/FCR look wrong"):
+    with st.expander(":material/manage_search: Survey question mapping — check this if CSAT/NPS/FCR look wrong"):
         _rows = []
         for _title, _grp in survey_q.groupby("Survey Question: Question Title", dropna=False):
             _m = _grp["_metric"].dropna()
@@ -3337,7 +3408,7 @@ else:
         )
 
         if not daily_survey.empty:
-            st.subheader("CSAT & NPS Trend Analysis")
+            st.subheader(":material/trending_up: CSAT & NPS Trend Analysis")
 
             base = alt.Chart(daily_survey)
             x_enc = alt.X("yearmonthdate(Date):T", title="Date",
@@ -3396,7 +3467,7 @@ else:
 # Conversation volume by country
 # =============================================================================
 st.markdown("---")
-st.subheader("🌍 Conversation Volume by Country")
+st.subheader(":material/public: Conversation Volume by Country")
 
 DEVNAME_COL = "Chat Button: Developer Name"
 
@@ -3614,7 +3685,7 @@ else:
 # Hourly weighted SLA
 # =============================================================================
 st.markdown("---")
-st.subheader("⏱️ Hourly Weighted SLA (selected day)")
+st.subheader(":material/schedule: Hourly Weighted SLA (selected day)")
 
 hourly_date = st.date_input("Select a day for hourly view", value=end_date,
                             min_value=min_date, max_value=max_date)
