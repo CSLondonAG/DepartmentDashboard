@@ -1,8 +1,37 @@
 # Premier Bet palette (Editec/GOAT brand guidelines)
+
+[server]
+enableStaticServing = true          # serves ./static (brand fonts)
+
 [theme]
 base = "dark"
 primaryColor = "#FAE100"            # Bet Yellow — CTAs, sliders, toggles
 backgroundColor = "#003806"         # Dark Green
 secondaryBackgroundColor = "#0A4D1F" # Dark Green, lifted for tables/inputs
 textColor = "#FFFFFF"               # White
-font = "sans serif"
+font = "Proxima Nova, sans-serif"   # brand font
+
+[[theme.fontFaces]]
+family = "Proxima Nova"
+url = "app/static/fonts/ProximaNova-light.woff2"
+weight = 300
+
+[[theme.fontFaces]]
+family = "Proxima Nova"
+url = "app/static/fonts/ProximaNova-regular.woff2"
+weight = 400
+
+[[theme.fontFaces]]
+family = "Proxima Nova"
+url = "app/static/fonts/ProximaNova-medium.woff2"
+weight = 500
+
+[[theme.fontFaces]]
+family = "Proxima Nova"
+url = "app/static/fonts/ProximaNova-semibold.woff2"
+weight = 600
+
+[[theme.fontFaces]]
+family = "Proxima Nova"
+url = "app/static/fonts/ProximaNova-bold.woff2"
+weight = 700
