@@ -103,15 +103,24 @@ st.markdown(
 @import url('https://fonts.googleapis.com/css2?family=Urbanist:wght@300;400;500;600;700&display=swap');
 
 :root {
-    --glass-bg: linear-gradient(145deg, rgba(255,255,255,0.20) 0%, rgba(255,255,255,0.05) 100%);
-    --glass-tint: rgba(70, 22, 6, 0.24);
+    /* Premier Bet palette (Editec/GOAT brand guidelines) */
+    --pb-bet-green: #009A44;
+    --pb-bright-green: #00FF66;
+    --pb-dark-green: #003806;
+    --pb-dark-grey: #111111;
+    --pb-bet-yellow: #FAE100;
+    --pb-bet-orange: #FF9300;
+    --pb-white: #FFFFFF;
+
+    --glass-bg: linear-gradient(145deg, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.04) 100%);
+    --glass-tint: rgba(0, 56, 6, 0.38);
     --glass-border: rgba(255,255,255,0.24);
     --glass-highlight: rgba(255,255,255,0.45);
-    --glass-shadow: 0 26px 50px -20px rgba(40, 10, 0, 0.60);
+    --glass-shadow: 0 26px 50px -20px rgba(0, 20, 2, 0.70);
     --glass-blur: blur(22px) saturate(150%);
-    --text-main: #FFF7ED;
-    --text-soft: rgba(255,247,237,0.78);
-    --text-faint: rgba(255,247,237,0.56);
+    --text-main: #FFFFFF;
+    --text-soft: rgba(255,255,255,0.80);
+    --text-faint: rgba(255,255,255,0.60);
     --radius-lg: 28px;
     --radius-md: 20px;
 }
@@ -119,12 +128,12 @@ st.markdown(
 /* ---------- Backdrop ---------- */
 .stApp {
     background:
-        radial-gradient(ellipse 50% 40% at 10% 15%, rgba(255,237,213,0.42) 0%, transparent 62%),
-        radial-gradient(ellipse 45% 38% at 88% 6%,  rgba(253,186,116,0.75) 0%, transparent 62%),
-        radial-gradient(ellipse 60% 50% at 75% 72%, rgba(234,88,12,0.90) 0%, transparent 66%),
-        radial-gradient(ellipse 55% 55% at 8% 92%,  rgba(194,65,12,0.92) 0%, transparent 62%),
-        radial-gradient(ellipse 40% 35% at 45% 42%, rgba(251,146,60,0.55) 0%, transparent 70%),
-        linear-gradient(160deg, #C2410C 0%, #9A3412 45%, #5C1F0A 100%);
+        radial-gradient(ellipse 45% 38% at 88% 6%,  rgba(0,255,102,0.38) 0%, transparent 62%),
+        radial-gradient(ellipse 50% 40% at 12% 18%, rgba(0,154,68,0.95) 0%, transparent 62%),
+        radial-gradient(ellipse 60% 50% at 75% 72%, rgba(0,154,68,0.90) 0%, transparent 66%),
+        radial-gradient(ellipse 55% 55% at 8% 92%,  rgba(0,56,6,0.85) 0%, transparent 62%),
+        radial-gradient(ellipse 40% 35% at 45% 42%, rgba(0,255,102,0.16) 0%, transparent 70%),
+        linear-gradient(160deg, #009A44 0%, #007A36 45%, #003806 100%);
     background-attachment: fixed;
     color: var(--text-main);
     font-family: 'Urbanist', 'Segoe UI', system-ui, -apple-system, sans-serif;
@@ -175,19 +184,19 @@ st.markdown(
     padding: 26px 30px 24px;
     margin: 0 0 1.4rem;
     background:
-        radial-gradient(ellipse 65% 95% at 88% 45%, rgba(30,94,128,0.90) 0%, transparent 70%),
-        radial-gradient(ellipse 55% 80% at 45% 0%,  rgba(140,180,205,0.55) 0%, transparent 70%),
-        linear-gradient(120deg, rgba(120,55,25,0.55) 0%, rgba(40,90,120,0.55) 100%);
+        radial-gradient(ellipse 60% 95% at 88% 40%, rgba(0,255,102,0.30) 0%, transparent 70%),
+        radial-gradient(ellipse 55% 80% at 40% 0%,  rgba(255,255,255,0.14) 0%, transparent 70%),
+        linear-gradient(120deg, rgba(0,56,6,0.78) 0%, rgba(0,154,68,0.45) 100%);
     color: var(--text-main);
 }
 .gh-top { display: flex; justify-content: space-between; align-items: flex-start; }
 .gh-arrow {
     width: 54px; height: 54px; border-radius: 50%;
-    background: #FFFFFF; color: #1F2937;
-    display: grid; place-items: center; font-size: 1.25rem;
+    background: var(--pb-bet-yellow); color: var(--pb-dark-grey);
+    display: grid; place-items: center; font-size: 1.25rem; font-weight: 700;
     box-shadow: 0 10px 30px -8px rgba(0,0,0,0.45);
 }
-.gh-kicker { margin-top: 18px; font-size: 0.85rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); }
+.gh-kicker { margin-top: 18px; font-size: 0.85rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--pb-bet-yellow); }
 .gh-title  { font-size: 2.2rem; font-weight: 500; line-height: 1.1; margin: 4px 0 18px; letter-spacing: -0.02em; }
 .gh-bottom { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
 .gh-period { font-size: 1.15rem; font-weight: 400; color: var(--text-main); }
@@ -201,8 +210,8 @@ st.markdown(
     content: ""; position: absolute; right: 100%; top: 50%;
     width: 26px; height: 1px; background: rgba(255,255,255,0.55);
 }
-.gh-track i.mid { width: 20px; height: 20px; background: rgba(255,255,255,0.45); }
-.gh-track i.end { width: 32px; height: 32px; background: #FFFFFF; }
+.gh-track i.mid { width: 20px; height: 20px; background: rgba(0,255,102,0.55); }
+.gh-track i.end { width: 32px; height: 32px; background: var(--pb-bright-green); box-shadow: 0 0 18px rgba(0,255,102,0.7); }
 
 /* ---------- KPI tiles ---------- */
 .glass-tile {
@@ -229,7 +238,7 @@ st.markdown(
 }
 .glass-tile:hover {
     transform: translateY(-3px);
-    box-shadow: inset 0 1px 0 var(--glass-highlight), 0 32px 60px -22px rgba(40,10,0,0.70);
+    box-shadow: inset 0 1px 0 var(--glass-highlight), 0 32px 60px -22px rgba(0,20,2,0.80);
 }
 .gt-head   { display: flex; align-items: center; gap: 12px; }
 .gt-icon {
@@ -284,7 +293,7 @@ st.markdown(
     overflow: hidden;
 }
 #vg-tooltip-element {
-    background: rgba(40,14,4,0.82) !important;
+    background: rgba(0,56,6,0.90) !important;
     color: var(--text-main) !important;
     border: 1px solid var(--glass-border) !important;
     border-radius: 12px !important;
@@ -306,13 +315,13 @@ st.markdown(
     background: transparent;
     color: var(--text-soft);
 }
-.stTabs [aria-selected="true"] { background: rgba(255,255,255,0.94); color: #7C2D12; }
-.stTabs [aria-selected="true"] p { color: #7C2D12; font-weight: 600; }
+.stTabs [aria-selected="true"] { background: var(--pb-bet-yellow); color: var(--pb-dark-grey); }
+.stTabs [aria-selected="true"] p { color: var(--pb-dark-grey); font-weight: 600; }
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display: none; }
 
 /* ---------- Sidebar ---------- */
 [data-testid="stSidebar"] {
-    background: rgba(70,22,6,0.30) !important;
+    background: rgba(0,56,6,0.55) !important;
     backdrop-filter: blur(30px) saturate(140%);
     -webkit-backdrop-filter: blur(30px) saturate(140%);
     border-right: 1px solid var(--glass-border);
@@ -329,14 +338,16 @@ st.markdown(
 .stApp input { color: var(--text-main) !important; }
 .stButton > button {
     border-radius: 999px;
-    border: 1px solid var(--glass-border);
-    background: rgba(255,255,255,0.14);
-    color: var(--text-main);
-    backdrop-filter: var(--glass-blur);
-    box-shadow: inset 0 1px 0 var(--glass-highlight);
-    transition: background .2s ease;
+    border: none;
+    background: var(--pb-bet-yellow);
+    color: var(--pb-dark-grey);
+    font-weight: 600;
+    box-shadow: 0 10px 24px -10px rgba(0,0,0,0.55);
+    transition: filter .2s ease, transform .2s ease;
 }
-.stButton > button:hover { background: rgba(255,255,255,0.24); border-color: rgba(255,255,255,0.45); color: #FFFFFF; }
+.stButton > button p { color: var(--pb-dark-grey); font-weight: 600; }
+.stButton > button:hover { filter: brightness(1.06); transform: translateY(-1px); color: var(--pb-dark-grey); }
+.stButton > button:focus:not(:active) { color: var(--pb-dark-grey); }
 
 /* ---------- Tables & alerts ---------- */
 [data-testid="stDataFrame"] { border-radius: 16px; overflow: hidden; border: 1px solid var(--glass-border); }
@@ -515,7 +526,8 @@ SLA_GOOD, SLA_WARN = 80.0, 70.0
 CSAT_GOOD_PCT, FCR_GOOD_PCT = 70.0, 50.0
 EMAIL_RESP_RED_SEC = EMAIL_TARGET_HRS * 3600  # FIX #27: was 59 min, target is 60
 
-COLOR_GOOD, COLOR_WARN, COLOR_BAD, COLOR_NONE = "#4ADE80", "#FDE047", "#F87171", "#D6D3D1"
+# Premier Bet palette: Bright Green / Bet Yellow / Bet Orange; neutral = soft white.
+COLOR_GOOD, COLOR_WARN, COLOR_BAD, COLOR_NONE = "#00FF66", "#FAE100", "#FF9300", "#CFE3D6"
 
 # FIX #27: all timestamps are naive local time. If the Salesforce export is in
 # UTC, set this to shift every timestamp into the reporting timezone. The hourly
@@ -620,8 +632,8 @@ def altair_chart(chart, **kwargs):
         if _cfg is alt.Undefined or getattr(_cfg, "axis", alt.Undefined) is alt.Undefined:
             chart = chart.configure_axis(
                 gridColor="rgba(255,255,255,0.14)", domainColor="rgba(255,255,255,0.30)",
-                tickColor="rgba(255,255,255,0.30)", labelColor="#FFF7ED",
-                titleColor="rgba(255,247,237,0.80)")
+                tickColor="rgba(255,255,255,0.30)", labelColor="#FFFFFF",
+                titleColor="rgba(255,255,255,0.80)")
     except Exception:
         pass
     try:
@@ -2947,7 +2959,7 @@ if _plot.empty:
 else:
     trend_chart = (
         alt.Chart(_plot)
-        .mark_line(point=True, color="#7DD3FC")
+        .mark_line(point=True, color="#FFFFFF")
         .encode(
             x=alt.X("Date:T", title="Date",
                     axis=alt.Axis(format="%d %b", labelAngle=-45, values=_plot["Date"].tolist()),
@@ -2965,21 +2977,21 @@ else:
             ],
         )
     )
-    labels = trend_chart.mark_text(dy=-12, color="#E0F2FE").encode(
+    labels = trend_chart.mark_text(dy=-12, color="#FFFFFF").encode(
         text=alt.Text("Weighted SLA:Q", format=".1f"))
     rule = alt.Chart(pd.DataFrame({"y": [SLA_TARGET]})).mark_rule(
-        color="#FCA5A5", strokeDash=[5, 5]).encode(y="y:Q")
+        color="#FAE100", strokeDash=[5, 5]).encode(y="y:Q")
     rule_lb = alt.Chart(pd.DataFrame({"y": [SLA_TARGET]})).mark_text(
-        align="left", color="#FCA5A5", dy=-8).encode(
+        align="left", color="#FAE100", dy=-8).encode(
         y="y:Q", text=alt.value(f"Target: {SLA_TARGET:.0f}"))
     _layers = trend_chart + labels + rule + rule_lb
     _transition_ts = pd.Timestamp(MESSAGING_SLA_START_DATE)
     if x_min <= _transition_ts <= x_max:
         _transition_df = pd.DataFrame({"Date": [_transition_ts]})
         _transition_rule = alt.Chart(_transition_df).mark_rule(
-            color="#E9D5FF", strokeDash=[3, 3]).encode(x="Date:T")
+            color="#FF9300", strokeDash=[3, 3]).encode(x="Date:T")
         _transition_label = alt.Chart(_transition_df).mark_text(
-            color="#E9D5FF", angle=270, align="right", dx=-5, dy=-5
+            color="#FF9300", angle=270, align="right", dx=-5, dy=-5
         ).encode(x="Date:T", y=alt.value(20), text=alt.value("Messaging from 1 Nov"))
         _layers = _layers + _transition_rule + _transition_label
 
@@ -3053,11 +3065,11 @@ def _build_heatmap(df_src: pd.DataFrame, title: str, color_scheme: str = "blues"
 _tab_all, _tab_chat, _tab_messaging, _tab_email = st.tabs(
     ["Combined", "Chat only", "Messaging only", "Email only"])
 for _tab, _sub, _title, _scheme in (
-    (_tab_all, _hm, "All Contacts (Chat + Messaging + Email)", "blues"),
+    (_tab_all, _hm, "All Contacts (Chat + Messaging + Email)", "greens"),
     (_tab_chat, _hm[_hm["Channel"] == "Chat"] if not _hm.empty else _hm,
-     "Chat Contacts (incl. missed)", "greens"),
+     "Chat Contacts (incl. missed)", "yellowgreen"),
     (_tab_messaging, _hm[_hm["Channel"] == "Messaging"] if not _hm.empty else _hm,
-     "Enhanced Messaging Sessions", "purples"),
+     "Enhanced Messaging Sessions", "goldgreen"),
     (_tab_email, _hm[_hm["Channel"] == "Email"] if not _hm.empty else _hm,
      "Email Contacts", "oranges"),
 ):
@@ -3332,21 +3344,21 @@ else:
                           axis=alt.Axis(format="%d %b", labelAngle=45))
             hover = alt.selection_point(on="mouseover", fields=["Date"], nearest=True, empty=False)
 
-            csat_line = base.mark_line(strokeWidth=3, color="#93C5FD").encode(
+            csat_line = base.mark_line(strokeWidth=3, color="#00FF66").encode(
                 x=x_enc,
                 y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
                 tooltip=[alt.Tooltip("Date:T", format="%d %b"),
                          alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
                          alt.Tooltip("Surveys:Q", title="Surveys", format=".0f")],
             )
-            csat_points = base.mark_point(filled=True, color="#93C5FD").encode(
+            csat_points = base.mark_point(filled=True, color="#00FF66").encode(
                 x=x_enc,
                 y=alt.Y("CSAT_pct:Q", axis=None, scale=alt.Scale(domain=[0, 100])),
                 size=alt.condition(hover, alt.value(120), alt.value(60)),
                 tooltip=[alt.Tooltip("Date:T", format="%d %b"),
                          alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f")],
             ).add_params(hover)
-            nps_line = base.mark_line(strokeWidth=3, color="#FCA5A5", strokeDash=[5, 5]).encode(
+            nps_line = base.mark_line(strokeWidth=3, color="#FAE100", strokeDash=[5, 5]).encode(
                 x=x_enc,
                 y=alt.Y("NPS:Q", title="NPS Score", axis=alt.Axis(orient="right"),
                         scale=alt.Scale(domain=[-100, 100])),
@@ -3354,7 +3366,7 @@ else:
                          alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
                          alt.Tooltip("Surveys:Q", title="Surveys", format=".0f")],
             )
-            nps_points = base.mark_point(filled=True, color="#FCA5A5", shape="square").encode(
+            nps_points = base.mark_point(filled=True, color="#FAE100", shape="square").encode(
                 x=x_enc,
                 y=alt.Y("NPS:Q", axis=None, scale=alt.Scale(domain=[-100, 100])),
                 size=alt.condition(hover, alt.value(120), alt.value(60)),
@@ -3547,7 +3559,8 @@ else:
             .encode(
                 theta=alt.Theta("Conversations:Q", stack=True),
                 color=alt.Color("Country:N", legend=alt.Legend(title="Country"),
-                                scale=alt.Scale(scheme="tableau10")),
+                                scale=alt.Scale(range=["#00FF66", "#FAE100", "#FF9300", "#FFFFFF", "#29C2EE",
+                                                      "#F2BB22", "#7DFFB0", "#FFC266", "#B3E6C7"])),
                 order=alt.Order("Conversations:Q", sort="descending"),
                 tooltip=[alt.Tooltip("Country:N", title="Country"),
                          alt.Tooltip("Conversations:Q", title="Conversations", format=","),
@@ -3566,11 +3579,11 @@ else:
             .mark_text(radius=205, size=12)
             .encode(theta=alt.Theta("Conversations:Q", stack=True), text="Label:N",
                     order=alt.Order("Conversations:Q", sort="descending"),
-                    color=alt.value("#FFF7ED"))
+                    color=alt.value("#FFFFFF"))
         )
         center_text = alt.Chart(
             pd.DataFrame({"text": [f"Total: {grand_total:,}"], "x": [0], "y": [0]})
-        ).mark_text(align="center", baseline="middle", fontSize=18, fontWeight="bold", color="#FFF7ED").encode(
+        ).mark_text(align="center", baseline="middle", fontSize=18, fontWeight="bold", color="#FFFFFF").encode(
             x=alt.X("x:Q", axis=None), y=alt.Y("y:Q", axis=None), text="text:N")
 
         altair_chart(alt.layer(pie, labels, center_text).configure_view(stroke=None))
@@ -3738,7 +3751,7 @@ else:
     if not _hplot.empty:
         weighted_line = (
             alt.Chart(_hplot)
-            .mark_line(point=True, color="#7DD3FC")
+            .mark_line(point=True, color="#FFFFFF")
             .encode(
                 x=alt.X("Hour:T", title="Hour", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
                 y=alt.Y("Weighted SLA:Q", title="Weighted SLA",
@@ -3753,9 +3766,9 @@ else:
         layers.append(weighted_line)
 
         if show_breakdown:
-            for _col, _colour, _wt in (("Chat SLA", "#86EFAC", "Chat SLA Wt"),
-                                       ("Messaging SLA", "#D8B4FE", "Messaging SLA Wt"),
-                                       ("Email SLA", "#FCA5A5", "Email SLA Wt")):
+            for _col, _colour, _wt in (("Chat SLA", "#00FF66", "Chat SLA Wt"),
+                                       ("Messaging SLA", "#FAE100", "Messaging SLA Wt"),
+                                       ("Email SLA", "#FF9300", "Email SLA Wt")):
                 _sub = df_hourly.dropna(subset=[_col])
                 if _sub.empty:
                     continue
@@ -3771,7 +3784,7 @@ else:
 
     if show_avail and df_hourly["Avail (min)"].sum() > 0:
         layers.append(
-            alt.Chart(df_hourly).mark_bar(opacity=0.35, color="#FDE68A").encode(
+            alt.Chart(df_hourly).mark_bar(opacity=0.30, color="#00FF66").encode(
                 x=alt.X("Hour:T", axis=None),
                 y=alt.Y("Avail (min):Q", title="Available (min)", axis=alt.Axis(orient="right")),
                 tooltip=[alt.Tooltip("Hour:T", format="%H:%M"),
