@@ -97,8 +97,10 @@ def prepare_survey(raw: pd.DataFrame) -> pd.DataFrame:
     })
     df = df.dropna(subset=["Measure"])
     # rows with no respondent id are treated as distinct respondents
+    df["Respondent"] = df["Respondent"].astype(object)
     missing = df["Respondent"].isna()
-    df.loc[missing, "Respondent"] = ["__row_" + str(i) for i in df.index[missing]]
+    if missing.any():
+        df.loc[missing, "Respondent"] = ["__row_" + str(i) for i in df.index[missing]]
     df = df.drop_duplicates(subset=["Respondent", "Measure"], keep="first")
 
     value = pd.Series(np.nan, index=df.index, dtype="float64")
