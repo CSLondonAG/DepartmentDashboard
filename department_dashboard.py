@@ -1534,6 +1534,10 @@ if "Completion Date" not in email_sla_df.columns:
 
 _from_elapsed = email_sla_df["Date/Time Opened"] + pd.to_timedelta(
     email_sla_df["Elapsed Time (Hours)"], unit="h", errors="coerce")
+# Cast the fallback to the column's own datetime dtype: filling datetime64[us] with a differently
+# typed datetime array raises Pandas4Warning today and will raise in a future pandas.
+# (Legacy diagnostic only: the headline attainment uses Completion Date, never Elapsed Time.)
+_from_elapsed = pd.to_datetime(_from_elapsed).astype(email_sla_df["Completion Date"].dtype)
 email_sla_df["Response DT"] = email_sla_df["Completion Date"].fillna(_from_elapsed)
 
 email_sla_df["Is Answered"] = email_sla_df["Response DT"].notna()
