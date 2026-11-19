@@ -282,7 +282,7 @@ def csat_trend(prepared: pd.DataFrame, start, end, min_sample: int = MIN_SAMPLE)
     elif freq == "MS":
         bucket = d["Date"].dt.to_period("M").dt.to_timestamp()
     else:   # weeks start Monday
-        bucket = (d["Date"].dt.normalize() - pd.to_timedelta(d["Date"].dt.weekday, unit="D"))
+        bucket = (d["Date"].dt.normalize() - pd.to_timedelta(d["Date"].dt.day_of_week, unit="D"))
     g = pd.DataFrame({"Bucket": bucket, "Sat": (d["Value"] >= 4).astype(int)}).groupby("Bucket")
     out = g.agg(Satisfied=("Sat", "sum"), Valid=("Sat", "size")).reset_index()
     out["CSAT %"] = np.where(out["Valid"] >= min_sample, out["Satisfied"] / out["Valid"] * 100.0,
