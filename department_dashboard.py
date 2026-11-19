@@ -86,6 +86,10 @@ import pandas as pd
 import streamlit as st
 
 from data.ingest import clean_email_frame, normalise_case_number, reopen_timing_available
+from metrics.adherence import (
+    COVERAGE_MIN_PCT as ADH_COVERAGE_MIN_PCT, TARGET_PCT as ADH_TARGET_PCT, compute_adherence,
+    shifts_long_from_wide,
+)
 from metrics.service_attainment import (
     COVERAGE_MIN_PCT, EMAIL_TARGET_BUSINESS_HOURS, MESSAGING_RESPONSE_COL,
     MESSAGING_TARGET_SEC, TARGET_PCT, attainment_series, build_overall, classify_email,
@@ -1003,61 +1007,6 @@ def exclude_repeat_missed_chats(
 
 
 # =============================================================================
-# Wide -> tidy shifts normaliser
-# =============================================================================
-def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Convert a wide shifts matrix into tidy: Agent | Date | Shift Start | Shift End."""
-    empty = pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
-    if df_raw is None or df_raw.empty:
-        return empty
-
-    cols = list(df_raw.columns)
-    date_cols, date_map = [], {}
-    for c in cols:
-        d = pd.to_datetime(c, errors="coerce", dayfirst=True)
-        if isinstance(d, pd.Timestamp) and not pd.isna(d):
-            date_cols.append(c)
-            date_map[c] = d.date()
-
-    if not date_cols:
-        return empty
-
-    name_col = next((c for c in cols if c not in date_cols), cols[0])
-
-    long = (
-        df_raw.melt(id_vars=[name_col], value_vars=date_cols,
-                    var_name="DateStr", value_name="Range")
-        .rename(columns={name_col: "Agent"})
-    )
-    long["Date"] = long["DateStr"].map(date_map)
-    long["Range"] = long["Range"].astype(str).str.strip()
-
-    off_mask = long["Range"].str.fullmatch(r"(?i)\s*(off|off day|offday|na|nan|none|-|—|–)?\s*")
-    long = long[~off_mask.fillna(True)]
-    if long.empty:
-        return empty
-
-    rgx = re.compile(r"^\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*[-—–]\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*$")
-
-    def _parse_range(s, d):
-        m = rgx.match(s if isinstance(s, str) else "")
-        if not m:
-            return (pd.NaT, pd.NaT)
-        start_dt = pd.to_datetime(f"{d} {m.group(1)}", format="%Y-%m-%d %I:%M %p", errors="coerce")
-        end_dt = pd.to_datetime(f"{d} {m.group(2)}", format="%Y-%m-%d %I:%M %p", errors="coerce")
-        if pd.notna(start_dt) and pd.notna(end_dt) and end_dt <= start_dt:
-            end_dt = end_dt + pd.Timedelta(days=1)
-        return (start_dt, end_dt)
-
-    parsed = long.apply(lambda r: pd.Series(_parse_range(r["Range"], r["Date"])), axis=1)
-    long["Shift Start"] = pd.to_datetime(parsed[0], errors="coerce")
-    long["Shift End"] = pd.to_datetime(parsed[1], errors="coerce")
-
-    tidy = long.dropna(subset=["Shift Start", "Shift End"])[["Agent", "Date", "Shift Start", "Shift End"]]
-    return tidy.reset_index(drop=True)
-
-
-# =============================================================================
 # File loading
 # =============================================================================
 BASE_DIR = Path(__file__).parent
@@ -1244,11 +1193,11 @@ messaging_metrics_long = parse_dt(
 messaging_items_df["Start DT"] = messaging_items_df["Accept Date"]
 messaging_items_df["End DT"] = messaging_items_df["Close Date"]
 
-df_shifts = pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
+df_shifts = pd.DataFrame(columns=["Agent", "Date", "Kind", "Shift Start", "Shift End"])
 if shifts_path.exists():
     df_shifts_raw = load_csv_cached(str(shifts_path), file_signature(shifts_path))
     df_shifts_raw.columns = df_shifts_raw.columns.str.strip()
-    df_shifts = normalize_wide_shifts(df_shifts_raw)
+    df_shifts = shifts_long_from_wide(df_shifts_raw)
 
 survey_q = None
 if survey_path.exists():
@@ -2172,26 +2121,18 @@ email_util = (dept_email_load / dept_email_avail) if dept_email_avail else None
 df_util = pd.DataFrame(util_rows)
 
 # ---------------------------------------------------------------------------
-# FIX #3: Schedule adherence — shifts.csv finally does something.
+# Schedule adherence (Change 2) - metrics/adherence.py. Department level only.
+# Verified active Email / Messaging handling is productive and overrides presence.
 # ---------------------------------------------------------------------------
-adherence = None
-rostered_secs = available_secs = 0.0
-if not df_shifts.empty and not df_util.empty:
-    shift_by_key: dict = {}
-    for _, r in df_shifts.iterrows():
-        seg = clip_to_window(r["Shift Start"], r["Shift End"], window_start, window_end)
-        if seg:
-            shift_by_key.setdefault(_norm_person_key(r["Agent"]), []).append(seg)
-    shift_by_key = {k: merge_intervals(v) for k, v in shift_by_key.items()}
-
-    avail_by_key = dict(zip(df_util["_key"], df_util["_avail_secs"]))
-    rostered_secs = float(sum(sum_secs(v) for v in shift_by_key.values()))
-    available_secs = float(sum(avail_by_key.get(k, 0.0) for k in shift_by_key))
-    adherence = (available_secs / rostered_secs) if rostered_secs else None
-
-    unmatched = sorted(set(shift_by_key) - set(avail_by_key))
-    dq["shift_agents_unmatched"] = len(unmatched)
-    dq["shift_agents_unmatched_names"] = unmatched[:10]
+_handling_parts = [
+    df_items.loc[df_items["Service Channel: Developer Name"] == EMAIL_DEVNAME,
+                 ["User: Full Name", "Start DT", "End DT Clamped"]],
+    messaging_items_df[["User: Full Name", "Start DT", "End DT Clamped"]],
+]
+_handling = pd.concat(_handling_parts, ignore_index=True).rename(columns={
+    "User: Full Name": "Agent", "Start DT": "Start", "End DT Clamped": "End"})
+adherence_sum, adherence_daily = compute_adherence(
+    df_shifts, df_presence, _handling, ts_start, ts_end, DATA_ASOF)
 
 
 # Period-level components
@@ -2384,8 +2325,7 @@ _email_util_tooltip = (
     "the agent has no active chats; any active chat makes the agent unavailable for email."
 )
 
-_n_op_cols = 4 if adherence is not None else 3
-_op = st.columns(_n_op_cols)
+_op = st.columns(3)
 render_custom_metric(_op[0], "📈 Conversation Utilization",
                      f"{chat_util:.1%}" if chat_util is not None else "—",
                      _chat_util_tooltip, get_utilization_color(chat_util),
@@ -2406,11 +2346,6 @@ render_custom_metric(_op[2], "⏱️ Avg Email First Response", fmt_hms(avg_resp
                      "answered emails that entered the queue in the period",
                      get_email_resp_time_color(avg_resp_secs),
                      f"across {n_email_total:,} emails" if n_email_total else "")
-if adherence is not None:
-    render_custom_metric(_op[3], "🗓️ Schedule Adherence", f"{adherence:.1%}",
-                         "Available time as a share of rostered shift time (from shifts.csv)",
-                         get_utilization_color(adherence),
-                         f"{available_secs/3600:,.1f}h of {rostered_secs/3600:,.1f}h rostered")
 
 with st.expander("Per-agent utilisation"):
     if df_util.empty:
@@ -2429,9 +2364,73 @@ with st.expander("Per-agent utilisation"):
             }, na_rep="—"),
             width="stretch",
         )
-        if dq.get("shift_agents_unmatched"):
-            st.caption(f"⚠️ {dq['shift_agents_unmatched']} agent(s) in shifts.csv had no matching "
-                       f"presence record: {', '.join(dq['shift_agents_unmatched_names'])}")
+
+# ---- Schedule Adherence (Change 2) ---------------------------------------
+# Department-level only (no per-agent view). See metrics/adherence.py for every rule.
+st.markdown("---")
+st.subheader(":material/event_available: Schedule Adherence")
+if not shifts_path.exists():
+    st.info("shifts.csv not found - Schedule Adherence is unavailable.")
+elif df_shifts.empty:
+    st.info("shifts.csv contained no usable shifts - Schedule Adherence is unavailable.")
+else:
+    _adh = adherence_sum
+    _adh_color = {"green": COLOR_GOOD, "amber": COLOR_WARN, "red": COLOR_BAD,
+                  "grey": COLOR_NONE}[_adh.status]
+    _adh_text = {"green": "On target", "amber": "Near target", "red": "Below target",
+                 "grey": "Not reliable"}[_adh.status]
+    _ad1, _ad2, _ad3 = st.columns(3)
+    render_custom_metric(
+        _ad1, "Schedule Adherence", fmt_pct_floor(_adh.rate_pct),
+        f"Productive scheduled minutes / expected productive minutes, time-weighted across "
+        f"agents, only inside scheduled shifts, capped at 100%. Target {ADH_TARGET_PCT:.0f}%. "
+        f"Green >= 95, Amber 90-94.9, Red < 90, Grey when coverage < {ADH_COVERAGE_MIN_PCT:.0f}%.",
+        _adh_color,
+        f"{fmt_ratio(int(round(_adh.productive_secs / 60)), int(round(_adh.expected_secs / 60)))} min"
+        f" • {_adh_text}")
+    render_custom_metric(
+        _ad2, "Coverage", fmt_pct_floor(_adh.coverage_pct),
+        "Scheduled shift time belonging to people who can be matched to presence records. "
+        "Shifts with no presence data at all are a coverage gap, not scored as absence.",
+        COLOR_GOOD if (_adh.coverage_pct or 0) >= ADH_COVERAGE_MIN_PCT else COLOR_NONE,
+        f"{_adh.shifts:,} shifts scored • {_adh.unmatched_shifts:,} unmatched")
+    render_custom_metric(
+        _ad3, "Late / early incidents", f"{_adh.late_incidents + _adh.early_incidents:,}",
+        "A late start or early finish counts only when the variance exceeds 5 minutes; the full "
+        "variance is recorded.",
+        COLOR_NONE,
+        f"late {_adh.late_incidents:,} ({_adh.late_variance_secs / 60:,.0f} min) • "
+        f"early {_adh.early_incidents:,} ({_adh.early_variance_secs / 60:,.0f} min)")
+    if _adh.pending_shifts:
+        st.info(f"**Provisional** - {_adh.pending_shifts:,} shift(s) had not finished by the data "
+                f"horizon ({DATA_ASOF:%d %b %H:%M}) and are not yet scored.")
+    for _m in _adh.messages:
+        st.caption(f":material/warning: {_m}")
+    with st.expander(":material/calculate: How adherence reconciles", expanded=True):
+        st.dataframe(pd.DataFrame([
+            {"Measure": "Expected productive time (h)", "Value": _adh.expected_secs / 3600},
+            {"Measure": "Productive time within shifts (h)", "Value": _adh.productive_secs / 3600},
+            {"Measure": "Approved exclusions removed from expected (meetings / other tasks) (h)",
+             "Value": _adh.approved_exclusion_secs / 3600},
+            {"Measure": "Lunch/break allowance removed from expected (<=60 min/shift) (h)",
+             "Value": _adh.break_allowed_secs / 3600},
+            {"Measure": "Lunch/break beyond the 60-min cap (non-adherent) (h)",
+             "Value": _adh.break_over_cap_secs / 3600},
+            {"Measure": "Shifts with zero productive time (absent)", "Value": _adh.absent_shifts},
+            {"Measure": "Leave shifts (excluded)", "Value": _adh.leave_shifts},
+            {"Measure": "Sick shifts (excluded)", "Value": _adh.sick_shifts},
+        ]).style.format({"Value": "{:,.1f}"}), width="stretch", hide_index=True)
+        st.caption("Productive = Available_All / Available_Email_and_Web / Available_Chat / "
+                   "Available_Case, plus verified Email/Messaging handling. Lunch and break share "
+                   "one 60-minute allowance per shift; an unused allowance is not deducted.")
+    if len(adherence_daily):
+        with st.expander("Daily adherence"):
+            _ad = adherence_daily.copy()
+            _ad["Date"] = _ad["Date"].dt.strftime("%a %d %b")
+            st.dataframe(_ad.style.format({"Productive (h)": "{:,.1f}", "Expected (h)": "{:,.1f}",
+                                           "Adherence %": "{:.1f}"}, na_rep="—"),
+                         width="stretch", hide_index=True)
+
 
 # ---- Overall Service Attainment (Change 1) ------------------------------
 # Replaces the old "SLA Score Summary / Weighted SLA". Overall =
