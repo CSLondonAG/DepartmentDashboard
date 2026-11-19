@@ -90,6 +90,10 @@ from metrics.adherence import (
     COVERAGE_MIN_PCT as ADH_COVERAGE_MIN_PCT, TARGET_PCT as ADH_TARGET_PCT, compute_adherence,
     shifts_long_from_wide,
 )
+from metrics.cx import (
+    csat_summary, csat_trend, in_window as cx_in_window, nps_summary, operational_fcr,
+    prepare_survey, survey_fcr_summary, unmapped_questions,
+)
 from metrics.service_attainment import (
     COVERAGE_MIN_PCT, EMAIL_TARGET_BUSINESS_HOURS, MESSAGING_RESPONSE_COL,
     MESSAGING_TARGET_SEC, TARGET_PCT, attainment_series, build_overall, classify_email,
@@ -2694,315 +2698,120 @@ for _tab, _sub, _title, _scheme in _hm_tab_data:
 
 
 # =============================================================================
-# Customer feedback (CSAT / NPS / FCR)
+# Customer experience (Change 3): CSAT / Survey FCR / Operational FCR / NPS
+# Four SEPARATE measures (metrics/cx.py). Never blended into one score.
 # =============================================================================
-def _leading_int(x) -> Optional[int]:
-    if pd.isna(x):
-        return None
-    m = re.search(r"\d+", str(x))
-    return int(m.group()) if m else None
-
-
-def _bool_yes_no(x) -> Optional[bool]:
-    """Parse a yes/no response.
-
-    Tolerates decorated answers ("Yes - it was resolved", "No, I had to call
-    back"), which an exact-match-only version silently turned into None and
-    therefore dropped from the FCR denominator.
-    """
-    if pd.isna(x):
-        return None
-    s = str(x).strip().lower()
-    if s in ("yes", "y", "true", "1"):
-        return True
-    if s in ("no", "n", "false", "0"):
-        return False
-    # Leading token only: "not resolved" must NOT read as "no" (there is no word
-    # boundary between "no" and "t"), while "No, I had to call back" must.
-    m = re.match(r"^(yes|no|y|n|true|false)\b", s)
-    if m:
-        return m.group(1) in ("yes", "y", "true")
-    return None
-
-
-def _nps_from_scores(series: pd.Series) -> Optional[float]:
-    r = pd.to_numeric(series, errors="coerce").dropna()
-    if r.empty:
-        return None
-    return float((r >= 9).mean() * 100 - (r <= 6).mean() * 100)
-
-
-def _nps_guarded(series: pd.Series) -> Optional[float]:
-    """FIX #12: NPS from a handful of responses is ±100 noise. Suppress it."""
-    r = pd.to_numeric(series, errors="coerce").dropna()
-    if len(r) < NPS_MIN_SAMPLE:
-        return None
-    return _nps_from_scores(r)
-
-
 st.markdown("---")
+st.subheader(":material/sentiment_satisfied: Customer Experience")
 
 if survey_q is None:
-    st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
+    st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT / FCR / NPS.")
 else:
-    st.subheader(":material/sentiment_satisfied: Customer Feedback")
+    _sv_all = prepare_survey(survey_q)
+    _sv = cx_in_window(_sv_all, ts_start, ts_end)
+    _unmapped_q = unmapped_questions(survey_q)
+    if _unmapped_q:
+        st.warning("These survey questions matched no CSAT / NPS / FCR rule and are excluded: "
+                   + "; ".join(f"“{q}”" for q in _unmapped_q[:6])
+                   + (f" (+{len(_unmapped_q) - 6} more)" if len(_unmapped_q) > 6 else ""))
 
-    _qtitle = survey_q["Survey Question: Question Title"].astype(str).str.lower()
+    _csat = csat_summary(_sv)
+    _sfcr = survey_fcr_summary(_sv)
+    _sfcr_chat, _sfcr_email = survey_fcr_summary(_sv, "chat"), survey_fcr_summary(_sv, "email")
+    _nps = nps_summary(_sv)
+    _ofcr = operational_fcr(email_sla_df if email_ingest.has_reopen_flag else None,
+                            DATA_ASOF, ts_start, ts_end)
 
-    # FIX #10: first-match-wins classification from explicit config.
-    _metric = pd.Series([None] * len(survey_q), index=survey_q.index, dtype="object")
-    for _name, _pat in SURVEY_QUESTION_PATTERNS:
-        _hit = _qtitle.str.contains(_pat, na=False, regex=True) & _metric.isna()
-        _metric[_hit] = _name
-    survey_q["_metric"] = _metric
+    _CX_COLOR = {"green": COLOR_GOOD, "amber": COLOR_WARN, "red": COLOR_BAD, "grey": COLOR_NONE}
 
-    _unmapped = sorted(survey_q.loc[survey_q["_metric"].isna(),
-                                    "Survey Question: Question Title"].astype(str).unique())
+    def _cx_tile(container, title, summ, tooltip):
+        if summ.unavailable_reason:
+            render_custom_metric(container, title, "—", tooltip, COLOR_NONE,
+                                 "awaiting data (reopens from 19 Nov 2026)")
+            return
+        sub = fmt_ratio(summ.numerator, summ.denominator)
+        if not summ.sufficient:
+            sub += f" • n < {summ.min_sample}: not reliable"
+        elif summ.awaiting:
+            sub += f" • {summ.awaiting:,} awaiting"
+        render_custom_metric(container, title, fmt_pct_floor(summ.rate_pct), tooltip,
+                             _CX_COLOR[summ.status], sub)
 
-    survey_q["NPS_raw"] = survey_q["Response"].where(survey_q["_metric"] == "NPS").apply(_leading_int)
-    survey_q["CSAT_raw"] = survey_q["Response"].where(survey_q["_metric"] == "CSAT").apply(_leading_int)
-    survey_q["FCR_bool"] = survey_q["Response"].where(survey_q["_metric"] == "FCR").apply(_bool_yes_no)
+    _k1, _k2, _k3, _k4 = st.columns(4)
+    _cx_tile(_k1, "😊 CSAT", _csat,
+             "% of valid respondents rating 4 or 5 on the 1-5 scale. Target 80%, minimum 30 "
+             "responses. Department total only: CSAT rows carry no channel.")
+    _cx_tile(_k2, "🎯 Survey FCR", _sfcr,
+             "% answering Yes to 'was the issue reported ... resolved by the agent?' (chat and "
+             "email questions combined). Target 80%, minimum 30 responses.")
+    _cx_tile(_k3, "🔁 Operational FCR", _ofcr,
+             "Email cases resolved and NOT formally reopened within 7 days / resolved cases with a "
+             "complete 7-day window. Needs reopen timestamps, which exist only for reopens from "
+             "19 Nov 2026; earlier resolutions are never scored.")
+    render_custom_metric(
+        _k4, "⭐ NPS (supporting)",
+        f"{_nps.score:.1f}" if _nps.score is not None else "—",
+        "%Promoters (9-10) - %Detractors (0-6), Premier Bet and Mercury Bet combined. "
+        "Supporting only: no pass/fail status. Shown from 30 responses.", COLOR_NONE,
+        f"{_nps.promoters:,} promoters • {_nps.passives:,} passives • {_nps.detractors:,} detractors")
 
-    # FIX #4: Channel is now actually used (per-channel breakdown below).
-    # Fall back to the question title, since channel-specific wordings such as
-    # "Was the issue reported in the chat resolved by the agent?" name the
-    # channel even when the survey name does not.
-    _ch_survey = (survey_q["Survey Question: Survey"].astype(str)
-                  .str.extract(r"(?i)\b(Email|Chat)\b", expand=False).str.capitalize())
-    _ch_title = (survey_q["Survey Question: Question Title"].astype(str)
-                 .str.extract(r"(?i)\b(Email|Chat)\b", expand=False).str.capitalize())
-    survey_q["Channel"] = _ch_survey.fillna(_ch_title).fillna("Other")
-
-    # FIX #11: validate the declared scales instead of assuming them.
-    _scale_warnings = []
-    _csat_vals = pd.to_numeric(survey_q["CSAT_raw"], errors="coerce").dropna()
-    if not _csat_vals.empty and (_csat_vals.min() < CSAT_SCALE_MIN or _csat_vals.max() > CSAT_SCALE_MAX):
-        _scale_warnings.append(
-            f"CSAT responses range {_csat_vals.min():.0f}–{_csat_vals.max():.0f} but the "
-            f"configured scale is {CSAT_SCALE_MIN}–{CSAT_SCALE_MAX}. Update CSAT_SCALE_MIN/MAX "
-            f"— percentages are wrong until you do."
-        )
-    _nps_vals = pd.to_numeric(survey_q["NPS_raw"], errors="coerce").dropna()
-    if not _nps_vals.empty and (_nps_vals.min() < NPS_SCALE_MIN or _nps_vals.max() > NPS_SCALE_MAX):
-        _scale_warnings.append(
-            f"NPS responses range {_nps_vals.min():.0f}–{_nps_vals.max():.0f} but the "
-            f"configured scale is {NPS_SCALE_MIN}–{NPS_SCALE_MAX}."
-        )
-
-    # FIX #9: mean, not max. Taking max scored a respondent who answered 2 and 5
-    # as a 5.
-    def _mean_or_none(s):
-        v = pd.to_numeric(s, errors="coerce").dropna()
-        return float(v.mean()) if len(v) else None
-
-    def _first_or_none(s):
-        v = s.dropna()
-        return v.iloc[0] if len(v) else None
-
-    def _first_channel(s):
-        """Prefer a real channel over the 'Other' placeholder.
-
-        A respondent's CSAT question may name no channel while their FCR
-        question does; taking the literal first value would label them 'Other'.
-        """
-        v = s.dropna()
-        real = v[v != "Other"]
-        if len(real):
-            return real.iloc[0]
-        return v.iloc[0] if len(v) else "Other"
-
-    survey = survey_q.groupby("Survey Taker: ID", as_index=False).agg(
-        **{
-            "Survey Date": ("Survey Taker: Created Date", "min"),
-            "Channel": ("Channel", _first_channel),
-            "NPS_raw": ("NPS_raw", _mean_or_none),
-            "CSAT_raw": ("CSAT_raw", _mean_or_none),
-            "FCR_bool": ("FCR_bool", _first_or_none),
-        }
-    )
-
-    _span = max(CSAT_SCALE_MAX - CSAT_SCALE_MIN, 1)
-    survey["CSAT%"] = (survey["CSAT_raw"] - CSAT_SCALE_MIN) / _span * 100.0
-    survey["Survey Date"] = pd.to_datetime(survey["Survey Date"], errors="coerce")
-
-    _undated = int(survey["Survey Date"].isna().sum())
-    survey_period = survey[
-        (survey["Survey Date"] >= ts_start) & (survey["Survey Date"] < ts_end)
-    ].copy()
-
-    for _w in _scale_warnings:
-        st.warning(_w)
-    if _unmapped:
-        st.warning(
-            "These survey questions matched no CSAT/NPS/FCR pattern and are excluded — "
-            "add them to SURVEY_QUESTION_PATTERNS if they should count: "
-            + "; ".join(f"“{q}”" for q in _unmapped[:6])
-            + (f" (+{len(_unmapped) - 6} more)" if len(_unmapped) > 6 else "")
-        )
-    if _undated:
-        st.caption(f"{_undated} survey(s) had an unparseable date and are excluded.")
-
-    # ---------------------------------------------------------------------
-    # Question-mapping diagnostic.
-    # A silently mis-mapped question is the easiest way for CSAT/NPS/FCR to go
-    # quietly wrong, and the "unmapped" warning above only catches questions
-    # that match NOTHING — it cannot catch a question mapped to the WRONG
-    # metric. This table shows every distinct question title, what it mapped
-    # to, and how many answers were parsed, so both failure modes are visible.
-    # ---------------------------------------------------------------------
-    with st.expander(":material/manage_search: Survey question mapping — check this if CSAT/NPS/FCR look wrong"):
+    with st.expander(":material/calculate: How these reconcile (numerators, denominators, safeguards)",
+                     expanded=True):
         _rows = []
-        for _title, _grp in survey_q.groupby("Survey Question: Question Title", dropna=False):
-            _m = _grp["_metric"].dropna()
-            _m = _m.iloc[0] if len(_m) else None
-            if _m == "NPS":
-                _parsed = int(_grp["NPS_raw"].notna().sum())
-            elif _m == "CSAT":
-                _parsed = int(_grp["CSAT_raw"].notna().sum())
-            elif _m == "FCR":
-                _parsed = int(_grp["FCR_bool"].notna().sum())
-            else:
-                _parsed = 0
-            _sample = _grp["Response"].dropna()
+        for _s in (_csat, _sfcr, _sfcr_chat, _sfcr_email, _ofcr):
             _rows.append({
-                "Question": str(_title),
-                "Mapped to": _m if _m else "— excluded —",
-                "Rows": len(_grp),
-                "Answers parsed": _parsed,
-                "Example response": str(_sample.iloc[0]) if len(_sample) else "",
+                "Measure": _s.name, "Numerator": _s.numerator, "Denominator": _s.denominator,
+                "Rate": fmt_pct_floor(_s.rate_pct), "Excluded (unparseable)": _s.invalid,
+                "Awaiting data": _s.awaiting,
+                "Status": ("n/a" if _s.unavailable_reason else
+                           {"green": "On target", "amber": "Near target", "red": "Below target",
+                            "grey": f"n < {_s.min_sample}"}[_s.status]),
+                "Shown as headline": ("channel only if n >= 30" if "(" in _s.name else "yes"),
             })
-        _map_df = pd.DataFrame(_rows).sort_values(["Mapped to", "Rows"], ascending=[True, False])
-        st.dataframe(_map_df, width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(_rows).style.format(
+            {c: "{:,}" for c in ("Numerator", "Denominator", "Excluded (unparseable)",
+                                 "Awaiting data")}), width="stretch", hide_index=True)
+        st.caption(
+            "Target 80% for CSAT and both FCRs: Green >= 80, Amber 70-79.9, Red < 70, Grey below 30 "
+            "responses. Survey cohort = survey response date. Operational FCR cohort = resolution "
+            "date (resolution time = the export's Completion Date; there is no separate close "
+            "date). NPS is not pass/fail. **Survey response rate is unavailable** (issued volume "
+            "is not collected) and there is **no CSAT channel split** (CSAT rows carry no channel).")
+        _ch_lines = []
+        for _s in (_sfcr_chat, _sfcr_email):
+            if _s.sufficient:
+                _ch_lines.append(f"**{_s.name}**: {fmt_ratio(_s.numerator, _s.denominator)}")
+            else:
+                _ch_lines.append(f"{_s.name}: only {_s.denominator:,} response(s) - below the "
+                                 f"{_s.min_sample} needed to show this channel on its own")
+        st.markdown("  \n".join(_ch_lines))
+        _nps_note = (f"NPS: {_nps.n:,} valid response(s)" +
+                     ("" if _nps.sufficient else f" - below {_nps.min_sample}, score suppressed"))
+        st.caption(_nps_note)
 
-        # A question that mapped to a metric but parsed almost nothing means the
-        # RESPONSE format is unexpected, not the question title.
-        _bad = _map_df[(_map_df["Mapped to"] != "— excluded —")
-                       & (_map_df["Answers parsed"] < _map_df["Rows"] * 0.5)]
-        if not _bad.empty:
-            st.warning(
-                "These questions were mapped but fewer than half their responses could be "
-                "parsed — check the response format (FCR expects Yes/No; CSAT and NPS expect "
-                "a leading number): "
-                + "; ".join(f"“{r['Question']}” ({r['Answers parsed']}/{r['Rows']} parsed)"
-                            for _, r in _bad.iterrows())
-            )
-
-    if survey_period.empty:
-        st.info("No survey responses in the selected date range.")
-    else:
-        total_surveys = len(survey_period)
-        csat_overall = survey_period["CSAT%"].mean() if survey_period["CSAT%"].notna().any() else None
-        nps_overall = (_nps_from_scores(survey_period["NPS_raw"])
-                       if survey_period["NPS_raw"].notna().any() else None)
-
-        # FIX #2: denominator is respondents who ANSWERED the FCR question.
-        _fcr_answered = survey_period["FCR_bool"].dropna()
-        fcr_overall = float((_fcr_answered == True).mean() * 100) if len(_fcr_answered) else None
-
-        n_csat = int(survey_period["CSAT%"].notna().sum())
-        n_nps = int(survey_period["NPS_raw"].notna().sum())
-        n_fcr = int(len(_fcr_answered))
-
-        k1, k2, k3, k4 = st.columns(4)
-        render_custom_metric(k1, "🗳️ Surveys", f"{total_surveys:,}",
-                             "Distinct survey respondents in range", COLOR_GOOD)
-        render_custom_metric(k2, "😊 CSAT (avg %)",
-                             fmt_pct(csat_overall),
-                             f"Mean CSAT normalised from the {CSAT_SCALE_MIN}–{CSAT_SCALE_MAX} scale to 0–100%",
-                             get_csat_color_pct(csat_overall), f"from {n_csat:,} responses")
-        render_custom_metric(k3, "⭐ NPS",
-                             f"{nps_overall:.1f}" if nps_overall is not None else "—",
-                             "NPS: %Promoters (9–10) − %Detractors (0–6)",
-                             get_nps_color(nps_overall), f"from {n_nps:,} responses")
-        render_custom_metric(k4, "🎯 FCR", fmt_pct(fcr_overall),
-                             "First Contact Resolution, over respondents who answered the FCR question",
-                             get_fcr_color_pct(fcr_overall), f"from {n_fcr:,} responses")
-
-        # ---- FIX #4: per-channel breakdown (Channel was previously unused) ----
-        _by_ch = []
-        for _ch, _grp in survey_period.groupby("Channel"):
-            _f = _grp["FCR_bool"].dropna()
-            _by_ch.append({
-                "Channel": _ch,
-                "Surveys": len(_grp),
-                "CSAT %": _grp["CSAT%"].mean() if _grp["CSAT%"].notna().any() else None,
-                "NPS": _nps_from_scores(_grp["NPS_raw"]) if _grp["NPS_raw"].notna().any() else None,
-                "FCR %": float((_f == True).mean() * 100) if len(_f) else None,
-            })
-        if len(_by_ch) > 1:
-            st.markdown("**Feedback by channel**")
-            st.dataframe(
-                pd.DataFrame(_by_ch).sort_values("Surveys", ascending=False)
-                .style.format({"CSAT %": "{:.1f}", "NPS": "{:.1f}", "FCR %": "{:.1f}",
-                               "Surveys": "{:,}"}, na_rep="—"),
-                width="stretch",
-            )
-
-        # ---- CSAT & NPS trend ----
-        daily_survey = (
-            survey_period
-            .assign(Date=survey_period["Survey Date"].dt.normalize())
-            .groupby("Date", as_index=False)
-            .agg(CSAT_pct=("CSAT%", "mean"),
-                 NPS=("NPS_raw", _nps_guarded),
-                 Surveys=("Survey Date", "size"))
-            .sort_values("Date")
-        )
-
-        if not daily_survey.empty:
-            st.subheader(":material/trending_up: CSAT & NPS Trend Analysis")
-
-            base = alt.Chart(daily_survey)
-            x_enc = alt.X("yearmonthdate(Date):T", title="Date",
-                          axis=alt.Axis(format="%d %b", labelAngle=45))
-            hover = alt.selection_point(on="mouseover", fields=["Date"], nearest=True, empty=False)
-
-            csat_line = base.mark_line(strokeWidth=3, color="#00FF66").encode(
-                x=x_enc,
-                y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
-                tooltip=[alt.Tooltip("Date:T", format="%d %b"),
-                         alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
-                         alt.Tooltip("Surveys:Q", title="Surveys", format=".0f")],
-            )
-            csat_points = base.mark_point(filled=True, color="#00FF66").encode(
-                x=x_enc,
-                y=alt.Y("CSAT_pct:Q", axis=None, scale=alt.Scale(domain=[0, 100])),
-                size=alt.condition(hover, alt.value(120), alt.value(60)),
-                tooltip=[alt.Tooltip("Date:T", format="%d %b"),
-                         alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f")],
-            ).add_params(hover)
-            nps_line = base.mark_line(strokeWidth=3, color="#FAE100", strokeDash=[5, 5]).encode(
-                x=x_enc,
-                y=alt.Y("NPS:Q", title="NPS Score", axis=alt.Axis(orient="right"),
-                        scale=alt.Scale(domain=[-100, 100])),
-                tooltip=[alt.Tooltip("Date:T", format="%d %b"),
-                         alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
-                         alt.Tooltip("Surveys:Q", title="Surveys", format=".0f")],
-            )
-            nps_points = base.mark_point(filled=True, color="#FAE100", shape="square").encode(
-                x=x_enc,
-                y=alt.Y("NPS:Q", axis=None, scale=alt.Scale(domain=[-100, 100])),
-                size=alt.condition(hover, alt.value(120), alt.value(60)),
-                tooltip=[alt.Tooltip("Date:T", format="%d %b"),
-                         alt.Tooltip("NPS:Q", title="NPS Score", format=".0f")],
-            ).add_params(hover)
-            nps_zero = alt.Chart(pd.DataFrame({"zero": [0]})).mark_rule(
-                strokeDash=[6, 4], color="#9ca3af", opacity=0.6
-            ).encode(y=alt.Y("zero:Q", axis=None, scale=alt.Scale(domain=[-100, 100])))
-
-            altair_chart(
-                alt.layer(csat_line, nps_line, csat_points, nps_points, nps_zero)
-                .resolve_scale(y="independent")
-                .properties(height=400)
-                .configure_axis(grid=True, gridColor="rgba(255,255,255,0.14)", gridDash=[2, 3])
-                .configure_legend(orient="top-right")
-                .interactive()
-            )
-
-            _suppressed = int(daily_survey["NPS"].isna().sum())
-            if _suppressed:
-                st.caption(f"NPS is hidden on {_suppressed} day(s) with fewer than "
-                           f"{NPS_MIN_SAMPLE} responses, where the figure would be noise.")
+    _ct = csat_trend(_sv_all, ts_start, ts_end)
+    if not _ct.empty:
+        st.markdown("#### CSAT trend")
+        _ctp = _ct.dropna(subset=["CSAT %"])
+        if _ctp.empty:
+            st.caption("Every bucket in this period has fewer than 30 CSAT responses, so no "
+                       "trend is drawn (shown as a table below).")
+        else:
+            _cl = alt.Chart(_ctp).mark_line(point=True, color="#00FF66").encode(
+                x=alt.X("Bucket:T", title="Period start"),
+                y=alt.Y("CSAT %:Q", scale=alt.Scale(domain=[0, 100])),
+                tooltip=[alt.Tooltip("Bucket:T"), alt.Tooltip("CSAT %:Q", format=".1f"),
+                         alt.Tooltip("Satisfied:Q"), alt.Tooltip("Valid:Q")])
+            _cr = alt.Chart(pd.DataFrame({"y": [80.0]})).mark_rule(
+                color="#FAE100", strokeDash=[5, 5]).encode(y="y:Q")
+            altair_chart((_cl + _cr).properties(height=300))
+        st.caption("Bucket size adapts to the period (daily up to 31 days, weekly to 180, then "
+                   "monthly); buckets with fewer than 30 responses show no rate.")
+        _ctd = _ct.copy()
+        _ctd["Bucket"] = _ctd["Bucket"].dt.strftime("%d %b %Y")
+        with st.expander("CSAT by period"):
+            st.dataframe(_ctd.style.format({"CSAT %": "{:.1f}"}, na_rep="n < 30"),
+                         width="stretch", hide_index=True)
 
 
 # =============================================================================
