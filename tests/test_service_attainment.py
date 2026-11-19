@@ -311,6 +311,9 @@ def test_banned_reopen_proxy_is_gone_from_the_dashboard():
     src = (Path(__file__).resolve().parents[1] / "department_dashboard.py").read_text(encoding="utf-8")
     assert not re.search(r'\["Reopened"\]\s*=\s*email_sla_df\["Touches"\]\s*>\s*1', src)
     assert not re.search(r'Reopened.*=.*Touches.*>\s*1', src)
+    for line in src.splitlines():
+        if re.search(r"reopened", line, re.I) and re.search(r'Touches"\]\s*>\s*1', line):
+            raise AssertionError(f"reopening inferred from touches: {line.strip()}")
 
 
 def test_outcome_vocabulary_is_closed():

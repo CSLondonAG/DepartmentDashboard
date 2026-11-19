@@ -1983,8 +1983,17 @@ email_aht = email_cases["Total_Secs"].mean() if email_total else None
 # Re-work: how much of the volume is a case coming back round again.
 chat_touches = float(chat_cases["Touches"].mean()) if chat_total else None
 email_touches = float(email_cases["Touches"].mean()) if email_total else None
-chat_reopened = int((chat_cases["Touches"] > 1).sum())
-email_reopened = int((email_cases["Touches"] > 1).sum())
+# Legacy Live Chat has no reopen flag: this is only "handled more than once".
+chat_multi_touch = int((chat_cases["Touches"] > 1).sum())
+# Email reopening comes ONLY from the authoritative `Re-opened` flag (joined on case number),
+# never from routing touches. Without the flag (legacy export) it is 0 and not displayed.
+if email_ingest.has_reopen_flag and HAS_CASE_KEY and CASE_KEY in email_cases.columns:
+    _reopened_keys = set(email_sla_df.loc[email_sla_df["Reopened"], EMAIL_CASE_KEY])
+    email_reopened = int(email_cases[CASE_KEY].astype(str).isin(_reopened_keys).sum())
+else:
+    email_reopened = 0
+# Routing touches > 1 is a handling diagnostic (Change 4), distinct from reopening.
+email_multi_touch = int((email_cases["Touches"] > 1).sum())
 email_multi_agent = int((email_cases["Agents"] > 1).sum())
 chat_open_n = int(chat_cases["Any_Open"].sum())
 email_open_n = int(email_cases["Any_Open"].sum())
@@ -2218,7 +2227,7 @@ if has_chat_data:
                          "Distinct chat cases first handled in the period. Counted once even if "
                          "the case was routed more than once.",
                          COLOR_GOOD,
-                         f"{chat_reopened:,} re-handled" if chat_reopened else "")
+                         f"{chat_multi_touch:,} handled more than once" if chat_multi_touch else "")
     render_custom_metric(c2, "✉️ Total Emails", f"{email_total:,}",
                          "Distinct email cases first handled in the period. A case that is "
                          "re-opened and routed again counts ONCE, not once per touch.",
@@ -2346,11 +2355,11 @@ with st.expander("Daily Enhanced Messaging detail"):
         )
 
 # Re-work is invisible when volume counts rows; surfaced explicitly instead.
-if email_total and email_reopened:
+if email_total and email_multi_touch:
     _single = email_cases.loc[email_cases["Touches"] == 1, "Total_Secs"].mean()
     _multi = email_cases.loc[email_cases["Touches"] > 1, "Total_Secs"].mean()
     st.caption(
-        f":material/repeat: **{email_reopened:,} of {email_total:,} email cases ({email_reopened/email_total:.0%}) "
+        f":material/repeat: **{email_multi_touch:,} of {email_total:,} email cases ({email_multi_touch/email_total:.0%}) "
         f"were handled more than once**, {email_multi_agent:,} of them by more than one agent. "
         f"Those cases average **{fmt_mmss(_multi)}** of total handle time versus "
         f"**{fmt_mmss(_single)}** for cases resolved in a single touch. "
