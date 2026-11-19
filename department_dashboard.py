@@ -85,6 +85,13 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from data.ingest import clean_email_frame, normalise_case_number, reopen_timing_available
+from metrics.service_attainment import (
+    COVERAGE_MIN_PCT, EMAIL_TARGET_BUSINESS_HOURS, MESSAGING_RESPONSE_COL,
+    MESSAGING_TARGET_SEC, TARGET_PCT, attainment_series, build_overall, classify_email,
+    classify_messaging, fmt_pct_floor, fmt_ratio, in_window, reopened_summary,
+)
+
 # =============================================================================
 # Page config & styling
 # =============================================================================
@@ -903,149 +910,6 @@ def _norm_person_key(s: str) -> str:
 
 
 # =============================================================================
-# SLA scoring
-# FIX #7 / #8: bounded penalties, single-counted abandonment. These scoring functions
-# are the ONLY place the formulas live, so the daily and hourly views can never
-# drift apart (previously the logic was duplicated).
-# =============================================================================
-def chat_sla_from_slice(g: pd.DataFrame) -> Optional[float]:
-    """Chat SLA score 0-100 for a slice of chat.csv. None if the slice is empty."""
-    if g is None or len(g) == 0:
-        return None
-
-    total = len(g)
-    answered = g[g["Wait Time"].notna()]
-    n_answered = len(answered)
-
-    # FIX #8: denominator is ANSWERED chats. Previously this divided by all
-    # chats, so abandonment suppressed this term AND was penalised again below.
-    frac_in_target = (
-        float((answered["Wait Time"] <= CHAT_ANSWER_TARGET_SEC).sum()) / n_answered
-        if n_answered else 0.0
-    )
-    avg_wait_min = (answered["Wait Time"].mean() / 60.0) if n_answered else 0.0
-    abandon_frac = float((g["Abandoned After"] > CHAT_ABANDON_AFTER_SEC).sum()) / total
-
-    # FIX #7: bounded. Was `0.3 * excess_minutes`, i.e. -57.6 points per minute,
-    # so a day could floor at 0 from a single long wait.
-    excess = max(avg_wait_min - CHAT_TARGET_WAIT_MIN, 0.0)
-    wait_penalty = min(excess / CHAT_WAIT_TOLERANCE_MIN, 1.0) if CHAT_WAIT_TOLERANCE_MIN > 0 else (1.0 if excess else 0.0)
-
-    raw = (W_CHAT_ANSWER * frac_in_target
-           - W_CHAT_WAIT * wait_penalty
-           - W_CHAT_ABANDON * abandon_frac)
-    return clamp((raw / CHAT_RESCALE_K) * SLA_SCALE)
-
-
-def messaging_scorable(g: pd.DataFrame) -> pd.DataFrame:
-    """Messaging sessions with a matching, classifiable Agent Work record."""
-    if g is None or len(g) == 0:
-        return g
-    if "Assignments" not in g.columns:
-        return g.iloc[0:0]
-    return g[g["Assignments"] > 0]
-
-
-def messaging_sla_from_slice(g: pd.DataFrame) -> Optional[float]:
-    """Enhanced Messaging SLA score, 0-100, for session-level metrics.
-
-    The structure intentionally mirrors the legacy Chat score: first-response
-    target attainment supplies the positive term, response delay and abandoned
-    sessions supply bounded penalties. Median response replaces the mean because
-    asynchronous Messaging has a long inactivity tail.
-    """
-    g = messaging_scorable(g)
-    if g is None or len(g) == 0:
-        return None
-
-    response = pd.to_numeric(
-        g.get("Service Rep First Response Time", pd.Series(index=g.index, dtype="float64")),
-        errors="coerce",
-    )
-    answered = response[response > 0]
-    n_answered = len(answered)
-    frac_in_target = (
-        float((answered <= MESSAGING_FIRST_RESPONSE_TARGET_SEC).sum()) / n_answered
-        if n_answered else 0.0
-    )
-    median_response_min = (float(answered.median()) / 60.0) if n_answered else 0.0
-    abandon_frac = float(((~g["Any_Closed"]) & g["Any_Abandoned"]).sum()) / len(g)
-
-    excess = max(median_response_min - MESSAGING_TARGET_RESPONSE_MIN, 0.0)
-    response_penalty = (
-        min(excess / MESSAGING_RESPONSE_TOLERANCE_MIN, 1.0)
-        if MESSAGING_RESPONSE_TOLERANCE_MIN > 0 else (1.0 if excess else 0.0)
-    )
-    raw = (W_MESSAGING_IN_TARGET * frac_in_target
-           - W_MESSAGING_RESPONSE * response_penalty
-           - W_MESSAGING_ABANDON * abandon_frac)
-    return clamp((raw / MESSAGING_RESCALE_K) * SLA_SCALE)
-
-
-def email_scorable(g: pd.DataFrame) -> pd.DataFrame:
-    """The subset of an email slice that counts toward the SLA.
-
-    Drops emails with no usable response time, and unanswered emails that are
-    not yet past target ("not yet due"). Everything remaining is scored on
-    'Effective Elapsed', so the reward term and the penalty term always refer to
-    the same set of emails.
-    """
-    if g is None or len(g) == 0:
-        return g
-    if "Counts Toward SLA" not in g.columns:
-        return g
-    return g[g["Counts Toward SLA"]]
-
-
-def _email_score_core(elapsed: pd.Series, target: pd.Series) -> Optional[float]:
-    """Score one homogeneous population against its own target column."""
-    total = len(elapsed)
-    if not total:
-        return None
-
-    frac_in_target = float((elapsed <= target).sum()) / total
-
-    # Penalty statistic: p85 of elapsed in multiples of target. A few very slow
-    # cases can no longer set the score by themselves, while a genuine shift in
-    # the bulk of the distribution still moves it.
-    ratio = (elapsed / target).replace([float("inf"), float("-inf")], pd.NA).dropna()
-    stat = float(ratio.quantile(EMAIL_PENALTY_PERCENTILE)) if len(ratio) else 1.0
-    excess = max(stat - 1.0, 0.0)
-    resp_penalty = (min(excess / EMAIL_RESP_TOLERANCE_TARGETS, 1.0)
-                    if EMAIL_RESP_TOLERANCE_TARGETS > 0 else (1.0 if excess else 0.0))
-
-    raw = W_EMAIL_IN_TARGET * frac_in_target - W_EMAIL_RESP * resp_penalty
-    return clamp((raw / EMAIL_RESCALE_K) * SLA_SCALE)
-
-
-def email_sla_parts(g: pd.DataFrame):
-    """(first-contact score, n), (reopened score, n) for a slice."""
-    g = email_scorable(g)
-    if g is None or len(g) == 0:
-        return (None, 0), (None, 0)
-    elapsed = g["Effective Elapsed"] if "Effective Elapsed" in g.columns else g["Elapsed Time (Hours)"]
-    target = g["Effective Target"] if "Effective Target" in g.columns else (
-        g["Target Hrs"] if "Target Hrs" in g.columns else pd.Series(EMAIL_TARGET_HRS, index=g.index))
-    if "Reopened" not in g.columns:
-        return (_email_score_core(elapsed, target), len(g)), (None, 0)
-    m = g["Reopened"].astype(bool)
-    first = (_email_score_core(elapsed[~m], target[~m]), int((~m).sum()))
-    reop = (_email_score_core(elapsed[m], target[m]), int(m.sum()))
-    return first, reop
-
-
-def email_sla_from_slice(g: pd.DataFrame) -> Optional[float]:
-    """Email SLA 0-100: first-contact response and reopened resolution, blended by volume."""
-    (sf, nf), (sr, nr) = email_sla_parts(g)
-    num = den = 0.0
-    for s, n in ((sf, nf), (sr, nr)):
-        if s is not None and n:
-            num += s * n
-            den += n
-    return (num / den) if den else None
-
-
-# =============================================================================
 # Missed-chat de-duplication
 # =============================================================================
 def exclude_repeat_missed_chats(
@@ -1305,6 +1169,9 @@ df_items = canonicalise_columns(
     load_csv_cached(str(items_path), file_signature(items_path)),
     ["Work Item: Name", "Service Channel: Developer Name", "Handle Time",
      "Queue: Name", "User: Full Name", "Start DT", "End DT"], "report_items.csv")
+if "Work Item: Name" in df_items.columns:
+    # same canonical key as email.csv Case Number (zero-padding differs between exports)
+    df_items["Work Item: Name"] = normalise_case_number(df_items["Work Item: Name"])
 df_presence = canonicalise_columns(
     load_csv_cached(str(pres_path), file_signature(pres_path)),
     ["Created By: Full Name", "Service Presence Status: Developer Name",
@@ -1316,7 +1183,18 @@ chat_sla_df = canonicalise_columns(
 email_sla_df = canonicalise_columns(
     load_csv_cached(str(email_path), file_signature(email_path)),
     ["Date/Time Opened", "Completion Date", "Elapsed Time (Hours)",
-     "Target Response (Hours)", "Status", "Case Origin", EMAIL_CASE_KEY], "email.csv")
+     "Status", "Case Origin", EMAIL_CASE_KEY, "Re-opened", "Reopened Time", "Country"],
+    "email.csv")
+# New-schema ingestion: drops the duplicated header row, normalises zero-padded Case Number,
+# reads the authoritative `Re-opened` flag, and degrades (with messages) on the legacy schema.
+email_ingest = clean_email_frame(email_sla_df)
+email_sla_df = email_ingest.frame
+for _c in ("Date/Time Opened", "Completion Date", "Reopened Time"):
+    if _c not in email_sla_df.columns:
+        email_sla_df[_c] = pd.NaT
+for _c in ("Elapsed Time (Hours)", "Status"):
+    if _c not in email_sla_df.columns:
+        email_sla_df[_c] = pd.NA
 messaging_items_df = canonicalise_columns(
     load_csv_cached(str(messaging_items_path), file_signature(messaging_items_path)),
     ["Agent Work ID", "Messaging Session Name", "User: Full Name",
@@ -1507,6 +1385,10 @@ messaging_items_df["Is Abandoned Assignment"] = (
     messaging_items_df["Status"].astype(str).str.strip().str.casefold() == "abandoned")
 messaging_items_df["Is Canceled Assignment"] = (
     messaging_items_df["Status"].astype(str).str.strip().str.casefold() == "canceled")
+messaging_items_df["Is Unavailable Assignment"] = (
+    messaging_items_df["Status"].astype(str).str.strip().str.casefold() == "unavailable")
+messaging_items_df["Is Human Closed Assignment"] = (
+    messaging_items_df["Is Closed Assignment"] & messaging_items_df["Human Agent"].notna())
 
 _messaging_work_by_session = (
     messaging_items_df.groupby("Messaging Session Name", as_index=False)
@@ -1522,6 +1404,8 @@ _messaging_work_by_session = (
         Any_Closed=("Is Closed Assignment", "any"),
         Any_Abandoned=("Is Abandoned Assignment", "any"),
         Any_Canceled=("Is Canceled Assignment", "any"),
+        Any_Human_Closed=("Is Human Closed Assignment", "any"),
+        Any_Unavailable=("Is Unavailable Assignment", "any"),
     )
 )
 
@@ -1532,7 +1416,8 @@ messaging_sessions = (
 )
 for _c in ("Assignments", "Accepted_Assignments", "Human_Agents"):
     messaging_sessions[_c] = messaging_sessions[_c].fillna(0).astype(int)
-for _c in ("Any_Closed", "Any_Abandoned", "Any_Canceled"):
+for _c in ("Any_Closed", "Any_Abandoned", "Any_Canceled", "Any_Human_Closed",
+           "Any_Unavailable"):
     messaging_sessions[_c] = messaging_sessions[_c].fillna(False).astype(bool)
 
 dq["messaging_sessions"] = int(len(messaging_sessions))
@@ -1779,35 +1664,13 @@ if HAS_CASE_KEY and EMAIL_CASE_KEY in email_sla_df.columns:
     _keys = email_sla_df[EMAIL_CASE_KEY].astype(str).str.strip()
     email_sla_df["Touches"] = _keys.map(_touch_map)
     dq["email_no_routing_record"] = int(email_sla_df["Touches"].isna().sum())
-    # A case with no routing record was never re-routed, so it cannot have been
-    # reopened through Omni-Channel — treat it as a single response cycle.
+    # A case with no routing record was never re-routed: treat it as a single touch.
     email_sla_df["Touches"] = email_sla_df["Touches"].fillna(1).astype(int)
-    email_sla_df["Reopened"] = email_sla_df["Touches"] > 1
 else:
     email_sla_df["Touches"] = 1
-    email_sla_df["Reopened"] = False
-
-# First contact keeps its entitlement response target; a reopened case is judged
-# against the resolution target, because that is what its elapsed figure is.
-email_sla_df["Effective Target"] = email_sla_df["Target Hrs"].where(
-    ~email_sla_df["Reopened"], EMAIL_REOPENED_TARGET_HRS)
-
-
-def email_window_slice(df: pd.DataFrame, w_start, w_end) -> pd.DataFrame:
-    """Emails OPENED **or** RESPONDED TO within [w_start, w_end).
-
-    An email opened before the window but answered inside it is this window's
-    work; an email opened inside the window but answered after it is also this
-    window's work. Each row is attributed to exactly ONE timestamp inside the
-    window — its open time if it was opened here, otherwise its response time —
-    so daily buckets partition the period slice instead of double-counting.
-    """
-    opened_in = (df["Date/Time Opened"] >= w_start) & (df["Date/Time Opened"] < w_end)
-    resp_in = df["Response DT"].notna() & (df["Response DT"] >= w_start) & (df["Response DT"] < w_end)
-    keep = opened_in | resp_in
-    sel = df.loc[keep].copy()
-    sel["SLA Timestamp"] = sel["Date/Time Opened"].where(opened_in.loc[keep], sel["Response DT"])
-    return sel
+# `Reopened` is the authoritative `Re-opened` export flag (set in data.ingest). It is NEVER
+# inferred from routing touches (the old `Touches > 1` proxy was banned and removed).
+email_sla_df["Effective Target"] = email_sla_df["Target Hrs"]
 
 
 # =============================================================================
@@ -2120,8 +1983,17 @@ email_aht = email_cases["Total_Secs"].mean() if email_total else None
 # Re-work: how much of the volume is a case coming back round again.
 chat_touches = float(chat_cases["Touches"].mean()) if chat_total else None
 email_touches = float(email_cases["Touches"].mean()) if email_total else None
-chat_reopened = int((chat_cases["Touches"] > 1).sum())
-email_reopened = int((email_cases["Touches"] > 1).sum())
+# Legacy Live Chat has no reopen flag: this is only "handled more than once".
+chat_multi_touch = int((chat_cases["Touches"] > 1).sum())
+# Email reopening comes ONLY from the authoritative `Re-opened` flag (joined on case number),
+# never from routing touches. Without the flag (legacy export) it is 0 and not displayed.
+if email_ingest.has_reopen_flag and HAS_CASE_KEY and CASE_KEY in email_cases.columns:
+    _reopened_keys = set(email_sla_df.loc[email_sla_df["Reopened"], EMAIL_CASE_KEY])
+    email_reopened = int(email_cases[CASE_KEY].astype(str).isin(_reopened_keys).sum())
+else:
+    email_reopened = 0
+# Routing touches > 1 is a handling diagnostic (Change 4), distinct from reopening.
+email_multi_touch = int((email_cases["Touches"] > 1).sum())
 email_multi_agent = int((email_cases["Agents"] > 1).sum())
 chat_open_n = int(chat_cases["Any_Open"].sum())
 email_open_n = int(email_cases["Any_Open"].sum())
@@ -2134,19 +2006,45 @@ chat_sla_p = chat_sla_df[
     (chat_sla_df["Date/Time Opened"] >= ts_start) & (chat_sla_df["Date/Time Opened"] < ts_end)
     & (chat_sla_df["Date/Time Opened"] < pd.Timestamp(MESSAGING_SLA_START_DATE))
 ].copy()
-# Email SLA population: opened OR responded to within the period.
-email_sla_p = email_window_slice(email_sla_df, ts_start, ts_end)
-email_scored_p = email_scorable(email_sla_p)
+# ---------------------------------------------------------------------------
+# Overall Service Attainment inputs (Change 1; metrics/service_attainment.py).
+# Email cohort = Date/Time Opened (queue entry); Messaging cohort = session Start Time.
+# ---------------------------------------------------------------------------
+email_att_ok = email_ingest.can_compute_attainment
+email_att_all = classify_email(email_sla_df, DATA_ASOF) if email_att_ok else None
+messaging_att_ok = MESSAGING_RESPONSE_COL in messaging_sessions.columns
+messaging_att_all = (
+    classify_messaging(messaging_sessions[
+        messaging_sessions["Start Time"] >= pd.Timestamp(MESSAGING_SLA_START_DATE)])
+    if messaging_att_ok else None
+)
+
+
+def attainment_for_window(w_start, w_end):
+    """(email outcomes, messaging outcomes, OverallSummary) for contacts entering in [w_start, w_end)."""
+    e = in_window(email_att_all, "Date/Time Opened", w_start, w_end) if email_att_ok else None
+    m = in_window(messaging_att_all, "Start Time", w_start, w_end) if messaging_att_ok else None
+    return e, m, build_overall(e, m, window_end=w_end, as_of=DATA_ASOF,
+                               email_available=email_att_ok, messaging_available=messaging_att_ok)
+
+
+email_att_p, messaging_att_p, overall_p = attainment_for_window(ts_start, ts_end)
+_period_len = ts_end - ts_start
+_, _, overall_prev = attainment_for_window(ts_start - _period_len, ts_start)
 
 # Arrivals-only slice, for the contact-volume heatmap (that chart is about when
-# contacts ARRIVE, so it must not include emails that merely closed here).
+# contacts ARRIVE).
 email_opened_p = email_sla_df[
     (email_sla_df["Date/Time Opened"] >= ts_start) & (email_sla_df["Date/Time Opened"] < ts_end)
 ].copy()
 
-avg_resp_hrs = email_scored_p["Effective Elapsed"].mean() if len(email_scored_p) else None
-# FIX #27: no emails now shows a dash, not a perfect 00:00:00.
-avg_resp_secs = None if (avg_resp_hrs is None or pd.isna(avg_resp_hrs)) else avg_resp_hrs * 3600
+# Mean first-response time (business hours) of answered emails in the cohort.
+_answered_bh = (email_att_p["Business Hours To Response"].dropna()
+                if email_att_p is not None and "Business Hours To Response" in email_att_p.columns
+                else pd.Series(dtype="float64"))
+_answered_bh = _answered_bh[_answered_bh >= 0]
+n_email_total = len(_answered_bh)
+avg_resp_secs = float(_answered_bh.mean() * 3600) if n_email_total else None
 
 
 # =============================================================================
@@ -2296,83 +2194,6 @@ if not df_shifts.empty and not df_util.empty:
     dq["shift_agents_unmatched_names"] = unmatched[:10]
 
 
-# =============================================================================
-# Per-day SLA
-# =============================================================================
-daily = []
-for d in pd.date_range(start_date, end_date):
-    day = d.date()
-
-    cd = chat_sla_p[chat_sla_p["Date/Time Opened"].dt.date == day]
-    md = messaging_period[messaging_period["Start Time"].dt.date == day]
-    md_scored = messaging_scorable(md)
-    # Attributed to exactly one day inside the period, so daily weights sum to
-    # the period weight even though the slice is an opened-OR-responded union.
-    ed = email_sla_p[email_sla_p["SLA Timestamp"].dt.date == day]
-    ed_scored = email_scorable(ed)
-
-    sla_c = chat_sla_from_slice(cd)
-    sla_m = messaging_sla_from_slice(md)
-    sla_e = email_sla_from_slice(ed)
-
-    _ans = cd[cd["Wait Time"].notna()]
-    _mresp = _positive_metric(md_scored, "Service Rep First Response Time")
-    daily.append({
-        "Date": d.normalize(),
-        "Chat SLA": sla_c,
-        "Messaging SLA": sla_m,
-        "Email SLA": sla_e,
-        # Weight by the population each score was computed from...
-        "Chat SLA Wt": len(cd),
-        "Messaging SLA Wt": len(md_scored),
-        "Email SLA Wt": len(ed_scored),
-        # ...and show the report_items work-item volume alongside it, so the two
-        # populations can be compared rather than silently conflated.
-        "Chat Vol": int((chat_cases["First_Start"].dt.date == day).sum()),
-        "Messaging Vol": len(md),
-        "Email Vol": int((email_cases["First_Start"].dt.date == day).sum()),
-        "Email Not Due": int(len(ed) - len(ed_scored)),
-        "Chat ≤60s %": round(float((_ans["Wait Time"] <= CHAT_ANSWER_TARGET_SEC).mean() * 100), 1) if len(_ans) else None,
-        "Chat Avg Wait (s)": round(float(_ans["Wait Time"].mean()), 1) if len(_ans) else None,
-        "Chat Abandon %": round(float((cd["Abandoned After"] > CHAT_ABANDON_AFTER_SEC).mean() * 100), 1) if len(cd) else None,
-        "Messaging ≤60s %": round(float((_mresp <= MESSAGING_FIRST_RESPONSE_TARGET_SEC).mean() * 100), 1) if len(_mresp) else None,
-        "Messaging Median Resp (s)": round(float(_mresp.median()), 1) if len(_mresp) else None,
-        "Messaging Abandon %": round(float(((~md_scored["Any_Closed"]) & md_scored["Any_Abandoned"]).mean() * 100), 1) if len(md_scored) else None,
-        "Email in target %": round(float((ed_scored["Effective Elapsed"] <= ed_scored["Effective Target"]).mean() * 100), 1) if len(ed_scored) else None,
-        "Email Avg Resp (h)": round(float(ed_scored["Effective Elapsed"].mean()), 3) if len(ed_scored) else None,
-    })
-
-df_daily = pd.DataFrame(daily)
-
-# FIX #13: a day with no contacts is a GAP, not a zero. The old fillna(0) drew
-# weekends and closure days as genuine 0-score days and dragged the trend down.
-_cw = df_daily["Chat SLA Wt"].fillna(0)
-_mw = df_daily["Messaging SLA Wt"].fillna(0)
-_ew = df_daily["Email SLA Wt"].fillna(0)
-_num = (df_daily["Chat SLA"].fillna(0) * _cw
-        + df_daily["Messaging SLA"].fillna(0) * _mw
-        + df_daily["Email SLA"].fillna(0) * _ew)
-_den = (_cw.where(df_daily["Chat SLA"].notna(), 0)
-        + _mw.where(df_daily["Messaging SLA"].notna(), 0)
-        + _ew.where(df_daily["Email SLA"].notna(), 0))
-# Mask the denominator BEFORE dividing. Dividing first and masking after raises
-# ZeroDivisionError on pandas 3.x for a day with no contacts at all.
-df_daily["Weighted SLA"] = _num / _den.where(_den > 0)
-
-_ok_c = df_daily["Chat SLA"].notna()
-_ok_m = df_daily["Messaging SLA"].notna()
-_ok_e = df_daily["Email SLA"].notna()
-chat_weighted = ((df_daily.loc[_ok_c, "Chat SLA"] * df_daily.loc[_ok_c, "Chat SLA Wt"]).sum()
-                 / df_daily.loc[_ok_c, "Chat SLA Wt"].sum()) if df_daily.loc[_ok_c, "Chat SLA Wt"].sum() else None
-messaging_weighted = (
-    (df_daily.loc[_ok_m, "Messaging SLA"] * df_daily.loc[_ok_m, "Messaging SLA Wt"]).sum()
-    / df_daily.loc[_ok_m, "Messaging SLA Wt"].sum()
-) if df_daily.loc[_ok_m, "Messaging SLA Wt"].sum() else None
-email_weighted = ((df_daily.loc[_ok_e, "Email SLA"] * df_daily.loc[_ok_e, "Email SLA Wt"]).sum()
-                  / df_daily.loc[_ok_e, "Email SLA Wt"].sum()) if df_daily.loc[_ok_e, "Email SLA Wt"].sum() else None
-_tot_wt = _den.sum()
-weighted_sla = (_num.sum() / _tot_wt) if _tot_wt else None
-
 # Period-level components
 _cw_p = chat_sla_p[chat_sla_p["Wait Time"].notna()]
 n_chat_total = len(chat_sla_p)
@@ -2383,41 +2204,6 @@ n_chat_abandoned = int((chat_sla_p["Abandoned After"] > CHAT_ABANDON_AFTER_SEC).
 sla_comp_chat_in_target_pct = (n_chat_in_target / n_chat_answered * 100) if n_chat_answered else None
 sla_comp_chat_avg_wait_secs = _cw_p["Wait Time"].mean() if n_chat_answered else None
 sla_comp_chat_abandon_pct = (n_chat_abandoned / n_chat_total * 100) if n_chat_total else None
-
-messaging_scored_p = messaging_scorable(messaging_period)
-n_messaging_sla_total = len(messaging_scored_p)
-n_messaging_answered = len(_messaging_first_response)
-n_messaging_in_target = messaging_first_response_in_target
-n_messaging_abandoned = int(
-    ((~messaging_scored_p["Any_Closed"]) & messaging_scored_p["Any_Abandoned"]).sum()
-) if n_messaging_sla_total else 0
-sla_comp_messaging_in_target_pct = messaging_first_response_target_pct
-sla_comp_messaging_median_resp_secs = messaging_first_response_median
-sla_comp_messaging_abandon_pct = (
-    n_messaging_abandoned / n_messaging_sla_total * 100
-    if n_messaging_sla_total else None
-)
-
-n_email_total = len(email_scored_p)
-n_email_in_window = len(email_sla_p)
-n_email_not_due = n_email_in_window - n_email_total
-n_email_in_target = int((email_scored_p["Effective Elapsed"]
-                         <= email_scored_p["Effective Target"]).sum()) if n_email_total else 0
-sla_comp_email_in_target_pct = (n_email_in_target / n_email_total * 100) if n_email_total else None
-sla_comp_email_avg_resp_hrs = email_scored_p["Effective Elapsed"].mean() if n_email_total else None
-
-# Composition of the email SLA population, for the tooltip and the QA panel.
-if n_email_total:
-    _opened_here = ((email_scored_p["Date/Time Opened"] >= ts_start)
-                    & (email_scored_p["Date/Time Opened"] < ts_end))
-    n_email_opened_here = int(_opened_here.sum())
-    n_email_carried_in = int((~_opened_here).sum())
-    n_email_answered_after = int((_opened_here
-                                  & (email_scored_p["Response DT"] >= ts_end)).sum())
-    n_email_unanswered = int((~email_scored_p["Is Answered"]).sum())
-else:
-    n_email_opened_here = n_email_carried_in = n_email_answered_after = n_email_unanswered = 0
-
 
 # =============================================================================
 # Header & KPI tiles
@@ -2441,7 +2227,7 @@ if has_chat_data:
                          "Distinct chat cases first handled in the period. Counted once even if "
                          "the case was routed more than once.",
                          COLOR_GOOD,
-                         f"{chat_reopened:,} re-handled" if chat_reopened else "")
+                         f"{chat_multi_touch:,} handled more than once" if chat_multi_touch else "")
     render_custom_metric(c2, "✉️ Total Emails", f"{email_total:,}",
                          "Distinct email cases first handled in the period. A case that is "
                          "re-opened and routed again counts ONCE, not once per touch.",
@@ -2569,11 +2355,11 @@ with st.expander("Daily Enhanced Messaging detail"):
         )
 
 # Re-work is invisible when volume counts rows; surfaced explicitly instead.
-if email_total and email_reopened:
+if email_total and email_multi_touch:
     _single = email_cases.loc[email_cases["Touches"] == 1, "Total_Secs"].mean()
     _multi = email_cases.loc[email_cases["Touches"] > 1, "Total_Secs"].mean()
     st.caption(
-        f":material/repeat: **{email_reopened:,} of {email_total:,} email cases ({email_reopened/email_total:.0%}) "
+        f":material/repeat: **{email_multi_touch:,} of {email_total:,} email cases ({email_multi_touch/email_total:.0%}) "
         f"were handled more than once**, {email_multi_agent:,} of them by more than one agent. "
         f"Those cases average **{fmt_mmss(_multi)}** of total handle time versus "
         f"**{fmt_mmss(_single)}** for cases resolved in a single touch. "
@@ -2615,8 +2401,9 @@ if dept_email_excess > 0:
         "made shared status unavailable for email. These hours are shown as excess "
         "demand and are not allowed to push email utilisation above 100%."
     )
-render_custom_metric(_op[2], "⏱️ Avg Email Resp Time", fmt_hms(avg_resp_secs),
-                     "Mean email response time across the period",
+render_custom_metric(_op[2], "⏱️ Avg Email First Response", fmt_hms(avg_resp_secs),
+                     "Mean first-response time in BUSINESS time (07:00-22:00 CAT, 7 days) of "
+                     "answered emails that entered the queue in the period",
                      get_email_resp_time_color(avg_resp_secs),
                      f"across {n_email_total:,} emails" if n_email_total else "")
 if adherence is not None:
@@ -2646,454 +2433,176 @@ with st.expander("Per-agent utilisation"):
             st.caption(f"⚠️ {dq['shift_agents_unmatched']} agent(s) in shifts.csv had no matching "
                        f"presence record: {', '.join(dq['shift_agents_unmatched_names'])}")
 
-# ---- SLA summary --------------------------------------------------------
+# ---- Overall Service Attainment (Change 1) ------------------------------
+# Replaces the old "SLA Score Summary / Weighted SLA". Overall =
+# (successful eligible Email + successful eligible Messaging) / combined mature eligible.
+# Every % below is shown beside its numerator and denominator.
 st.markdown("---")
-st.subheader(":material/adjust: SLA Score Summary")
-if has_chat_data:
-    s1, s2, s3, s4 = st.columns(4)
-    render_custom_metric(s1, "Chat SLA Score",
-                         f"{chat_weighted:.1f}" if chat_weighted is not None else "—",
-                         "Legacy Live Chat SLA through 31 October 2026, weighted by daily volume",
-                         get_sla_score_color(chat_weighted),
-                         f"through 31 Oct • {SLA_TARGET:.0f} = target")
+st.subheader(":material/adjust: Overall Service Attainment")
+
+_ATT_COLOR = {"green": COLOR_GOOD, "amber": COLOR_WARN, "red": COLOR_BAD, "grey": COLOR_NONE}
+_ATT_TEXT = {"green": "On target", "amber": "Near target", "red": "Below target",
+             "grey": "Not reliable"}
+
+for _msg in email_ingest.messages:
+    st.warning(_msg)
+if not messaging_att_ok:
+    st.warning(f"Messaging metric `{MESSAGING_RESPONSE_COL}` is missing from the Messaging "
+               "metrics export - Messaging (and therefore Overall) attainment is unavailable.")
+
+
+def _att_tile(container, title, summ, tooltip, provisional=False):
+    rate = fmt_pct_floor(summ.rate_pct)
+    sub = f"{fmt_ratio(summ.numerator, summ.denominator)} • {_ATT_TEXT[summ.status]}"
+    if provisional:
+        sub += " • PROVISIONAL"
+    render_custom_metric(container, title, rate, tooltip, _ATT_COLOR[summ.status], sub)
+
+
+_a1, _a2, _a3 = st.columns(3)
+_att_tile(
+    _a1, "Overall Service Attainment", overall_p,
+    f"(Successful eligible Email + successful eligible Messaging) / combined mature eligible "
+    f"contacts. Target {TARGET_PCT:.0f}%. Green >= 80, Amber 70-79.9, Red < 70, Grey when "
+    f"coverage < {COVERAGE_MIN_PCT:.0f}% or nothing is mature. Overall alone decides pass/fail.",
+    provisional=overall_p.provisional)
+_att_tile(
+    _a2, "Email first response", overall_p.email,
+    f"Replied within {EMAIL_TARGET_BUSINESS_HOURS:.0f} business hours of queue entry "
+    "(07:00-22:00 CAT, 7 days/week), recomputed from Date/Time Opened -> Completion Date. "
+    "Overdue unanswered = fail; not yet due = pending and excluded. Informational: does not veto Overall.",
+    provisional=overall_p.email.pending > 0)
+_att_tile(
+    _a3, "Messaging complete service", overall_p.messaging,
+    f"Handled by a human AND first human response within {MESSAGING_TARGET_SEC:.0f}s of "
+    "acceptance. Abandoned = fail. Canceled, unavailable, bot-only, test and unclassifiable "
+    "sessions are excluded (counts below). Informational: does not veto Overall.")
+
+_pp = overall_p.pp_vs(overall_prev)
+_cap = [f"Target {TARGET_PCT:.0f}%."]
+if _pp is not None:
+    _cap.append(f"{_pp:+.1f} percentage points vs the previous equivalent period "
+                f"({fmt_ratio(overall_prev.numerator, overall_prev.denominator)}).")
 else:
-    s2, s3, s4 = st.columns(3)
-render_custom_metric(s2, "Messaging SLA Score",
-                     f"{messaging_weighted:.1f}" if messaging_weighted is not None else "—",
-                     "Enhanced Messaging SLA from 1 November 2026, weighted by session volume",
-                     get_sla_score_color(messaging_weighted),
-                     f"from 1 Nov • {SLA_TARGET:.0f} = target")
-render_custom_metric(s3, "Email SLA Score",
-                     f"{email_weighted:.1f}" if email_weighted is not None else "—",
-                     "Daily email SLA, weighted by daily email volume", get_sla_score_color(email_weighted),
-                     f"0–100, {SLA_TARGET:.0f} = target")
-render_custom_metric(s4, "Weighted SLA Score",
-                     f"{weighted_sla:.1f}" if weighted_sla is not None else "—",
-                     "Volume-weighted blend of legacy Chat (before 1 Nov), Messaging (from 1 Nov) and Email",
-                     get_sla_score_color(weighted_sla),
-                     f"0–100, {SLA_TARGET:.0f} = target")
-
-st.markdown("#### Score breakdown")
-if has_chat_data:
-    _bc1, _bc2, _bc3 = st.columns(3)
-
-    with _bc1:
-        st.markdown(":material/chat: **Chat SLA components**")
-        _cc1, _cc2, _cc3 = st.columns(3)
-        _cc1.metric(
-            "Answered ≤60s", fmt_pct(sla_comp_chat_in_target_pct),
-            # FIX #27: the numbers in the tooltip now reconcile with the percentage.
-            help=f"{n_chat_in_target:,} of {n_chat_answered:,} answered chats waited ≤60s "
-                 f"(weight +{W_CHAT_ANSWER}). Abandoned chats are excluded here and counted "
-                 f"once, in the abandon term.",
-        )
-        _cc2.metric(
-            "Avg Wait Time", fmt_mmss(sla_comp_chat_avg_wait_secs),
-            help=f"No penalty at or below {CHAT_TARGET_WAIT_MIN:.0f}:00. Full penalty "
-                 f"(−{W_CHAT_WAIT}) at {CHAT_TARGET_WAIT_MIN + CHAT_WAIT_TOLERANCE_MIN:.0f}:00, "
-                 f"scaled linearly between. Based on {n_chat_answered:,} answered chats.",
-        )
-        _cc3.metric(
-            "Abandon Rate", fmt_pct(sla_comp_chat_abandon_pct),
-            help=f"{n_chat_abandoned:,} of {n_chat_total:,} chats abandoned after "
-                 f"{CHAT_ABANDON_AFTER_SEC:.0f}s (weight −{W_CHAT_ABANDON})",
-        )
-else:
-    _bc2, _bc3 = st.columns(2)
-
-with _bc2:
-    st.markdown(":material/forum: **Messaging SLA components**")
-    _mc1, _mc2, _mc3 = st.columns(3)
-    _mc1.metric(
-        "First response ≤60s", fmt_pct(sla_comp_messaging_in_target_pct),
-        help=f"{n_messaging_in_target:,} of {n_messaging_answered:,} sessions with a "
-             f"measurable first response were within {MESSAGING_FIRST_RESPONSE_TARGET_SEC:.0f}s "
-             f"(weight +{W_MESSAGING_IN_TARGET}).",
-    )
-    _mc2.metric(
-        "Median first response", fmt_mmss(sla_comp_messaging_median_resp_secs),
-        help=f"No response-time penalty at or below {MESSAGING_TARGET_RESPONSE_MIN:.0f}:00. "
-             f"Full penalty (−{W_MESSAGING_RESPONSE}) at "
-             f"{MESSAGING_TARGET_RESPONSE_MIN + MESSAGING_RESPONSE_TOLERANCE_MIN:.0f}:00. "
-             "Median is used because asynchronous sessions have a long inactivity tail.",
-    )
-    _mc3.metric(
-        "Abandon Rate", fmt_pct(sla_comp_messaging_abandon_pct),
-        help=f"{n_messaging_abandoned:,} of {n_messaging_sla_total:,} classifiable sessions "
-             f"had no closed Agent Work assignment and were abandoned (weight −{W_MESSAGING_ABANDON}).",
-    )
-
-with _bc3:
-    st.markdown(":material/mail: **Email SLA components**")
-    _ec1, _ec2 = st.columns(2)
-    _ec1.metric(
-        "Within target", fmt_pct(sla_comp_email_in_target_pct),
-        help=f"{n_email_in_target:,} of {n_email_total:,} scored emails met their target "
-             f"(weight +{W_EMAIL_IN_TARGET}). First-contact cases are measured against their "
-             f"entitlement response target ({EMAIL_TARGET_HRS:.0f}hr for most); reopened cases "
-             f"against the {EMAIL_REOPENED_TARGET_HRS:.0f}hr resolution target, because their "
-             f"elapsed figure spans every response cycle. Population = emails opened OR responded "
-             f"to in the period: {n_email_opened_here:,} opened here ({n_email_answered_after:,} "
-             f"answered after the period ends) and {n_email_carried_in:,} carried in from before. "
-             f"{n_email_not_due:,} unanswered email(s) are not yet past target and are excluded.",
-    )
-    # Report the actual penalty statistic (p85 of response time in multiples of
-    # target) so the number driving the penalty is visible, not just the mean.
-    if n_email_total:
-        _ratio = (email_scored_p["Effective Elapsed"] / email_scored_p["Effective Target"]).dropna()
-        _p85 = float(_ratio.quantile(EMAIL_PENALTY_PERCENTILE)) if len(_ratio) else 1.0
-        _pen_frac = min(max(_p85 - 1.0, 0.0) / EMAIL_RESP_TOLERANCE_TARGETS, 1.0) \
-            if EMAIL_RESP_TOLERANCE_TARGETS else 0.0
-        _p85_hrs = _p85 * float(email_scored_p["Effective Target"].median())
-        st.caption(
-            f"Penalty statistic: **p{EMAIL_PENALTY_PERCENTILE * 100:.0f} = {_p85:.2f}× target** "
-            f"(≈{_p85_hrs:.1f}h at the median {float(email_scored_p['Effective Target'].median()):.0f}h target) — "
-            f"{EMAIL_PENALTY_PERCENTILE * 100:.0f}% of emails were answered within that. "
-            f"Penalty is at **{_pen_frac:.0%} of maximum**, reaching 100% at "
-            f"{1 + EMAIL_RESP_TOLERANCE_TARGETS:.0f}× target."
-        )
-        if _pen_frac >= 1.0:
-            st.caption(
-                f"⚠️ The penalty is maxed out, so further deterioration in response times will not "
-                f"move the score — only the {sla_comp_email_in_target_pct:.0f}% hit rate will. "
-                f"Raise `EMAIL_RESP_TOLERANCE_TARGETS` if you want headroom below this level."
-            )
-
-    _ec2.metric(
-        "Avg Response Time", fmt_hhmm(sla_comp_email_avg_resp_hrs * 3600
-                                      if sla_comp_email_avg_resp_hrs is not None
-                                      and not pd.isna(sla_comp_email_avg_resp_hrs) else None),
-        help=f"Shown as the mean for reference, but the SLA penalty uses the "
-             f"p{EMAIL_PENALTY_PERCENTILE * 100:.0f} of response time in multiples of each case's "
-             f"own target — the mean was too easily dominated by a few stuck cases. No penalty at "
-             f"or below 1× target; full penalty (−{W_EMAIL_RESP}) at "
-             f"{1 + EMAIL_RESP_TOLERANCE_TARGETS:.0f}× target, scaled linearly between. "
-             f"Across {n_email_total:,} emails.",
-    )
-
-# ---------------------------------------------------------------------------
-# First contact vs reopened.
-#
-# These are two different measurements, not one metric split in half:
-#   - first contact -> 'Elapsed' IS the first-response time (matches time-to-
-#     first-close within 0.02h), judged against the entitlement response target.
-#   - reopened      -> 'Elapsed' tracks the LAST close, so it is a RESOLUTION
-#     time spanning every cycle plus the customer's own reply time, judged
-#     against EMAIL_REOPENED_TARGET_HRS.
-# The headline blends the two scores by case volume.
-# ---------------------------------------------------------------------------
-if n_email_total and "Reopened" in email_scored_p.columns:
-    (_sla_first, _n_first), (_sla_reop, _n_reop) = email_sla_parts(email_scored_p)
-    _first = email_scored_p[~email_scored_p["Reopened"].astype(bool)]
-    _reop = email_scored_p[email_scored_p["Reopened"].astype(bool)]
-
-    def _row(label, g, score, measure, tgt_label):
-        if not len(g):
-            return None
-        return {
-            "Population": label,
-            "Measures": measure,
-            "Target": tgt_label,
-            "Cases": len(g),
-            "Median (h)": float(g["Effective Elapsed"].median()),
-            "% within target": float((g["Effective Elapsed"] <= g["Effective Target"]).mean() * 100),
-            "SLA": score,
-        }
-
-    _rows = [r for r in (
-        _row("First contact", _first, _sla_first, "First response time",
-             f"{EMAIL_TARGET_HRS:.0f}h (entitlement)"),
-        _row("Reopened", _reop, _sla_reop, "Resolution time",
-             f"{EMAIL_REOPENED_TARGET_HRS:.0f}h"),
-    ) if r]
-
-    if _rows:
-        _split = pd.DataFrame(_rows)
-        _hdr = (":material/mark_email_read: First contact vs reopened — blended into the headline by volume"
-                if _n_reop else ":material/mark_email_read: First contact vs reopened")
-        with st.expander(_hdr, expanded=bool(_n_reop)):
-            st.dataframe(
-                _split.style.format({"Cases": "{:,}", "Median (h)": "{:.2f}",
-                                     "% within target": "{:.1f}", "SLA": "{:.1f}"}, na_rep="—"),
-                width="stretch", hide_index=True,
-            )
-            if _n_reop:
-                _share = _n_reop / (_n_first + _n_reop) * 100
-                st.markdown(
-                    f"""
-The two rows measure **different things**, so they carry different targets.
-
-For a case routed once, `Elapsed Time (Hours)` matches time-to-first-close almost exactly — it is a
-genuine **first-response** time. For a reopened case it tracks the **last** close instead, so it
-spans every response cycle *and* the customer's own reply time in between. Scoring that against a
-1-hour response target would measure something the team cannot control, so reopened cases are
-judged against a **{EMAIL_REOPENED_TARGET_HRS:.0f}-hour resolution** target instead.
-
-Reopened cases are **{_share:.1f}%** of scored volume, so the headline Email SLA of
-**{email_weighted:.1f}** is mostly the first-contact figure.
-
-*This is a workaround.* The underlying cause is that the response milestone is set to
-**No Recurrence** in Salesforce, so one milestone record covers the whole case life. Setting it to
-**Independent** creates a fresh record per reopen, at which point reopened cases can be measured on
-response time like everything else and this split becomes unnecessary.
-"""
-                )
-            if dq.get("email_no_routing_record"):
-                st.caption(
-                    f"{dq['email_no_routing_record']:,} case(s) have no routing record in "
-                    f"report_items.csv and are counted as first contact — a case never routed "
-                    f"cannot have been re-routed."
-                )
-
-# ---------------------------------------------------------------------------
-# Email SLA split by Case Origin.
-#
-# Different origins can behave like completely different services — a combined
-# score averages them into a number that describes neither. Worth checking
-# before reading the headline figure.
-# ---------------------------------------------------------------------------
-if n_email_total and "Case Origin" in email_scored_p.columns and email_scored_p["Case Origin"].nunique() > 1:
-    _orig_rows = []
-    for _o, _g in email_scored_p.groupby("Case Origin"):
-        _orig_rows.append({
-            "Case Origin": str(_o),
-            "Cases": len(_g),
-            "Median (h)": float(_g["Effective Elapsed"].median()),
-            "Mean (h)": float(_g["Effective Elapsed"].mean()),
-            "p90 (h)": float(_g["Effective Elapsed"].quantile(0.90)),
-            "% within target": float((_g["Effective Elapsed"] <= _g["Target Hrs"]).mean() * 100),
-            "SLA": email_sla_from_slice(_g),
-        })
-    _orig = pd.DataFrame(_orig_rows).sort_values("Cases", ascending=False)
-
-    _spread = _orig["SLA"].max() - _orig["SLA"].min()
-    with st.expander(f":material/alt_route: Email SLA by case origin"
-                     f"{'  ⚠️ origins differ by ' + f'{_spread:.0f}' + ' points' if _spread >= 20 else ''}",
-                     expanded=bool(_spread >= 40)):
-        st.dataframe(
-            _orig.style.format({"Cases": "{:,}", "Median (h)": "{:.2f}", "Mean (h)": "{:.2f}",
-                                "p90 (h)": "{:.2f}", "% within target": "{:.1f}", "SLA": "{:.1f}"},
-                               na_rep="—"),
-            width="stretch", hide_index=True,
-        )
-        if _spread >= 20:
-            _best = _orig.loc[_orig["SLA"].idxmax()]
-            _worst = _orig.loc[_orig["SLA"].idxmin()]
-            st.warning(
-                f"**These origins are not one service.** “{_best['Case Origin']}” scores "
-                f"{_best['SLA']:.1f} on {_best['Cases']:,} cases while “{_worst['Case Origin']}” "
-                f"scores {_worst['SLA']:.1f} on {_worst['Cases']:,} — median "
-                f"{_best['Median (h)']:.2f}h against {_worst['Median (h)']:.2f}h. The combined "
-                f"figure of {email_weighted:.1f} describes neither. Consider tracking them "
-                f"separately, or setting different targets per origin."
-            )
-
-# FIX #14: surface each channel population so a divergence is visible.
-_wt_chat = int(df_daily["Chat SLA Wt"].sum())
-_wt_messaging = int(df_daily["Messaging SLA Wt"].sum())
-_wt_email = int(df_daily["Email SLA Wt"].sum())
-
-# ---------------------------------------------------------------------------
-# Volume vs SLA-population reconciliation.
-#
-# The volume tiles come from report_items.csv (cases an agent handled) while the
-# SLA comes from chat.csv, Messaging metrics and email.csv. These sources are not
-# subsets of one another, so
-# the two counts legitimately differ — but a LARGE positive gap on email means
-# cases were routed and then never appeared in email.csv, which in a
-# resolved-only export means they are still open. Those cases are by definition
-# past target, so excluding them flatters the score. This panel makes the size
-# of that blind spot explicit instead of leaving it to be discovered.
-# ---------------------------------------------------------------------------
-with st.expander(":material/calculate: Volume vs SLA population — why these two numbers differ"):
-    _rec_rows = []
-    if has_chat_data:
-        _rec_rows.append({"Channel": "Chat",
-                          "Cases handled (tile)": chat_total,
-                          "Contacts scored for SLA": _wt_chat,
-                          "Difference": _wt_chat - chat_total})
-    _rec_rows.append({"Channel": "Messaging",
-                      "Cases handled (tile)": messaging_handled,
-                      "Contacts scored for SLA": _wt_messaging,
-                      "Difference": _wt_messaging - messaging_handled})
-    _rec_rows.append({"Channel": "Email",
-                      "Cases handled (tile)": email_total,
-                      "Contacts scored for SLA": _wt_email,
-                      "Difference": _wt_email - email_total})
-    _rec = pd.DataFrame(_rec_rows)
-    st.dataframe(_rec.style.format({c: "{:,}" for c in _rec.columns if c != "Channel"}),
-                 width="stretch", hide_index=True)
-
-    st.markdown(
-        f"""
-The two columns count different things and **the source files are not subsets of one another**:
-
-- **Cases handled** — distinct cases in `report_items.csv` first picked up by an agent in this
-  period. For Messaging this is a session with a closed Agent Work assignment.
-- **Contacts scored** — rows in `chat.csv`, Messaging Session Metrics or `email.csv` for this period. For email that is
-  {n_email_opened_here:,} opened in the period plus {n_email_carried_in:,} opened earlier but
-  answered inside it.
-
-Nothing is being silently discarded: every one of the {_wt_email:,} emails in scope was scored.
-"""
-    )
-
-    # ----- Exact reconciliation, when email.csv carries the Case Number -----
-    if EMAIL_CASE_KEY in email_sla_df.columns and HAS_CASE_KEY:
-        _routed = set(
-            df_cases.loc[df_cases["Service Channel: Developer Name"] == EMAIL_DEVNAME, CASE_KEY]
-            .astype(str).str.strip()
-        ) if CASE_KEY in df_cases.columns else set()
-        _routed_period = set(
-            cases_period.loc[cases_period["Service Channel: Developer Name"] == EMAIL_DEVNAME, CASE_KEY]
-            .astype(str).str.strip()
-        ) if CASE_KEY in cases_period.columns else set()
-        _in_export = set(email_sla_df[EMAIL_CASE_KEY].astype(str).str.strip())
-
-        _matched = _routed_period & _in_export
-        _missing = _routed_period - _in_export
-        _opened_here_keys = set(
-            email_sla_df.loc[(email_sla_df["Date/Time Opened"] >= ts_start)
-                             & (email_sla_df["Date/Time Opened"] < ts_end),
-                             EMAIL_CASE_KEY].astype(str).str.strip())
-        _never_routed = _opened_here_keys - _routed
-
-        st.markdown("**Exact reconciliation** (joined on Case Number ↔ Work Item: Name)")
-        st.dataframe(pd.DataFrame([
-            {"Measure": "Cases routed to an agent this period", "Cases": len(_routed_period)},
-            {"Measure": "…also present in the email export", "Cases": len(_matched)},
-            {"Measure": "…MISSING from the email export", "Cases": len(_missing)},
-            {"Measure": "Cases in the export, opened this period, never routed",
-             "Cases": len(_never_routed)},
-        ]).style.format({"Cases": "{:,}"}), width="stretch", hide_index=True)
-
-        if _routed_period and len(_missing) > max(10, 0.02 * len(_routed_period)):
-            st.warning(
-                f"**{len(_missing):,} cases ({len(_missing)/len(_routed_period):.1%}) were routed to "
-                f"an agent this period but do not appear in the email export at all.**\n\n"
-                f"The export is filtered to closed cases, so these are cases still open when it ran. "
-                f"Each is already past its response target, so excluding them makes the Email SLA "
-                f"look better than reality. Re-export **without the status filter** to close this gap "
-                f"— the dashboard already knows how to age an open case and count it as a breach "
-                f"once it passes target."
-            )
-        if _never_routed:
-            st.caption(
-                f"The {len(_never_routed):,} never-routed cases are the opposite effect — resolved "
-                f"without passing through Omni-Channel, so they reach the email export but never "
-                f"reach report_items.csv. They partly offset the figure above, which is why the raw "
-                f"difference between the two columns understates both flows."
-            )
-    else:
-        _email_gap = email_total - n_email_opened_here
-        if email_total and _email_gap > max(20, 0.05 * email_total):
-            st.warning(
-                f"**{_email_gap:,} email cases were handled in this period but never appear in "
-                f"email.csv** ({_email_gap / email_total:.0%} of the tile). Add a **Case Number** "
-                f"column to the email export to reconcile these exactly instead of by difference."
-            )
-
-# FIX #22: the daily component columns used to be computed and never shown.
-with st.expander("Daily SLA detail"):
-    # Both populations are shown side by side: "SLA Wt" is what the score was
-    # computed on, "Vol" is the report_items work-item count for the same day.
-    _detail = df_daily[[
-        "Date", "Chat SLA", "Chat SLA Wt", "Chat Vol", "Chat ≤60s %", "Chat Avg Wait (s)",
-        "Chat Abandon %", "Messaging SLA", "Messaging SLA Wt", "Messaging Vol",
-        "Messaging ≤60s %", "Messaging Median Resp (s)", "Messaging Abandon %",
-        "Email SLA", "Email SLA Wt", "Email Vol", "Email Not Due",
-        "Email in target %", "Email Avg Resp (h)", "Weighted SLA",
-    ]].copy()
-    _detail["Date"] = _detail["Date"].dt.strftime("%a %d %b")
-    _detail = _detail.rename(columns={
-        "Chat SLA Wt": "Chat scored", "Chat Vol": "Chat items",
-        "Messaging SLA Wt": "Messaging scored", "Messaging Vol": "Messaging sessions",
-        "Email SLA Wt": "Email scored", "Email Vol": "Email items",
-        "Email Not Due": "Email not due",
-    })
-    st.dataframe(
-        _detail.style.format({
-            "Chat SLA": "{:.1f}", "Messaging SLA": "{:.1f}",
-            "Email SLA": "{:.1f}", "Weighted SLA": "{:.1f}",
-            "Chat ≤60s %": "{:.1f}", "Chat Abandon %": "{:.1f}",
-            "Messaging ≤60s %": "{:.1f}", "Messaging Median Resp (s)": "{:.0f}",
-            "Messaging Abandon %": "{:.1f}",
-            "Email in target %": "{:.1f}", "Chat Avg Wait (s)": "{:.0f}", "Email Avg Resp (h)": "{:.2f}",
-        }, na_rep="—"),
-        width="stretch",
-    )
+    _cap.append("No comparable previous period.")
+_cap.append(f"Data as of {DATA_ASOF:%d %b %Y %H:%M}.")
+st.caption(" ".join(_cap))
+if overall_p.provisional:
+    st.info("**Provisional** - " + " ".join(overall_p.reasons))
+elif overall_p.reasons:
+    st.warning(" ".join(overall_p.reasons))
+if start_date < MESSAGING_SLA_START_DATE:
     st.caption(
-        "**scored** = contacts the SLA was calculated on (legacy chats through 31 October; "
-        "Messaging sessions from 1 November; emails "
-        "opened *or* responded to that day, excluding any not yet past target). "
-        "**items** = work items from report_items.csv started that day. "
-        "The score is weighted by *scored*; *items* is shown so you can see when the two diverge."
-    )
+        f"Days before {MESSAGING_SLA_START_DATE:%d %b %Y} predate Enhanced Messaging: Live Chat "
+        "is never part of current scorecards, so those days are Email-only (see the historical "
+        "Live Chat section below).")
 
 
-# =============================================================================
-# Weighted SLA trend
-# =============================================================================
+def _att_rows():
+    rows = []
+    for _s in (overall_p.email, overall_p.messaging):
+        rows.append({
+            "Channel": _s.name, "Successful": _s.numerator, "Mature eligible": _s.denominator,
+            "Attainment": fmt_pct_floor(_s.rate_pct), "Pending (not yet due)": _s.pending,
+            "Unmeasurable": _s.unmeasurable, "Excluded": _s.excluded,
+            "Coverage": fmt_pct_floor(_s.coverage_pct), "Status": _ATT_TEXT[_s.status],
+        })
+    rows.append({
+        "Channel": "Overall", "Successful": overall_p.numerator,
+        "Mature eligible": overall_p.denominator,
+        "Attainment": fmt_pct_floor(overall_p.rate_pct),
+        "Pending (not yet due)": overall_p.pending, "Unmeasurable": overall_p.unmeasurable,
+        "Excluded": overall_p.messaging.excluded + overall_p.email.excluded,
+        "Coverage": fmt_pct_floor(overall_p.coverage_pct), "Status": _ATT_TEXT[overall_p.status],
+    })
+    return pd.DataFrame(rows)
+
+
+with st.expander(":material/calculate: How the headline reconciles (numerators, denominators, exclusions)",
+                 expanded=True):
+    st.dataframe(_att_rows().style.format(
+        {c: "{:,}" for c in ("Successful", "Mature eligible", "Pending (not yet due)",
+                             "Unmeasurable", "Excluded")}),
+        width="stretch", hide_index=True)
+    st.caption(
+        "Attainment = Successful / Mature eligible. Coverage = Mature eligible / (Mature eligible + "
+        "Unmeasurable). Pending Email is not in either denominator. Percentages are truncated, "
+        "not rounded, so a value never crosses a status band on display.")
+    _b1, _b2 = st.columns(2)
+    for _col, _s in ((_b1, overall_p.email), (_b2, overall_p.messaging)):
+        with _col:
+            st.markdown(f"**{_s.name} - every outcome**")
+            _bd = _s.breakdown()
+            if _bd.empty:
+                st.caption("No contacts in this period.")
+            else:
+                st.dataframe(_bd.style.format({"Contacts": "{:,}"}), width="stretch",
+                             hide_index=True)
+
+# Reopened handling: authoritative `Re-opened` flag; timing gated on `Reopened Time`.
+if email_att_ok and email_ingest.has_reopen_flag:
+    _ro = reopened_summary(email_att_p)
+    if _ro["reopened_den"]:
+        st.caption(
+            f":material/repeat: **{_ro['reopened_den']:,}** reopened Email(s) are inside the mature "
+            f"eligible set ({fmt_ratio(_ro['reopened_num'], _ro['reopened_den'])} successful). "
+            "For reopened cases `Completion Date` is the FINAL response, so their first-response "
+            "result is approximate; they are flagged, not excluded.")
+    if not reopen_timing_available(email_sla_df):
+        st.caption(":material/schedule: Reopened-resolution clock / ageing: **awaiting data** "
+                   "(reopen timestamps exist only for reopens from 19 Nov 2026).")
+
+with st.expander(":material/info: Known limitations of this measure"):
+    st.markdown(
+        "- **Historical reopen timing is empty and unrecoverable.** The 12-hour reopened clock and "
+        "reopened ageing fill in weekly from 19 Nov 2026.\n"
+        "- **Reopened cases lack an initial first-response time** (`Completion Date` is the final "
+        "response), so Email first-response is approximate for the reopened share.\n"
+        "- Timestamps are treated as Central Africa Time (UTC+2); set `SOURCE_UTC_OFFSET_HOURS` "
+        "if the export is in another zone.\n"
+        "- Messaging sessions routed but never accepted with no abandon event are treated as "
+        "**unmeasurable** (excluded, lowering coverage) pending a business decision.\n"
+        "- Survey response rate and CSAT channel split are unavailable in the data.")
+
+if len(chat_sla_p):
+    with st.expander(":material/history: Historical Live Chat (before 1 Nov 2026 - not part of Overall)"):
+        st.markdown(
+            f"- Answered ≤{CHAT_ANSWER_TARGET_SEC:.0f}s: **{fmt_ratio(n_chat_in_target, n_chat_answered)}**\n"
+            f"- Abandoned after >{CHAT_ABANDON_AFTER_SEC:.0f}s: "
+            f"**{fmt_ratio(n_chat_abandoned, n_chat_total)}**\n"
+            f"- Average wait: **{fmt_mmss(sla_comp_chat_avg_wait_secs)}**")
+
+# ---- Trend ---------------------------------------------------------------
 st.markdown("---")
-st.subheader(":material/show_chart: Weighted SLA Trend")
-
-_trend_df = df_daily[["Date", "Chat SLA", "Messaging SLA", "Email SLA", "Weighted SLA",
-                      "Chat SLA Wt", "Messaging SLA Wt", "Email SLA Wt"]].copy()
-
-# FIX #25: symmetric padding. datetime.max.time() overshot the right edge by
-# ~36 hours because it is 23:59:59.999999, not midnight.
-x_min = pd.Timestamp(start_date) - pd.Timedelta(hours=12)
-x_max = pd.Timestamp(end_date) + pd.Timedelta(hours=12)
-
-_plot = _trend_df.dropna(subset=["Weighted SLA"])
-if _plot.empty:
-    st.info("No contacts in the selected period, so there is no SLA to plot.")
+st.subheader(":material/show_chart: Overall Service Attainment Trend")
+_trend = attainment_series(email_att_p, messaging_att_p, ts_start, ts_end, "D")
+_tplot = _trend.dropna(subset=["Overall %"])
+if _tplot.empty:
+    st.info("No mature eligible contacts in the selected period, so there is nothing to plot.")
 else:
-    trend_chart = (
-        alt.Chart(_plot)
-        .mark_line(point=True, color="#FFFFFF")
-        .encode(
-            x=alt.X("Date:T", title="Date",
-                    axis=alt.Axis(format="%d %b", labelAngle=-45, values=_plot["Date"].tolist()),
-                    scale=alt.Scale(domain=[x_min, x_max])),
-            y=alt.Y("Weighted SLA:Q", title="Weighted SLA Score", scale=alt.Scale(domain=[0, 105])),
-            tooltip=[
-                alt.Tooltip("Date:T", format="%d %b"),
-                alt.Tooltip("Weighted SLA:Q", format=".1f"),
-            ] + ([alt.Tooltip("Chat SLA:Q", format=".1f"),
-                  alt.Tooltip("Chat SLA Wt:Q", title="Chats", format=",.0f")]
-                 if has_chat_data else []) + [
-                alt.Tooltip("Messaging SLA:Q", format=".1f"),
-                alt.Tooltip("Email SLA:Q", format=".1f"),
-                alt.Tooltip("Messaging SLA Wt:Q", title="Messaging", format=",.0f"),
-                alt.Tooltip("Email SLA Wt:Q", title="Emails", format=",.0f"),
-            ],
-        )
-    )
-    labels = trend_chart.mark_text(dy=-12, color="#FFFFFF").encode(
-        text=alt.Text("Weighted SLA:Q", format=".1f"))
-    rule = alt.Chart(pd.DataFrame({"y": [SLA_TARGET]})).mark_rule(
+    _line = alt.Chart(_tplot).mark_line(point=True, color="#FFFFFF").encode(
+        x=alt.X("Bucket:T", title="Date", axis=alt.Axis(format="%d %b", labelAngle=-45)),
+        y=alt.Y("Overall %:Q", title="Overall Service Attainment (%)",
+                scale=alt.Scale(domain=[0, 105])),
+        tooltip=[alt.Tooltip("Bucket:T", title="Date", format="%d %b"),
+                 alt.Tooltip("Overall %:Q", format=".1f"),
+                 alt.Tooltip("Overall Num:Q", title="Successful"),
+                 alt.Tooltip("Overall Den:Q", title="Mature eligible"),
+                 alt.Tooltip("Email %:Q", format=".1f"), alt.Tooltip("Messaging %:Q", format=".1f"),
+                 alt.Tooltip("Pending:Q", title="Email pending")])
+    _rule = alt.Chart(pd.DataFrame({"y": [TARGET_PCT]})).mark_rule(
         color="#FAE100", strokeDash=[5, 5]).encode(y="y:Q")
-    rule_lb = alt.Chart(pd.DataFrame({"y": [SLA_TARGET]})).mark_text(
-        align="left", color="#FAE100", dy=-8).encode(
-        y="y:Q", text=alt.value(f"Target: {SLA_TARGET:.0f}"))
-    _layers = trend_chart + labels + rule + rule_lb
-    _transition_ts = pd.Timestamp(MESSAGING_SLA_START_DATE)
-    if x_min <= _transition_ts <= x_max:
-        _transition_df = pd.DataFrame({"Date": [_transition_ts]})
-        _transition_rule = alt.Chart(_transition_df).mark_rule(
-            color="#FF9300", strokeDash=[3, 3]).encode(x="Date:T")
-        _transition_label = alt.Chart(_transition_df).mark_text(
-            color="#FF9300", angle=270, align="right", dx=-5, dy=-5
-        ).encode(x="Date:T", y=alt.value(20), text=alt.value("Messaging from 1 Nov"))
-        _layers = _layers + _transition_rule + _transition_label
-
-    altair_chart(_layers.properties(height=350))
-
-    _gaps = int(_trend_df["Weighted SLA"].isna().sum())
+    altair_chart((_line + _rule).properties(height=350))
+    _gaps = int(_trend["Overall %"].isna().sum())
     if _gaps:
-        st.caption(f"{_gaps} day(s) in this period had no contacts and are shown as gaps, "
-                   f"not as zero scores.")
+        st.caption(f"{_gaps} day(s) had no mature eligible contacts and are shown as gaps, not zeros. "
+                   "Contacts are grouped by the day they entered the queue.")
+    with st.expander("Daily attainment detail"):
+        _d = _trend[["Bucket", "Email Num", "Email Den", "Messaging Num", "Messaging Den",
+                     "Overall Num", "Overall Den", "Overall %", "Pending", "Unmeasurable"]].copy()
+        _d["Bucket"] = _d["Bucket"].dt.strftime("%a %d %b")
+        st.dataframe(_d.rename(columns={"Bucket": "Date"}).style.format(
+            {"Overall %": "{:.1f}"}, na_rep="—"), width="stretch", hide_index=True)
 
 
 # =============================================================================
@@ -3716,10 +3225,10 @@ else:
 
 
 # =============================================================================
-# Hourly weighted SLA
+# Hourly Service Attainment
 # =============================================================================
 st.markdown("---")
-st.subheader(":material/schedule: Hourly Weighted SLA (selected day)")
+st.subheader(":material/schedule: Hourly Service Attainment (selected day)")
 
 hourly_date = st.date_input("Select a day for hourly view", value=end_date,
                             min_value=min_date, max_value=max_date)
@@ -3749,7 +3258,7 @@ def compute_hourly_availability(sel_date) -> pd.DataFrame:
             nxt = h + pd.Timedelta(hours=1)
             o = clip_to_window(seg_s, seg_e, h, nxt)
             if o and h in avail:
-                logged[h].add(agent)
+                logged[h].add(agent)   # counted only; names are never displayed
                 if status in AVAILABLE_STATUSES:
                     avail[h] += (o[1] - o[0]).total_seconds()
             h = nxt
@@ -3761,119 +3270,33 @@ def compute_hourly_availability(sel_date) -> pd.DataFrame:
     })
 
 
-def compute_hourly_sla(sel_date) -> pd.DataFrame:
-    day_start = pd.Timestamp(sel_date)
-    day_end = day_start + pd.Timedelta(days=1)
-    hours = pd.date_range(day_start, day_end, freq="h", inclusive="left")
-    out = pd.DataFrame({"Hour": hours})
+_h_start = pd.Timestamp(hourly_date)
+_h_end = _h_start + pd.Timedelta(days=1)
+_he, _hm, _ = attainment_for_window(_h_start, _h_end)
+df_hourly = attainment_series(_he, _hm, _h_start, _h_end, "h").rename(columns={"Bucket": "Hour"})
+df_hourly = df_hourly.merge(compute_hourly_availability(hourly_date), on="Hour", how="left")
 
-    chat_day = chat_sla_df[(chat_sla_df["Date/Time Opened"] >= day_start)
-                           & (chat_sla_df["Date/Time Opened"] < day_end)
-                           & (chat_sla_df["Date/Time Opened"]
-                              < pd.Timestamp(MESSAGING_SLA_START_DATE))].copy()
-    messaging_day = messaging_sessions[
-        (messaging_sessions["Start Time"] >= day_start)
-        & (messaging_sessions["Start Time"] < day_end)
-        & (messaging_sessions["Start Time"] >= pd.Timestamp(MESSAGING_SLA_START_DATE))
-    ].copy()
-    # Same opened-OR-responded union as the period view, attributed to one
-    # timestamp inside the day so hourly buckets don't double-count.
-    email_day = email_window_slice(email_sla_df, day_start, day_end)
-
-    # FIX #18: build the per-hour series explicitly. The previous
-    # `groupby(...).apply(...).rename("Chat SLA")` raised TypeError whenever the
-    # slice was empty (an empty groupby.apply returns a DataFrame, and
-    # DataFrame.rename(str) is invalid), so any day with only one channel of
-    # activity crashed the whole page. This also avoids the pandas 2.2+
-    # groupby.apply deprecation warning.
-    chat_scores, messaging_scores, email_scores = [], [], []
-    chat_wts, messaging_wts, email_wts, messaging_vols = [], [], [], []
-    for h in hours:
-        nxt = h + pd.Timedelta(hours=1)
-        cslice = chat_day[(chat_day["Date/Time Opened"] >= h) & (chat_day["Date/Time Opened"] < nxt)]
-        mslice = messaging_day[(messaging_day["Start Time"] >= h)
-                               & (messaging_day["Start Time"] < nxt)]
-        eslice = email_day[(email_day["SLA Timestamp"] >= h) & (email_day["SLA Timestamp"] < nxt)]
-        chat_scores.append(chat_sla_from_slice(cslice))
-        messaging_scores.append(messaging_sla_from_slice(mslice))
-        email_scores.append(email_sla_from_slice(eslice))
-        # SLA weights come from the same slices that produced the scores (FIX #14).
-        chat_wts.append(len(cslice))
-        messaging_wts.append(len(messaging_scorable(mslice)))
-        messaging_vols.append(len(mslice))
-        email_wts.append(len(email_scorable(eslice)))
-
-    out["Chat SLA"] = chat_scores
-    out["Messaging SLA"] = messaging_scores
-    out["Email SLA"] = email_scores
-    out["Chat SLA Wt"] = chat_wts
-    out["Messaging SLA Wt"] = messaging_wts
-    out["Email SLA Wt"] = email_wts
-    out["Messaging Vol"] = messaging_vols
-
-    items_day = df_items[(df_items["Start DT"] >= day_start) & (df_items["Start DT"] < day_end)].copy()
-    if not items_day.empty:
-        items_day["Hour"] = items_day["Start DT"].dt.floor("h")
-        cv = (items_day[items_day["Service Channel: Developer Name"] == CHAT_DEVNAME]
-              .groupby("Hour").size().rename("Chat Vol"))
-        ev = (items_day[items_day["Service Channel: Developer Name"] == EMAIL_DEVNAME]
-              .groupby("Hour").size().rename("Email Vol"))
-        out = out.merge(cv.reset_index(), on="Hour", how="left").merge(
-            ev.reset_index(), on="Hour", how="left")
-    else:
-        out["Chat Vol"] = 0
-        out["Email Vol"] = 0
-    out[["Chat Vol", "Messaging Vol", "Email Vol"]] = out[
-        ["Chat Vol", "Messaging Vol", "Email Vol"]].fillna(0).astype(int)
-
-    out = out.merge(compute_hourly_availability(sel_date), on="Hour", how="left")
-
-    # FIX #13 (hourly): an hour with no contacts is a gap, not a zero.
-    cw = out["Chat SLA Wt"].where(out["Chat SLA"].notna(), 0).fillna(0)
-    mw = out["Messaging SLA Wt"].where(out["Messaging SLA"].notna(), 0).fillna(0)
-    ew = out["Email SLA Wt"].where(out["Email SLA"].notna(), 0).fillna(0)
-    num = (out["Chat SLA"].fillna(0) * cw
-           + out["Messaging SLA"].fillna(0) * mw
-           + out["Email SLA"].fillna(0) * ew)
-    den = cw + mw + ew
-    # Mask the denominator BEFORE dividing (see the daily calculation above).
-    out["Weighted SLA"] = num / den.where(den > 0)
-
-    return out
-
-
-df_hourly = compute_hourly_sla(hourly_date)
-
-if df_hourly["Weighted SLA"].notna().sum() == 0 and df_hourly["Avail (min)"].sum() == 0:
+if df_hourly["Overall Den"].sum() == 0 and df_hourly["Avail (min)"].sum() == 0:
     st.info("No activity for the selected day.")
 else:
-    show_breakdown = st.checkbox("Show Chat, Messaging & Email lines", value=False)
+    show_breakdown = st.checkbox("Show Email & Messaging lines", value=False)
     show_avail = st.checkbox("Overlay available minutes (bars)", value=True)
 
-    _hplot = df_hourly.dropna(subset=["Weighted SLA"])
-
+    _hplot = df_hourly.dropna(subset=["Overall %"])
     layers = []
     if not _hplot.empty:
-        weighted_line = (
-            alt.Chart(_hplot)
-            .mark_line(point=True, color="#FFFFFF")
-            .encode(
+        layers.append(
+            alt.Chart(_hplot).mark_line(point=True, color="#FFFFFF").encode(
                 x=alt.X("Hour:T", title="Hour", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
-                y=alt.Y("Weighted SLA:Q", title="Weighted SLA",
+                y=alt.Y("Overall %:Q", title="Overall attainment (%)",
                         scale=alt.Scale(domain=[0, 105]), axis=alt.Axis(orient="left")),
                 tooltip=[alt.Tooltip("Hour:T", title="Hour", format="%H:%M"),
-                         alt.Tooltip("Weighted SLA:Q", format=".1f"),
-                         alt.Tooltip("Chat SLA Wt:Q", title="Chats", format=",.0f"),
-                         alt.Tooltip("Messaging SLA Wt:Q", title="Messaging", format=",.0f"),
-                         alt.Tooltip("Email SLA Wt:Q", title="Emails", format=",.0f")],
-            )
-        )
-        layers.append(weighted_line)
-
+                         alt.Tooltip("Overall %:Q", format=".1f"),
+                         alt.Tooltip("Overall Num:Q", title="Successful"),
+                         alt.Tooltip("Overall Den:Q", title="Mature eligible"),
+                         alt.Tooltip("Pending:Q", title="Email pending")]))
         if show_breakdown:
-            for _col, _colour, _wt in (("Chat SLA", "#00FF66", "Chat SLA Wt"),
-                                       ("Messaging SLA", "#FAE100", "Messaging SLA Wt"),
-                                       ("Email SLA", "#FF9300", "Email SLA Wt")):
+            for _col, _colour in (("Messaging %", "#FAE100"), ("Email %", "#FF9300")):
                 _sub = df_hourly.dropna(subset=[_col])
                 if _sub.empty:
                     continue
@@ -3882,10 +3305,7 @@ else:
                         x=alt.X("Hour:T", axis=None),
                         y=alt.Y(f"{_col}:Q", scale=alt.Scale(domain=[0, 105]), axis=None),
                         tooltip=[alt.Tooltip("Hour:T", format="%H:%M"),
-                                 alt.Tooltip(f"{_col}:Q", title=_col, format=".1f"),
-                                 alt.Tooltip(f"{_wt}:Q", title="Contacts", format=",.0f")],
-                    )
-                )
+                                 alt.Tooltip(f"{_col}:Q", format=".1f")]))
 
     if show_avail and df_hourly["Avail (min)"].sum() > 0:
         layers.append(
@@ -3894,13 +3314,12 @@ else:
                 y=alt.Y("Avail (min):Q", title="Available (min)", axis=alt.Axis(orient="right")),
                 tooltip=[alt.Tooltip("Hour:T", format="%H:%M"),
                          alt.Tooltip("Avail (min):Q", title="Available (min)", format=",.0f"),
-                         alt.Tooltip("Logged In Agents:Q", title="Logged In Agents", format=",.0f")],
-            )
-        )
+                         alt.Tooltip("Logged In Agents:Q", title="Logged In Agents", format=",.0f")]))
 
     if layers:
         altair_chart(alt.layer(*layers).resolve_scale(y="independent").properties(height=350))
-        st.caption("Available minutes are summed across agents, so an hour with 3 agents "
-                   "fully available reads 180.")
+        st.caption("Contacts are grouped by the hour they entered the queue; hours with no mature "
+                   "eligible contact are gaps. Available minutes are summed across agents, so an "
+                   "hour with 3 agents fully available reads 180.")
     else:
         st.info("No activity for the selected day.")
