@@ -2,3 +2,5 @@ streamlit
 pandas
 numpy
 altair
+google-api-python-client
+google-auth
