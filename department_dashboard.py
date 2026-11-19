@@ -86,6 +86,7 @@ import pandas as pd
 import streamlit as st
 
 from data.ingest import clean_email_frame, normalise_case_number, reopen_timing_available
+from data.snapshots import cutoff_report, resolve_data_dir
 from metrics.adherence import (
     COVERAGE_MIN_PCT as ADH_COVERAGE_MIN_PCT, TARGET_PCT as ADH_TARGET_PCT, compute_adherence,
     shifts_long_from_wide,
@@ -1025,14 +1026,34 @@ def exclude_repeat_missed_chats(
 BASE_DIR = Path(__file__).parent
 
 
+# Production exports are NOT in the repository. The data directory is a validated weekly
+# snapshot: restricted Google Drive ("Current"), else DASHBOARD_DATA_DIR, else this folder
+# (legacy local use). See data/snapshots.py and docs/data-governance.md.
+def _app_secrets() -> dict:
+    try:
+        return {k: (dict(v) if hasattr(v, "items") else v) for k, v in st.secrets.items()}
+    except Exception:   # no secrets file configured
+        return {}
+
+
+@st.cache_resource(ttl=900, show_spinner="Loading data snapshot...")
+def _load_data_source(app_dir: str):
+    return resolve_data_dir(Path(app_dir), secrets=_app_secrets())
+
+
+DATA_SOURCE = _load_data_source(str(BASE_DIR))
+DATA_DIR = DATA_SOURCE.path
+
+
 def resolve_path_case_insensitive(filename: str) -> Path:
-    p = BASE_DIR / filename
+    p = DATA_DIR / filename
     if p.exists():
         return p
     low = filename.lower()
-    for child in BASE_DIR.iterdir():
-        if child.is_file() and child.name.lower() == low:
-            return child
+    if DATA_DIR.is_dir():
+        for child in DATA_DIR.iterdir():
+            if child.is_file() and child.name.lower() == low:
+                return child
     return p
 
 
@@ -1065,8 +1086,17 @@ shifts_path = resolve_path_case_insensitive("shifts.csv")
 REQUIRED = (chat_path, email_path, items_path, messaging_items_path,
             messaging_metrics_path, pres_path)
 missing = [p.name for p in REQUIRED if not p.exists()]
+if DATA_SOURCE.message:
+    st.warning(DATA_SOURCE.message)
 if missing:
-    st.error(f"Missing required files in the app folder: {', '.join(missing)}")
+    st.error(
+        f"Missing required data file(s): {', '.join(missing)} (looked in the {DATA_SOURCE.mode} "
+        "data location). Production exports are not stored in Git: configure the restricted "
+        "Google Drive snapshot (`gdrive` secrets) or set `DASHBOARD_DATA_DIR` to a folder holding "
+        "the weekly snapshot. See docs/data-governance.md.")
+    _blocked = DATA_SOURCE.report.blocked_kpis
+    if _blocked:
+        st.caption("KPIs affected by the missing/invalid sources: " + ", ".join(_blocked) + ".")
     st.stop()
 
 st.sidebar.markdown("---")
@@ -1699,6 +1729,36 @@ with st.expander(":material/info: Data files & quality"):
     st.write("\n".join(f"• {fmt_sig(p)}" for p in _files))
 
     st.markdown(f"**Export horizon (as-of):** {DATA_ASOF:%Y-%m-%d %H:%M:%S}")
+
+    # ---- snapshot provenance, per-source cutoffs (never mix mismatched cutoffs silently) ----
+    _rep = DATA_SOURCE.report
+    st.markdown(
+        f"**Data snapshot:** {DATA_SOURCE.mode} • "
+        + (f"dated {_rep.snapshot_date}" if _rep.snapshot_date else "no manifest (unverified)"))
+    for _n, _fs in _rep.files.items():
+        if _fs.problems and (_fs.present or _fs.name in ("email.csv",)):
+            st.warning(f"`{_n}` failed validation: {'; '.join(_fs.problems)}")
+    if _rep.blocked_kpis:
+        st.warning("KPIs fed by failing sources: " + ", ".join(_rep.blocked_kpis))
+    _horizons = {
+        "email.csv": email_sla_df["Date/Time Opened"].max(),
+        "report_items.csv": df_items["Start DT"].max(),
+        "report_messaging_metrics.csv": messaging_sessions["Start Time"].max(),
+        "report_presence.csv": df_presence["End DT"].max(),
+        "chat.csv": chat_sla_df["Date/Time Opened"].max(),
+    }
+    if survey_q is not None:
+        _horizons["survey.csv"] = survey_q["Survey Taker: Created Date"].max()
+    _cut = cutoff_report({k: v for k, v in _horizons.items() if k != "chat.csv"})
+    st.dataframe(pd.DataFrame(
+        [{"Source": k, "Latest record": (v.strftime("%Y-%m-%d %H:%M") if pd.notna(v) else "-")}
+         for k, v in _horizons.items()]), width="stretch", hide_index=True)
+    if _cut.mismatched:
+        st.warning(
+            "Sources end on different dates (latest "
+            f"{_cut.latest:%d %b %H:%M}); the earliest is {_cut.common:%d %b %H:%M}. Out of step: "
+            + ", ".join(f"`{m}`" for m in _cut.mismatched)
+            + ". Compare periods only up to the earliest cutoff.")
 
     notes = []
     if dedup_stats.get("collapsed"):

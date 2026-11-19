@@ -29,3 +29,11 @@ Thumbs.db
 
 # Jupyter notebooks (optional)
 *.ipynb_checkpoints/
+
+# Production data exports are NEVER committed (see docs/data-governance.md).
+# Synthetic fixtures live under tests/fixtures/ and are not matched by these root-anchored rules.
+/*.csv
+/data_snapshots/
+/snapshots/
+.streamlit/secrets.toml
+manifest.json
