@@ -86,6 +86,24 @@ import pandas as pd
 import streamlit as st
 
 from data.ingest import clean_email_frame, normalise_case_number, reopen_timing_available
+from metrics.adherence import (
+    COVERAGE_MIN_PCT as ADH_COVERAGE_MIN_PCT, TARGET_PCT as ADH_TARGET_PCT, compute_adherence,
+    shifts_long_from_wide,
+)
+from metrics.cx import (
+    csat_summary, csat_trend, in_window as cx_in_window, nps_summary, operational_fcr,
+    prepare_survey, survey_fcr_summary, unmapped_questions,
+)
+from metrics.workload import UtilisationLine, email_handling, messaging_diagnostics
+from metrics.backlog import (
+    NEW_BANDS, NEW_TARGET_HOURS, REOPENED_BANDS, REOPENED_TARGET_HOURS, ageing as backlog_ageing,
+    build_populations, reconcile as backlog_reconcile,
+)
+from metrics.breakdowns import (
+    MIN_CONTACTS as BD_MIN_CONTACTS, adaptive_grain, add_time_dims, attainment_trend,
+    combine_outcomes, dimension_table, first_queue_by_case,
+)
+from metrics.reconcile import email_cohort_reconciliation
 from metrics.service_attainment import (
     COVERAGE_MIN_PCT, EMAIL_TARGET_BUSINESS_HOURS, MESSAGING_RESPONSE_COL,
     MESSAGING_TARGET_SEC, TARGET_PCT, attainment_series, build_overall, classify_email,
@@ -719,6 +737,22 @@ def altair_chart(chart, **kwargs):
         st.altair_chart(chart, use_container_width=True, **kwargs)
 
 
+def date_axis(dates, fmt: str = "%d %b", angle: int = -45, max_ticks: int = 62, **kw):
+    """Axis with ONE tick per distinct calendar day.
+
+    Vega-Lite's automatic time ticks sit every ~12 hours on a short daily series, so a date-only
+    label repeats ("13 Nov, 13 Nov, 14 Nov, ..."). Pinning the tick values to the distinct days
+    avoids that. Long series fall back to an automatic, de-duplicated tick count.
+    """
+    try:
+        days = sorted(pd.to_datetime(pd.Series(list(dates))).dt.normalize().dropna().unique())
+    except Exception:
+        days = []
+    if days and len(days) <= max_ticks:
+        return alt.Axis(format=fmt, labelAngle=angle, values=[pd.Timestamp(d).to_pydatetime() for d in days], **kw)
+    return alt.Axis(format=fmt, labelAngle=angle, tickCount=12, **kw)
+
+
 # =============================================================================
 # Interval maths
 # FIX #22: this is now the ONLY implementation. The original file carried three
@@ -1003,61 +1037,6 @@ def exclude_repeat_missed_chats(
 
 
 # =============================================================================
-# Wide -> tidy shifts normaliser
-# =============================================================================
-def normalize_wide_shifts(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Convert a wide shifts matrix into tidy: Agent | Date | Shift Start | Shift End."""
-    empty = pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
-    if df_raw is None or df_raw.empty:
-        return empty
-
-    cols = list(df_raw.columns)
-    date_cols, date_map = [], {}
-    for c in cols:
-        d = pd.to_datetime(c, errors="coerce", dayfirst=True)
-        if isinstance(d, pd.Timestamp) and not pd.isna(d):
-            date_cols.append(c)
-            date_map[c] = d.date()
-
-    if not date_cols:
-        return empty
-
-    name_col = next((c for c in cols if c not in date_cols), cols[0])
-
-    long = (
-        df_raw.melt(id_vars=[name_col], value_vars=date_cols,
-                    var_name="DateStr", value_name="Range")
-        .rename(columns={name_col: "Agent"})
-    )
-    long["Date"] = long["DateStr"].map(date_map)
-    long["Range"] = long["Range"].astype(str).str.strip()
-
-    off_mask = long["Range"].str.fullmatch(r"(?i)\s*(off|off day|offday|na|nan|none|-|—|–)?\s*")
-    long = long[~off_mask.fillna(True)]
-    if long.empty:
-        return empty
-
-    rgx = re.compile(r"^\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*[-—–]\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*$")
-
-    def _parse_range(s, d):
-        m = rgx.match(s if isinstance(s, str) else "")
-        if not m:
-            return (pd.NaT, pd.NaT)
-        start_dt = pd.to_datetime(f"{d} {m.group(1)}", format="%Y-%m-%d %I:%M %p", errors="coerce")
-        end_dt = pd.to_datetime(f"{d} {m.group(2)}", format="%Y-%m-%d %I:%M %p", errors="coerce")
-        if pd.notna(start_dt) and pd.notna(end_dt) and end_dt <= start_dt:
-            end_dt = end_dt + pd.Timedelta(days=1)
-        return (start_dt, end_dt)
-
-    parsed = long.apply(lambda r: pd.Series(_parse_range(r["Range"], r["Date"])), axis=1)
-    long["Shift Start"] = pd.to_datetime(parsed[0], errors="coerce")
-    long["Shift End"] = pd.to_datetime(parsed[1], errors="coerce")
-
-    tidy = long.dropna(subset=["Shift Start", "Shift End"])[["Agent", "Date", "Shift Start", "Shift End"]]
-    return tidy.reset_index(drop=True)
-
-
-# =============================================================================
 # File loading
 # =============================================================================
 BASE_DIR = Path(__file__).parent
@@ -1244,11 +1223,11 @@ messaging_metrics_long = parse_dt(
 messaging_items_df["Start DT"] = messaging_items_df["Accept Date"]
 messaging_items_df["End DT"] = messaging_items_df["Close Date"]
 
-df_shifts = pd.DataFrame(columns=["Agent", "Date", "Shift Start", "Shift End"])
+df_shifts = pd.DataFrame(columns=["Agent", "Date", "Kind", "Shift Start", "Shift End"])
 if shifts_path.exists():
     df_shifts_raw = load_csv_cached(str(shifts_path), file_signature(shifts_path))
     df_shifts_raw.columns = df_shifts_raw.columns.str.strip()
-    df_shifts = normalize_wide_shifts(df_shifts_raw)
+    df_shifts = shifts_long_from_wide(df_shifts_raw)
 
 survey_q = None
 if survey_path.exists():
@@ -2172,26 +2151,18 @@ email_util = (dept_email_load / dept_email_avail) if dept_email_avail else None
 df_util = pd.DataFrame(util_rows)
 
 # ---------------------------------------------------------------------------
-# FIX #3: Schedule adherence — shifts.csv finally does something.
+# Schedule adherence (Change 2) - metrics/adherence.py. Department level only.
+# Verified active Email / Messaging handling is productive and overrides presence.
 # ---------------------------------------------------------------------------
-adherence = None
-rostered_secs = available_secs = 0.0
-if not df_shifts.empty and not df_util.empty:
-    shift_by_key: dict = {}
-    for _, r in df_shifts.iterrows():
-        seg = clip_to_window(r["Shift Start"], r["Shift End"], window_start, window_end)
-        if seg:
-            shift_by_key.setdefault(_norm_person_key(r["Agent"]), []).append(seg)
-    shift_by_key = {k: merge_intervals(v) for k, v in shift_by_key.items()}
-
-    avail_by_key = dict(zip(df_util["_key"], df_util["_avail_secs"]))
-    rostered_secs = float(sum(sum_secs(v) for v in shift_by_key.values()))
-    available_secs = float(sum(avail_by_key.get(k, 0.0) for k in shift_by_key))
-    adherence = (available_secs / rostered_secs) if rostered_secs else None
-
-    unmatched = sorted(set(shift_by_key) - set(avail_by_key))
-    dq["shift_agents_unmatched"] = len(unmatched)
-    dq["shift_agents_unmatched_names"] = unmatched[:10]
+_handling_parts = [
+    df_items.loc[df_items["Service Channel: Developer Name"] == EMAIL_DEVNAME,
+                 ["User: Full Name", "Start DT", "End DT Clamped"]],
+    messaging_items_df[["User: Full Name", "Start DT", "End DT Clamped"]],
+]
+_handling = pd.concat(_handling_parts, ignore_index=True).rename(columns={
+    "User: Full Name": "Agent", "Start DT": "Start", "End DT Clamped": "End"})
+adherence_sum, adherence_daily = compute_adherence(
+    df_shifts, df_presence, _handling, ts_start, ts_end, DATA_ASOF)
 
 
 # Period-level components
@@ -2226,33 +2197,33 @@ if has_chat_data:
     render_custom_metric(c1, "💬 Total Chats", f"{chat_total:,}",
                          "Distinct chat cases first handled in the period. Counted once even if "
                          "the case was routed more than once.",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{chat_multi_touch:,} handled more than once" if chat_multi_touch else "")
     render_custom_metric(c2, "✉️ Total Emails", f"{email_total:,}",
                          "Distinct email cases first handled in the period. A case that is "
                          "re-opened and routed again counts ONCE, not once per touch.",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{email_reopened:,} re-opened" if email_reopened else "")
     render_custom_metric(c3, "⏳ Avg Chat Handle Time", fmt_mmss(chat_aht),
                          "Total handle time per chat case, summed across every touch",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{chat_touches:.2f} touches/case" if chat_touches else "")
     render_custom_metric(c4, "⏳ Avg Email Handle Time", fmt_mmss(email_aht),
                          "Total handle time per email case, summed across EVERY touch — including "
                          "re-opens handled later and by different agents",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{email_touches:.2f} touches/case" if email_touches else "")
 else:
     _ce1, _ce2 = st.columns(2)
     render_custom_metric(_ce1, "✉️ Total Emails", f"{email_total:,}",
                          "Distinct email cases first handled in the period. A case that is "
                          "re-opened and routed again counts ONCE, not once per touch.",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{email_reopened:,} re-opened" if email_reopened else "")
     render_custom_metric(_ce2, "⏳ Avg Email Handle Time", fmt_mmss(email_aht),
                          "Total handle time per email case, summed across EVERY touch — including "
                          "re-opens handled later and by different agents",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{email_touches:.2f} touches/case" if email_touches else "")
 
 st.markdown("#### :material/forum: Enhanced Messaging")
@@ -2261,13 +2232,13 @@ render_custom_metric(
     _m1, "Messaging Sessions", f"{messaging_total:,}",
     "Unique Messaging sessions started in the selected period. Counted once even when "
     "routing, cancellation or transfer creates several Agent Work rows.",
-    COLOR_GOOD,
+    COLOR_NONE,
     f"{messaging_assignments:,} routing assignments",
 )
 render_custom_metric(
     _m2, "Sessions Handled", f"{messaging_handled:,}",
     "Sessions with at least one closed human Agent Work assignment.",
-    COLOR_GOOD,
+    COLOR_NONE,
     f"{messaging_abandoned:,} unhandled/abandoned"
     + (f" • {messaging_unclassified:,} unclassified" if messaging_unclassified else ""),
 )
@@ -2275,13 +2246,13 @@ render_custom_metric(
     _m3, "Messaging AHT", fmt_mmss(messaging_aht),
     "Mean total Agent Work handle time per handled Messaging session. Multiple assignments "
     "for the same session are summed before averaging.",
-    COLOR_GOOD,
+    COLOR_NONE,
     "Agent Work Handle Time",
 )
 render_custom_metric(
     _m4, "Transferred Sessions", f"{messaging_transfers:,}",
     "Sessions handled by more than one human agent.",
-    COLOR_WARN if messaging_transfers else COLOR_GOOD,
+    COLOR_NONE,
     f"{(messaging_transfers / messaging_handled):.1%} of handled"
     if messaging_handled else "",
 )
@@ -2291,28 +2262,27 @@ render_custom_metric(
     _mr1, "First Response ≤60s", fmt_pct(messaging_first_response_target_pct),
     "Share of sessions with a positive Service Rep First Response Time at or below 60 seconds. "
     "Zero means no measurable agent response and is excluded from this denominator.",
-    COLOR_GOOD if messaging_first_response_target_pct is not None
-    and messaging_first_response_target_pct >= 85 else COLOR_WARN,
+    COLOR_NONE,
     f"{messaging_first_response_in_target:,} of {len(_messaging_first_response):,} measurable",
 )
 render_custom_metric(
     _mr2, "Median First Response", fmt_mmss(messaging_first_response_median),
     "Median route-to-first-agent-response time. Median is used because asynchronous sessions "
     "create a substantial long tail.",
-    COLOR_GOOD,
+    COLOR_NONE,
     f"mean {fmt_mmss(messaging_first_response_mean)}",
 )
 render_custom_metric(
     _mr3, "Avg Speed to Answer", fmt_mmss(messaging_speed_to_answer),
     "Mean routing-request-to-acceptance time from Agent Work. This is different from the "
     "time until the first written response.",
-    COLOR_GOOD,
+    COLOR_NONE,
     f"median post-accept response {fmt_mmss(messaging_accept_to_response_median)}",
 )
 render_custom_metric(
     _mr4, "Messages Sent", f"{messaging_agent_messages:,}",
     "Total agent messages sent in sessions started in the selected period.",
-    COLOR_GOOD,
+    COLOR_NONE,
     f"{messaging_customer_messages:,} customer messages",
 )
 
@@ -2368,7 +2338,11 @@ if email_total and email_multi_touch:
     )
 
 st.markdown("---")
-st.subheader(":material/speed: Operational Metrics")
+st.subheader(":material/speed: Workload & Efficiency Diagnostics")
+st.caption(
+    ":material/info: **Diagnostics only.** These describe how work flows through the department; "
+    "none has a target or a pass/fail status, and lower or higher is not treated as good or bad. "
+    "Department totals only - there is no agent-level view.")
 
 _chat_util_tooltip = (
     f"Capacity-adjusted legacy Chat plus Enhanced Messaging load divided by all "
@@ -2381,57 +2355,154 @@ _chat_util_tooltip = (
 _email_util_tooltip = (
     "Email load divided by assignable email capacity. Email-only presence supplies "
     "100% email capacity. During 'Available_All', email capacity is counted only while "
-    "the agent has no active chats; any active chat makes the agent unavailable for email."
+    "the agent has no active Messaging/chat session; any active session removes Email capacity."
 )
 
-_n_op_cols = 4 if adherence is not None else 3
-_op = st.columns(_n_op_cols)
-render_custom_metric(_op[0], "📈 Conversation Utilization",
-                     f"{chat_util:.1%}" if chat_util is not None else "—",
-                     _chat_util_tooltip, get_utilization_color(chat_util),
-                     f"{dept_chat_load/3600:,.1f} load-h of {dept_chat_avail/3600:,.1f}h")
-render_custom_metric(_op[1], "📈 Email Utilization",
-                     f"{email_util:.1%}" if email_util is not None else "—",
-                     _email_util_tooltip, get_utilization_color(email_util),
-                     f"{dept_email_load/3600:,.1f} load-h of "
-                     f"{dept_email_avail/3600:,.1f} residual-h")
+_util_lines = [UtilisationLine("Conversation", dept_chat_load / 3600, dept_chat_avail / 3600),
+               UtilisationLine("Email", dept_email_load / 3600, dept_email_avail / 3600)]
+_op = st.columns(3)
+render_custom_metric(_op[0], "Conversation utilisation", fmt_pct_floor(_util_lines[0].rate_pct),
+                     _chat_util_tooltip, COLOR_NONE,
+                     f"{_util_lines[0].load_hours:,.1f} load-h / {_util_lines[0].capacity_hours:,.1f} h available")
+render_custom_metric(_op[1], "Email utilisation", fmt_pct_floor(_util_lines[1].rate_pct),
+                     _email_util_tooltip, COLOR_NONE,
+                     f"{_util_lines[1].load_hours:,.1f} load-h / {_util_lines[1].capacity_hours:,.1f} h residual")
+render_custom_metric(_op[2], "Avg Email First Response", fmt_hms(avg_resp_secs),
+                     "Mean first-response time in BUSINESS time (07:00-22:00 CAT, 7 days) of "
+                     "answered emails that entered the queue in the period",
+                     COLOR_NONE, f"across {n_email_total:,} answered emails" if n_email_total else "")
 if dept_email_excess > 0:
     st.caption(
         f"⚠️ {dept_email_excess/3600:,.1f} email-hours were recorded while conversation load "
         "made shared status unavailable for email. These hours are shown as excess "
-        "demand and are not allowed to push email utilisation above 100%."
-    )
-render_custom_metric(_op[2], "⏱️ Avg Email First Response", fmt_hms(avg_resp_secs),
-                     "Mean first-response time in BUSINESS time (07:00-22:00 CAT, 7 days) of "
-                     "answered emails that entered the queue in the period",
-                     get_email_resp_time_color(avg_resp_secs),
-                     f"across {n_email_total:,} emails" if n_email_total else "")
-if adherence is not None:
-    render_custom_metric(_op[3], "🗓️ Schedule Adherence", f"{adherence:.1%}",
-                         "Available time as a share of rostered shift time (from shifts.csv)",
-                         get_utilization_color(adherence),
-                         f"{available_secs/3600:,.1f}h of {rostered_secs/3600:,.1f}h rostered")
+        "demand and are not allowed to push email utilisation above 100%.")
 
-with st.expander("Per-agent utilisation"):
-    if df_util.empty:
-        st.info("No presence or handling data in this period.")
-    else:
-        _show = df_util.drop(columns=["_avail_secs", "_key"]).sort_values("Agent")
-        st.dataframe(
-            _show.style.format({
-                "Conversation load (h)": "{:,.2f}",
-                "Conversation slot-hours": "{:,.2f}",
-                "Conversation available (h)": "{:,.2f}",
-                "Email load (h)": "{:,.2f}",
-                "Email residual capacity (h)": "{:,.2f}",
-                "Email excess demand (h)": "{:,.2f}",
-                "Conversation util": "{:.1%}", "Email util": "{:.1%}",
-            }, na_rep="—"),
-            width="stretch",
-        )
-        if dq.get("shift_agents_unmatched"):
-            st.caption(f"⚠️ {dq['shift_agents_unmatched']} agent(s) in shifts.csv had no matching "
-                       f"presence record: {', '.join(dq['shift_agents_unmatched_names'])}")
+_eh = email_handling(email_cases, email_df["Row Secs"] if "Row Secs" in email_df.columns
+                     else pd.Series(dtype="float64"))
+_md = messaging_diagnostics(messaging_period)
+
+
+def _secs(v):
+    return fmt_mmss(v) if v is not None else "—"
+
+
+_wl_a, _wl_b = st.columns(2)
+with _wl_a:
+    st.markdown("**Email handling**")
+    st.dataframe(pd.DataFrame([
+        {"Measure": "Handle time per case (all touches)", "Cases / touches": _eh.per_case.n,
+         "Mean": _secs(_eh.per_case.mean), "Median": _secs(_eh.per_case.median),
+         "p90": _secs(_eh.per_case.p90)},
+        {"Measure": "Handle time per touch", "Cases / touches": _eh.per_touch.n,
+         "Mean": _secs(_eh.per_touch.mean), "Median": _secs(_eh.per_touch.median),
+         "p90": _secs(_eh.per_touch.p90)},
+    ]).style.format({"Cases / touches": "{:,}"}), width="stretch", hide_index=True)
+    st.caption(
+        f"Touches per case: mean {_eh.touches_per_case.mean:.2f}, median {_eh.touches_per_case.median:.0f}, "
+        f"p90 {_eh.touches_per_case.p90:.0f}. "
+        f"{fmt_ratio(_eh.multi_touch_cases, _eh.cases)} of cases were handled more than once "
+        "(a routing/handling measure; it is not reopening, which comes only from the `Re-opened` flag)."
+        if _eh.cases else "No Email cases in this period.")
+with _wl_b:
+    st.markdown("**Enhanced Messaging**")
+    st.dataframe(pd.DataFrame([
+        {"Measure": "Handle time per handled session", "Sessions": _md.handling_per_session.n,
+         "Mean": _secs(_md.handling_per_session.mean), "Median": _secs(_md.handling_per_session.median),
+         "p90": _secs(_md.handling_per_session.p90)},
+        {"Measure": "Routing: assign -> accept", "Sessions": _md.routing_assign_to_accept.n,
+         "Mean": _secs(_md.routing_assign_to_accept.mean),
+         "Median": _secs(_md.routing_assign_to_accept.median),
+         "p90": _secs(_md.routing_assign_to_accept.p90)},
+        {"Measure": "Speed to answer (Agent Work)", "Sessions": _md.speed_to_answer.n,
+         "Mean": _secs(_md.speed_to_answer.mean), "Median": _secs(_md.speed_to_answer.median),
+         "p90": _secs(_md.speed_to_answer.p90)},
+    ]).style.format({"Sessions": "{:,}"}), width="stretch", hide_index=True)
+
+_v1, _v2, _v3, _v4 = st.columns(4)
+render_custom_metric(_v1, "Email cases", f"{email_total:,}",
+                     "Distinct Email cases first handled in the period (counted once however many "
+                     "times they were routed).", COLOR_NONE,
+                     f"{_eh.multi_touch_cases:,} handled more than once" if _eh.cases else "")
+render_custom_metric(_v2, "Messaging sessions", f"{_md.sessions:,}",
+                     "Unique Messaging sessions started in the period.", COLOR_NONE,
+                     f"{_md.handled:,} handled by a human")
+render_custom_metric(_v3, "Messages", f"{int(_md.agent_messages.total):,} agent",
+                     "Agent and customer messages in sessions started in the period.", COLOR_NONE,
+                     f"{int(_md.customer_messages.total):,} customer • median "
+                     f"{_md.agent_messages.median or 0:.0f} / {_md.customer_messages.median or 0:.0f} per session")
+render_custom_metric(_v4, "Transferred sessions", f"{_md.transferred:,}",
+                     "Handled Messaging sessions worked by more than one human agent.", COLOR_NONE,
+                     fmt_ratio(_md.transferred, _md.handled) + " of handled" if _md.handled else "")
+if has_chat_data:
+    st.caption(f"Historical Live Chat (before 1 Nov 2026): {chat_total:,} chats, average handle time "
+               f"{fmt_mmss(chat_aht)}, {chat_multi_touch:,} handled more than once.")
+
+# ---- Schedule Adherence (Change 2) ---------------------------------------
+# Department-level only (no per-agent view). See metrics/adherence.py for every rule.
+st.markdown("---")
+st.subheader(":material/event_available: Schedule Adherence")
+if not shifts_path.exists():
+    st.info("shifts.csv not found - Schedule Adherence is unavailable.")
+elif df_shifts.empty:
+    st.info("shifts.csv contained no usable shifts - Schedule Adherence is unavailable.")
+else:
+    _adh = adherence_sum
+    _adh_color = {"green": COLOR_GOOD, "amber": COLOR_WARN, "red": COLOR_BAD,
+                  "grey": COLOR_NONE}[_adh.status]
+    _adh_text = {"green": "On target", "amber": "Near target", "red": "Below target",
+                 "grey": "Not reliable"}[_adh.status]
+    _ad1, _ad2, _ad3 = st.columns(3)
+    render_custom_metric(
+        _ad1, "Schedule Adherence", fmt_pct_floor(_adh.rate_pct),
+        f"Productive scheduled minutes / expected productive minutes, time-weighted across "
+        f"agents, only inside scheduled shifts, capped at 100%. Target {ADH_TARGET_PCT:.0f}%. "
+        f"Green >= 95, Amber 90-94.9, Red < 90, Grey when coverage < {ADH_COVERAGE_MIN_PCT:.0f}%.",
+        _adh_color,
+        f"{fmt_ratio(int(round(_adh.productive_secs / 60)), int(round(_adh.expected_secs / 60)))} min"
+        f" • {_adh_text}")
+    render_custom_metric(
+        _ad2, "Coverage", fmt_pct_floor(_adh.coverage_pct),
+        "Scheduled shift time belonging to people who can be matched to presence records. "
+        "Shifts with no presence data at all are a coverage gap, not scored as absence.",
+        COLOR_GOOD if (_adh.coverage_pct or 0) >= ADH_COVERAGE_MIN_PCT else COLOR_NONE,
+        f"{_adh.shifts:,} shifts scored • {_adh.unmatched_shifts:,} unmatched")
+    render_custom_metric(
+        _ad3, "Late / early incidents", f"{_adh.late_incidents + _adh.early_incidents:,}",
+        "A late start or early finish counts only when the variance exceeds 5 minutes; the full "
+        "variance is recorded.",
+        COLOR_NONE,
+        f"late {_adh.late_incidents:,} ({_adh.late_variance_secs / 60:,.0f} min) • "
+        f"early {_adh.early_incidents:,} ({_adh.early_variance_secs / 60:,.0f} min)")
+    if _adh.pending_shifts:
+        st.info(f"**Provisional** - {_adh.pending_shifts:,} shift(s) had not finished by the data "
+                f"horizon ({DATA_ASOF:%d %b %H:%M}) and are not yet scored.")
+    for _m in _adh.messages:
+        st.caption(f":material/warning: {_m}")
+    with st.expander(":material/calculate: How adherence reconciles", expanded=True):
+        st.dataframe(pd.DataFrame([
+            {"Measure": "Expected productive time (h)", "Value": _adh.expected_secs / 3600},
+            {"Measure": "Productive time within shifts (h)", "Value": _adh.productive_secs / 3600},
+            {"Measure": "Approved exclusions removed from expected (meetings / other tasks) (h)",
+             "Value": _adh.approved_exclusion_secs / 3600},
+            {"Measure": "Lunch/break allowance removed from expected (<=60 min/shift) (h)",
+             "Value": _adh.break_allowed_secs / 3600},
+            {"Measure": "Lunch/break beyond the 60-min cap (non-adherent) (h)",
+             "Value": _adh.break_over_cap_secs / 3600},
+            {"Measure": "Shifts with zero productive time (absent)", "Value": _adh.absent_shifts},
+            {"Measure": "Leave shifts (excluded)", "Value": _adh.leave_shifts},
+            {"Measure": "Sick shifts (excluded)", "Value": _adh.sick_shifts},
+        ]).style.format({"Value": "{:,.1f}"}), width="stretch", hide_index=True)
+        st.caption("Productive = Available_All / Available_Email_and_Web / Available_Chat / "
+                   "Available_Case, plus verified Email/Messaging handling. Lunch and break share "
+                   "one 60-minute allowance per shift; an unused allowance is not deducted.")
+    if len(adherence_daily):
+        with st.expander("Daily adherence"):
+            _ad = adherence_daily.copy()
+            _ad["Date"] = _ad["Date"].dt.strftime("%a %d %b")
+            st.dataframe(_ad.style.format({"Productive (h)": "{:,.1f}", "Expected (h)": "{:,.1f}",
+                                           "Adherence %": "{:.1f}"}, na_rep="—"),
+                         width="stretch", hide_index=True)
+
 
 # ---- Overall Service Attainment (Change 1) ------------------------------
 # Replaces the old "SLA Score Summary / Weighted SLA". Overall =
@@ -2470,7 +2541,9 @@ _att_tile(
     _a2, "Email first response", overall_p.email,
     f"Replied within {EMAIL_TARGET_BUSINESS_HOURS:.0f} business hours of queue entry "
     "(07:00-22:00 CAT, 7 days/week), recomputed from Date/Time Opened -> Completion Date. "
-    "Overdue unanswered = fail; not yet due = pending and excluded. Informational: does not veto Overall.",
+    "Overdue unanswered = fail; not yet due = pending and excluded. Informational: does not veto Overall. "
+    "Counts cases that ENTERED THE QUEUE in the period (email.csv), which differs from Core Metrics "
+    "'Total Emails' (cases first handled by an agent): see the reconciliation below.",
     provisional=overall_p.email.pending > 0)
 _att_tile(
     _a3, "Messaging complete service", overall_p.messaging,
@@ -2539,6 +2612,49 @@ with st.expander(":material/calculate: How the headline reconciles (numerators, 
                 st.dataframe(_bd.style.format({"Contacts": "{:,}"}), width="stretch",
                              hide_index=True)
 
+# Why Core Metrics "Total Emails" and the Email attainment cohort differ (they count different things).
+if email_att_ok and HAS_CASE_KEY and email_att_p is not None:
+    _routed_all = df_cases.loc[df_cases["Service Channel: Developer Name"] == EMAIL_DEVNAME, CASE_KEY]
+    _flag_keys = (email_sla_df.loc[email_sla_df["Reopened"], EMAIL_CASE_KEY]
+                  if email_ingest.has_reopen_flag else [])
+    _rc = email_cohort_reconciliation(
+        email_att_p, email_sla_df[EMAIL_CASE_KEY], _routed_all, email_cases[CASE_KEY], _flag_keys,
+        key_col=EMAIL_CASE_KEY)
+    with st.expander(":material/compare_arrows: Why Total Emails (Core Metrics) differs from the "
+                     "Email attainment cohort", expanded=False):
+        st.markdown(
+            f"**Core Metrics - Total Emails = {_rc['core_cases']:,}**: distinct cases an agent *first "
+            f"handled* in the period (`report_items.csv`).  \n"
+            f"**Attainment Email cohort = {_rc['cohort_cases']:,}**: distinct cases that *entered the "
+            f"queue* in the period (`email.csv` Date/Time Opened).")
+        st.dataframe(pd.DataFrame([
+            {"Measure": "Attainment cohort: cases opened in the period (distinct)",
+             "Cases": _rc["cohort_cases"]},
+            {"Measure": "   rows in that cohort (equals cases: no double counting)",
+             "Cases": _rc["cohort_rows"]},
+            {"Measure": "   ...routed to an agent (present in report_items)", "Cases": _rc["cohort_routed"]},
+            {"Measure": "   ...never routed to an agent (email export only)",
+             "Cases": _rc["cohort_never_routed"]},
+            {"Measure": "Core Metrics cases first handled in the period", "Cases": _rc["core_cases"]},
+            {"Measure": "   ...also opened in the period", "Cases": _rc["core_in_cohort"]},
+            {"Measure": "   ...opened BEFORE the period (carried in)",
+             "Cases": _rc["core_opened_before_window"]},
+            {"Measure": "   ...not in the email export at all", "Cases": _rc["core_missing_from_export"]},
+            {"Measure": "Reopened: Core Metrics cases flagged `Re-opened`", "Cases": _rc["core_reopened"]},
+            {"Measure": "Reopened: attainment cohort cases flagged `Re-opened`",
+             "Cases": _rc["cohort_reopened"]},
+        ]).style.format({"Cases": "{:,}"}), width="stretch", hide_index=True)
+        _ra, _ru = _rc["routed_summary"], _rc["unrouted_summary"]
+        st.markdown(
+            f"**Attainment of routed cases:** {fmt_ratio(_ra.numerator, _ra.denominator)}  \n"
+            f"**Attainment of never-routed cases:** {fmt_ratio(_ru.numerator, _ru.denominator)}  \n"
+            "If never-routed cases score very differently, they (e.g. automated or system-handled "
+            "mail) are moving the headline; check with the data owner whether they belong in scope.")
+        st.caption(
+            "Counts are distinct cases (the export is de-duplicated per Case Number before "
+            "scoring). Email attainment is also less than the headline's eligible count because "
+            "the headline adds Messaging sessions.")
+
 # Reopened handling: authoritative `Re-opened` flag; timing gated on `Reopened Time`.
 if email_att_ok and email_ingest.has_reopen_flag:
     _ro = reopened_summary(email_att_p)
@@ -2575,34 +2691,130 @@ if len(chat_sla_p):
 # ---- Trend ---------------------------------------------------------------
 st.markdown("---")
 st.subheader(":material/show_chart: Overall Service Attainment Trend")
-_trend = attainment_series(email_att_p, messaging_att_p, ts_start, ts_end, "D")
-_tplot = _trend.dropna(subset=["Overall %"])
+_trend_src = combine_outcomes(email_att_p, messaging_att_p)
+_trend = attainment_trend(_trend_src, ts_start, ts_end)
+_tgrain = {"D": "day", "W": "week (Monday start)", "M": "month"}[adaptive_grain(ts_start, ts_end)]
+_tplot = _trend.dropna(subset=["Attainment %"]) if not _trend.empty else _trend
 if _tplot.empty:
     st.info("No mature eligible contacts in the selected period, so there is nothing to plot.")
 else:
     _line = alt.Chart(_tplot).mark_line(point=True, color="#FFFFFF").encode(
-        x=alt.X("Bucket:T", title="Date", axis=alt.Axis(format="%d %b", labelAngle=-45)),
-        y=alt.Y("Overall %:Q", title="Overall Service Attainment (%)",
+        x=alt.X("Bucket:T", title=f"Arrival {_tgrain}", axis=date_axis(_tplot["Bucket"]),
+                scale=alt.Scale(domain=[_tplot["Bucket"].min() - pd.Timedelta(hours=12),
+                                        _tplot["Bucket"].max() + pd.Timedelta(hours=12)])),
+        y=alt.Y("Attainment %:Q", title="Overall Service Attainment (%)",
                 scale=alt.Scale(domain=[0, 105])),
-        tooltip=[alt.Tooltip("Bucket:T", title="Date", format="%d %b"),
-                 alt.Tooltip("Overall %:Q", format=".1f"),
-                 alt.Tooltip("Overall Num:Q", title="Successful"),
-                 alt.Tooltip("Overall Den:Q", title="Mature eligible"),
-                 alt.Tooltip("Email %:Q", format=".1f"), alt.Tooltip("Messaging %:Q", format=".1f"),
+        tooltip=[alt.Tooltip("Bucket:T", title="Period start", format="%d %b %Y"),
+                 alt.Tooltip("Attainment %:Q", format=".1f"),
+                 alt.Tooltip("Successful:Q"), alt.Tooltip("Eligible:Q", title="Mature eligible"),
                  alt.Tooltip("Pending:Q", title="Email pending")])
     _rule = alt.Chart(pd.DataFrame({"y": [TARGET_PCT]})).mark_rule(
         color="#FAE100", strokeDash=[5, 5]).encode(y="y:Q")
     altair_chart((_line + _rule).properties(height=350))
-    _gaps = int(_trend["Overall %"].isna().sum())
-    if _gaps:
-        st.caption(f"{_gaps} day(s) had no mature eligible contacts and are shown as gaps, not zeros. "
-                   "Contacts are grouped by the day they entered the queue.")
-    with st.expander("Daily attainment detail"):
-        _d = _trend[["Bucket", "Email Num", "Email Den", "Messaging Num", "Messaging Den",
-                     "Overall Num", "Overall Den", "Overall %", "Pending", "Unmeasurable"]].copy()
-        _d["Bucket"] = _d["Bucket"].dt.strftime("%a %d %b")
-        st.dataframe(_d.rename(columns={"Bucket": "Date"}).style.format(
-            {"Overall %": "{:.1f}"}, na_rep="—"), width="stretch", hide_index=True)
+    st.caption(f"Grouped by arrival {_tgrain} (daily up to 31 days, weekly to 180, then monthly). "
+               "Periods with no mature eligible contacts are gaps, not zeros.")
+    with st.expander("Attainment by period"):
+        _d = _trend.copy()
+        _d["Bucket"] = _d["Bucket"].dt.strftime("%d %b %Y")
+        st.dataframe(_d.rename(columns={"Bucket": "Period start", "Eligible": "Mature eligible"})
+                     .style.format({"Attainment %": "{:.1f}"}, na_rep="—"),
+                     width="stretch", hide_index=True)
+
+
+# =============================================================================
+# Email backlog & ageing (Change 5) - metrics/backlog.py
+# =============================================================================
+st.markdown("---")
+st.subheader(":material/inbox: Email Backlog & Ageing")
+if not email_att_ok:
+    st.info("Email backlog is unavailable: email.csv is missing required columns (see Overall "
+            "Service Attainment above).")
+else:
+    _bl_t = min(ts_end, pd.Timestamp(DATA_ASOF))
+    _bl = build_populations(email_sla_df)
+    _bl_new = _bl["new"]
+    _bl_re = _bl["reopened"]
+    _age_new = backlog_ageing(_bl_new.events, _bl_t, NEW_BANDS, NEW_TARGET_HOURS)
+    _rec_new = backlog_reconcile(_bl_new.events, ts_start, _bl_t)
+    _re_ready = email_ingest.has_reopen_flag and reopen_timing_available(email_sla_df)
+    _age_re = backlog_ageing(_bl_re.events, _bl_t, REOPENED_BANDS, REOPENED_TARGET_HOURS)
+    _rec_re = backlog_reconcile(_bl_re.events, ts_start, _bl_t)
+
+    _BL_COLOR = {"green": COLOR_GOOD, "amber": COLOR_WARN, "red": COLOR_BAD}
+    _BL_TEXT = {"green": "Within safeguards", "amber": "Near safeguards", "red": "Outside safeguards"}
+    _bk1, _bk2 = st.columns(2)
+    render_custom_metric(
+        _bk1, "New-case backlog", f"{_age_new.open_cases:,} open",
+        f"New Email cases with no first response at {_bl_t:%d %b %H:%M}, aged in business hours "
+        f"(07:00-22:00 CAT, 7 days). Target {NEW_TARGET_HOURS:.0f}h. Safeguard: >= 80% within target "
+        "AND none older than 48h.",
+        _BL_COLOR[_age_new.status],
+        f"{fmt_ratio(_age_new.within_target, _age_new.open_cases)} within target • "
+        f"{_age_new.over_limit:,} over 48h • {_BL_TEXT[_age_new.status]}")
+    if _re_ready:
+        render_custom_metric(
+            _bk2, "Reopened-case backlog", f"{_age_re.open_cases:,} open",
+            f"Reopened Email cases with no response since the reopen at {_bl_t:%d %b %H:%M}, "
+            f"aged from `Reopened Time`. Clock {REOPENED_TARGET_HOURS:.0f}h.",
+            _BL_COLOR[_age_re.status],
+            f"{fmt_ratio(_age_re.within_target, _age_re.open_cases)} within target • "
+            f"{_age_re.over_limit:,} over 48h • {_BL_TEXT[_age_re.status]}")
+    else:
+        render_custom_metric(
+            _bk2, "Reopened-case backlog", "—",
+            "Needs reopen timestamps, which exist only for reopens from 19 Nov 2026.", COLOR_NONE,
+            "awaiting data (reopens from 19 Nov 2026)")
+
+    def _bands_chart(a):
+        return alt.Chart(a.bands).mark_bar(color="#00FF66").encode(
+            x=alt.X("Band:N", sort=list(a.bands["Band"]), title="Age (business hours)"),
+            y=alt.Y("Cases:Q"), tooltip=["Band", "Cases", alt.Tooltip("Share %:Q", format=".1f")])
+
+    _ba, _bb = st.columns(2)
+    with _ba:
+        st.markdown("**New cases by age**")
+        altair_chart(_bands_chart(_age_new).properties(height=220))
+    with _bb:
+        st.markdown("**Reopened cases by age**")
+        if _re_ready:
+            altair_chart(_bands_chart(_age_re).properties(height=220))
+        else:
+            st.caption("Awaiting data: reopened ageing fills in weekly from 19 Nov 2026.")
+
+    with st.expander(":material/calculate: Backlog reconciliation (opening + new - responded = closing)",
+                     expanded=True):
+        _recs = [("New cases", _rec_new, "New arrivals", "First response made")]
+        if _re_ready:
+            _recs.append(("Reopened cases", _rec_re, "Reopened", "Responded"))
+        _rows = []
+        for _nm, _r, _in, _out in _recs:
+            _rows.append({"Population": _nm, "Opening": _r.opening, f"+ Inflow": _r.inflow,
+                          "- Outflow": _r.outflow, "= Closing": _r.closing,
+                          "Reconciles": "yes" if _r.reconciles else "NO"})
+        st.dataframe(pd.DataFrame(_rows).style.format(
+            {c: "{:,}" for c in ("Opening", "+ Inflow", "- Outflow", "= Closing")}),
+            width="stretch", hide_index=True)
+        st.caption(
+            f"Window {ts_start:%d %b} to {_bl_t:%d %b %H:%M}. Inflow = cases whose clock started "
+            "in the window (new arrivals; first reopen per case). Outflow = cases responded to in "
+            "the window. Both populations use separate clocks (4h new, 12h reopened).")
+        _notes = []
+        if _bl_new.unmeasurable:
+            _notes.append(f"{_bl_new.unmeasurable:,} new case(s) are closed with no response "
+                          "timestamp or have a response before they opened; excluded.")
+        if email_ingest.has_reopen_flag:
+            if _bl_re.awaiting_data:
+                _notes.append(f"{_bl_re.awaiting_data:,} case(s) are flagged reopened but have no "
+                              "`Reopened Time` (all reopens before 19 Nov 2026): awaiting data, not aged. "
+                              "They are also not aged on the new-case clock.")
+            if _bl_re.unmeasurable:
+                _notes.append(f"{_bl_re.unmeasurable:,} reopened case(s) were closed again at an "
+                              "unknown time; excluded.")
+        else:
+            _notes.append("No `Re-opened` flag in this export: reopened cases cannot be separated, so "
+                          "the new-case backlog may include reopened cases.")
+        for _n in _notes:
+            st.caption(f":material/info: {_n}")
 
 
 # =============================================================================
@@ -2695,315 +2907,120 @@ for _tab, _sub, _title, _scheme in _hm_tab_data:
 
 
 # =============================================================================
-# Customer feedback (CSAT / NPS / FCR)
+# Customer experience (Change 3): CSAT / Survey FCR / Operational FCR / NPS
+# Four SEPARATE measures (metrics/cx.py). Never blended into one score.
 # =============================================================================
-def _leading_int(x) -> Optional[int]:
-    if pd.isna(x):
-        return None
-    m = re.search(r"\d+", str(x))
-    return int(m.group()) if m else None
-
-
-def _bool_yes_no(x) -> Optional[bool]:
-    """Parse a yes/no response.
-
-    Tolerates decorated answers ("Yes - it was resolved", "No, I had to call
-    back"), which an exact-match-only version silently turned into None and
-    therefore dropped from the FCR denominator.
-    """
-    if pd.isna(x):
-        return None
-    s = str(x).strip().lower()
-    if s in ("yes", "y", "true", "1"):
-        return True
-    if s in ("no", "n", "false", "0"):
-        return False
-    # Leading token only: "not resolved" must NOT read as "no" (there is no word
-    # boundary between "no" and "t"), while "No, I had to call back" must.
-    m = re.match(r"^(yes|no|y|n|true|false)\b", s)
-    if m:
-        return m.group(1) in ("yes", "y", "true")
-    return None
-
-
-def _nps_from_scores(series: pd.Series) -> Optional[float]:
-    r = pd.to_numeric(series, errors="coerce").dropna()
-    if r.empty:
-        return None
-    return float((r >= 9).mean() * 100 - (r <= 6).mean() * 100)
-
-
-def _nps_guarded(series: pd.Series) -> Optional[float]:
-    """FIX #12: NPS from a handful of responses is ±100 noise. Suppress it."""
-    r = pd.to_numeric(series, errors="coerce").dropna()
-    if len(r) < NPS_MIN_SAMPLE:
-        return None
-    return _nps_from_scores(r)
-
-
 st.markdown("---")
+st.subheader(":material/sentiment_satisfied: Customer Experience")
 
 if survey_q is None:
-    st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT/NPS/FCR.")
+    st.info("Survey data not found (survey.csv). Add it next to the app to see CSAT / FCR / NPS.")
 else:
-    st.subheader(":material/sentiment_satisfied: Customer Feedback")
+    _sv_all = prepare_survey(survey_q)
+    _sv = cx_in_window(_sv_all, ts_start, ts_end)
+    _unmapped_q = unmapped_questions(survey_q)
+    if _unmapped_q:
+        st.warning("These survey questions matched no CSAT / NPS / FCR rule and are excluded: "
+                   + "; ".join(f"“{q}”" for q in _unmapped_q[:6])
+                   + (f" (+{len(_unmapped_q) - 6} more)" if len(_unmapped_q) > 6 else ""))
 
-    _qtitle = survey_q["Survey Question: Question Title"].astype(str).str.lower()
+    _csat = csat_summary(_sv)
+    _sfcr = survey_fcr_summary(_sv)
+    _sfcr_chat, _sfcr_email = survey_fcr_summary(_sv, "chat"), survey_fcr_summary(_sv, "email")
+    _nps = nps_summary(_sv)
+    _ofcr = operational_fcr(email_sla_df if email_ingest.has_reopen_flag else None,
+                            DATA_ASOF, ts_start, ts_end)
 
-    # FIX #10: first-match-wins classification from explicit config.
-    _metric = pd.Series([None] * len(survey_q), index=survey_q.index, dtype="object")
-    for _name, _pat in SURVEY_QUESTION_PATTERNS:
-        _hit = _qtitle.str.contains(_pat, na=False, regex=True) & _metric.isna()
-        _metric[_hit] = _name
-    survey_q["_metric"] = _metric
+    _CX_COLOR = {"green": COLOR_GOOD, "amber": COLOR_WARN, "red": COLOR_BAD, "grey": COLOR_NONE}
 
-    _unmapped = sorted(survey_q.loc[survey_q["_metric"].isna(),
-                                    "Survey Question: Question Title"].astype(str).unique())
+    def _cx_tile(container, title, summ, tooltip):
+        if summ.unavailable_reason:
+            render_custom_metric(container, title, "—", tooltip, COLOR_NONE,
+                                 "awaiting data (reopens from 19 Nov 2026)")
+            return
+        sub = fmt_ratio(summ.numerator, summ.denominator)
+        if not summ.sufficient:
+            sub += f" • n < {summ.min_sample}: not reliable"
+        elif summ.awaiting:
+            sub += f" • {summ.awaiting:,} awaiting"
+        render_custom_metric(container, title, fmt_pct_floor(summ.rate_pct), tooltip,
+                             _CX_COLOR[summ.status], sub)
 
-    survey_q["NPS_raw"] = survey_q["Response"].where(survey_q["_metric"] == "NPS").apply(_leading_int)
-    survey_q["CSAT_raw"] = survey_q["Response"].where(survey_q["_metric"] == "CSAT").apply(_leading_int)
-    survey_q["FCR_bool"] = survey_q["Response"].where(survey_q["_metric"] == "FCR").apply(_bool_yes_no)
+    _k1, _k2, _k3, _k4 = st.columns(4)
+    _cx_tile(_k1, "😊 CSAT", _csat,
+             "% of valid respondents rating 4 or 5 on the 1-5 scale. Target 80%, minimum 30 "
+             "responses. Department total only: CSAT rows carry no channel.")
+    _cx_tile(_k2, "🎯 Survey FCR", _sfcr,
+             "% answering Yes to 'was the issue reported ... resolved by the agent?' (chat and "
+             "email questions combined). Target 80%, minimum 30 responses.")
+    _cx_tile(_k3, "🔁 Operational FCR", _ofcr,
+             "Email cases resolved and NOT formally reopened within 7 days / resolved cases with a "
+             "complete 7-day window. Needs reopen timestamps, which exist only for reopens from "
+             "19 Nov 2026; earlier resolutions are never scored.")
+    render_custom_metric(
+        _k4, "⭐ NPS (supporting)",
+        f"{_nps.score:.1f}" if _nps.score is not None else "—",
+        "%Promoters (9-10) - %Detractors (0-6), Premier Bet and Mercury Bet combined. "
+        "Supporting only: no pass/fail status. Shown from 30 responses.", COLOR_NONE,
+        f"{_nps.promoters:,} promoters • {_nps.passives:,} passives • {_nps.detractors:,} detractors")
 
-    # FIX #4: Channel is now actually used (per-channel breakdown below).
-    # Fall back to the question title, since channel-specific wordings such as
-    # "Was the issue reported in the chat resolved by the agent?" name the
-    # channel even when the survey name does not.
-    _ch_survey = (survey_q["Survey Question: Survey"].astype(str)
-                  .str.extract(r"(?i)\b(Email|Chat)\b", expand=False).str.capitalize())
-    _ch_title = (survey_q["Survey Question: Question Title"].astype(str)
-                 .str.extract(r"(?i)\b(Email|Chat)\b", expand=False).str.capitalize())
-    survey_q["Channel"] = _ch_survey.fillna(_ch_title).fillna("Other")
-
-    # FIX #11: validate the declared scales instead of assuming them.
-    _scale_warnings = []
-    _csat_vals = pd.to_numeric(survey_q["CSAT_raw"], errors="coerce").dropna()
-    if not _csat_vals.empty and (_csat_vals.min() < CSAT_SCALE_MIN or _csat_vals.max() > CSAT_SCALE_MAX):
-        _scale_warnings.append(
-            f"CSAT responses range {_csat_vals.min():.0f}–{_csat_vals.max():.0f} but the "
-            f"configured scale is {CSAT_SCALE_MIN}–{CSAT_SCALE_MAX}. Update CSAT_SCALE_MIN/MAX "
-            f"— percentages are wrong until you do."
-        )
-    _nps_vals = pd.to_numeric(survey_q["NPS_raw"], errors="coerce").dropna()
-    if not _nps_vals.empty and (_nps_vals.min() < NPS_SCALE_MIN or _nps_vals.max() > NPS_SCALE_MAX):
-        _scale_warnings.append(
-            f"NPS responses range {_nps_vals.min():.0f}–{_nps_vals.max():.0f} but the "
-            f"configured scale is {NPS_SCALE_MIN}–{NPS_SCALE_MAX}."
-        )
-
-    # FIX #9: mean, not max. Taking max scored a respondent who answered 2 and 5
-    # as a 5.
-    def _mean_or_none(s):
-        v = pd.to_numeric(s, errors="coerce").dropna()
-        return float(v.mean()) if len(v) else None
-
-    def _first_or_none(s):
-        v = s.dropna()
-        return v.iloc[0] if len(v) else None
-
-    def _first_channel(s):
-        """Prefer a real channel over the 'Other' placeholder.
-
-        A respondent's CSAT question may name no channel while their FCR
-        question does; taking the literal first value would label them 'Other'.
-        """
-        v = s.dropna()
-        real = v[v != "Other"]
-        if len(real):
-            return real.iloc[0]
-        return v.iloc[0] if len(v) else "Other"
-
-    survey = survey_q.groupby("Survey Taker: ID", as_index=False).agg(
-        **{
-            "Survey Date": ("Survey Taker: Created Date", "min"),
-            "Channel": ("Channel", _first_channel),
-            "NPS_raw": ("NPS_raw", _mean_or_none),
-            "CSAT_raw": ("CSAT_raw", _mean_or_none),
-            "FCR_bool": ("FCR_bool", _first_or_none),
-        }
-    )
-
-    _span = max(CSAT_SCALE_MAX - CSAT_SCALE_MIN, 1)
-    survey["CSAT%"] = (survey["CSAT_raw"] - CSAT_SCALE_MIN) / _span * 100.0
-    survey["Survey Date"] = pd.to_datetime(survey["Survey Date"], errors="coerce")
-
-    _undated = int(survey["Survey Date"].isna().sum())
-    survey_period = survey[
-        (survey["Survey Date"] >= ts_start) & (survey["Survey Date"] < ts_end)
-    ].copy()
-
-    for _w in _scale_warnings:
-        st.warning(_w)
-    if _unmapped:
-        st.warning(
-            "These survey questions matched no CSAT/NPS/FCR pattern and are excluded — "
-            "add them to SURVEY_QUESTION_PATTERNS if they should count: "
-            + "; ".join(f"“{q}”" for q in _unmapped[:6])
-            + (f" (+{len(_unmapped) - 6} more)" if len(_unmapped) > 6 else "")
-        )
-    if _undated:
-        st.caption(f"{_undated} survey(s) had an unparseable date and are excluded.")
-
-    # ---------------------------------------------------------------------
-    # Question-mapping diagnostic.
-    # A silently mis-mapped question is the easiest way for CSAT/NPS/FCR to go
-    # quietly wrong, and the "unmapped" warning above only catches questions
-    # that match NOTHING — it cannot catch a question mapped to the WRONG
-    # metric. This table shows every distinct question title, what it mapped
-    # to, and how many answers were parsed, so both failure modes are visible.
-    # ---------------------------------------------------------------------
-    with st.expander(":material/manage_search: Survey question mapping — check this if CSAT/NPS/FCR look wrong"):
+    with st.expander(":material/calculate: How these reconcile (numerators, denominators, safeguards)",
+                     expanded=True):
         _rows = []
-        for _title, _grp in survey_q.groupby("Survey Question: Question Title", dropna=False):
-            _m = _grp["_metric"].dropna()
-            _m = _m.iloc[0] if len(_m) else None
-            if _m == "NPS":
-                _parsed = int(_grp["NPS_raw"].notna().sum())
-            elif _m == "CSAT":
-                _parsed = int(_grp["CSAT_raw"].notna().sum())
-            elif _m == "FCR":
-                _parsed = int(_grp["FCR_bool"].notna().sum())
-            else:
-                _parsed = 0
-            _sample = _grp["Response"].dropna()
+        for _s in (_csat, _sfcr, _sfcr_chat, _sfcr_email, _ofcr):
             _rows.append({
-                "Question": str(_title),
-                "Mapped to": _m if _m else "— excluded —",
-                "Rows": len(_grp),
-                "Answers parsed": _parsed,
-                "Example response": str(_sample.iloc[0]) if len(_sample) else "",
+                "Measure": _s.name, "Numerator": _s.numerator, "Denominator": _s.denominator,
+                "Rate": fmt_pct_floor(_s.rate_pct), "Excluded (unparseable)": _s.invalid,
+                "Awaiting data": _s.awaiting,
+                "Status": ("n/a" if _s.unavailable_reason else
+                           {"green": "On target", "amber": "Near target", "red": "Below target",
+                            "grey": f"n < {_s.min_sample}"}[_s.status]),
+                "Shown as headline": ("channel only if n >= 30" if "(" in _s.name else "yes"),
             })
-        _map_df = pd.DataFrame(_rows).sort_values(["Mapped to", "Rows"], ascending=[True, False])
-        st.dataframe(_map_df, width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(_rows).style.format(
+            {c: "{:,}" for c in ("Numerator", "Denominator", "Excluded (unparseable)",
+                                 "Awaiting data")}), width="stretch", hide_index=True)
+        st.caption(
+            "Target 80% for CSAT and both FCRs: Green >= 80, Amber 70-79.9, Red < 70, Grey below 30 "
+            "responses. Survey cohort = survey response date. Operational FCR cohort = resolution "
+            "date (resolution time = the export's Completion Date; there is no separate close "
+            "date). NPS is not pass/fail. **Survey response rate is unavailable** (issued volume "
+            "is not collected) and there is **no CSAT channel split** (CSAT rows carry no channel).")
+        _ch_lines = []
+        for _s in (_sfcr_chat, _sfcr_email):
+            if _s.sufficient:
+                _ch_lines.append(f"**{_s.name}**: {fmt_ratio(_s.numerator, _s.denominator)}")
+            else:
+                _ch_lines.append(f"{_s.name}: only {_s.denominator:,} response(s) - below the "
+                                 f"{_s.min_sample} needed to show this channel on its own")
+        st.markdown("  \n".join(_ch_lines))
+        _nps_note = (f"NPS: {_nps.n:,} valid response(s)" +
+                     ("" if _nps.sufficient else f" - below {_nps.min_sample}, score suppressed"))
+        st.caption(_nps_note)
 
-        # A question that mapped to a metric but parsed almost nothing means the
-        # RESPONSE format is unexpected, not the question title.
-        _bad = _map_df[(_map_df["Mapped to"] != "— excluded —")
-                       & (_map_df["Answers parsed"] < _map_df["Rows"] * 0.5)]
-        if not _bad.empty:
-            st.warning(
-                "These questions were mapped but fewer than half their responses could be "
-                "parsed — check the response format (FCR expects Yes/No; CSAT and NPS expect "
-                "a leading number): "
-                + "; ".join(f"“{r['Question']}” ({r['Answers parsed']}/{r['Rows']} parsed)"
-                            for _, r in _bad.iterrows())
-            )
-
-    if survey_period.empty:
-        st.info("No survey responses in the selected date range.")
-    else:
-        total_surveys = len(survey_period)
-        csat_overall = survey_period["CSAT%"].mean() if survey_period["CSAT%"].notna().any() else None
-        nps_overall = (_nps_from_scores(survey_period["NPS_raw"])
-                       if survey_period["NPS_raw"].notna().any() else None)
-
-        # FIX #2: denominator is respondents who ANSWERED the FCR question.
-        _fcr_answered = survey_period["FCR_bool"].dropna()
-        fcr_overall = float((_fcr_answered == True).mean() * 100) if len(_fcr_answered) else None
-
-        n_csat = int(survey_period["CSAT%"].notna().sum())
-        n_nps = int(survey_period["NPS_raw"].notna().sum())
-        n_fcr = int(len(_fcr_answered))
-
-        k1, k2, k3, k4 = st.columns(4)
-        render_custom_metric(k1, "🗳️ Surveys", f"{total_surveys:,}",
-                             "Distinct survey respondents in range", COLOR_GOOD)
-        render_custom_metric(k2, "😊 CSAT (avg %)",
-                             fmt_pct(csat_overall),
-                             f"Mean CSAT normalised from the {CSAT_SCALE_MIN}–{CSAT_SCALE_MAX} scale to 0–100%",
-                             get_csat_color_pct(csat_overall), f"from {n_csat:,} responses")
-        render_custom_metric(k3, "⭐ NPS",
-                             f"{nps_overall:.1f}" if nps_overall is not None else "—",
-                             "NPS: %Promoters (9–10) − %Detractors (0–6)",
-                             get_nps_color(nps_overall), f"from {n_nps:,} responses")
-        render_custom_metric(k4, "🎯 FCR", fmt_pct(fcr_overall),
-                             "First Contact Resolution, over respondents who answered the FCR question",
-                             get_fcr_color_pct(fcr_overall), f"from {n_fcr:,} responses")
-
-        # ---- FIX #4: per-channel breakdown (Channel was previously unused) ----
-        _by_ch = []
-        for _ch, _grp in survey_period.groupby("Channel"):
-            _f = _grp["FCR_bool"].dropna()
-            _by_ch.append({
-                "Channel": _ch,
-                "Surveys": len(_grp),
-                "CSAT %": _grp["CSAT%"].mean() if _grp["CSAT%"].notna().any() else None,
-                "NPS": _nps_from_scores(_grp["NPS_raw"]) if _grp["NPS_raw"].notna().any() else None,
-                "FCR %": float((_f == True).mean() * 100) if len(_f) else None,
-            })
-        if len(_by_ch) > 1:
-            st.markdown("**Feedback by channel**")
-            st.dataframe(
-                pd.DataFrame(_by_ch).sort_values("Surveys", ascending=False)
-                .style.format({"CSAT %": "{:.1f}", "NPS": "{:.1f}", "FCR %": "{:.1f}",
-                               "Surveys": "{:,}"}, na_rep="—"),
-                width="stretch",
-            )
-
-        # ---- CSAT & NPS trend ----
-        daily_survey = (
-            survey_period
-            .assign(Date=survey_period["Survey Date"].dt.normalize())
-            .groupby("Date", as_index=False)
-            .agg(CSAT_pct=("CSAT%", "mean"),
-                 NPS=("NPS_raw", _nps_guarded),
-                 Surveys=("Survey Date", "size"))
-            .sort_values("Date")
-        )
-
-        if not daily_survey.empty:
-            st.subheader(":material/trending_up: CSAT & NPS Trend Analysis")
-
-            base = alt.Chart(daily_survey)
-            x_enc = alt.X("yearmonthdate(Date):T", title="Date",
-                          axis=alt.Axis(format="%d %b", labelAngle=45))
-            hover = alt.selection_point(on="mouseover", fields=["Date"], nearest=True, empty=False)
-
-            csat_line = base.mark_line(strokeWidth=3, color="#00FF66").encode(
-                x=x_enc,
-                y=alt.Y("CSAT_pct:Q", title="CSAT (%)", scale=alt.Scale(domain=[0, 100])),
-                tooltip=[alt.Tooltip("Date:T", format="%d %b"),
-                         alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f"),
-                         alt.Tooltip("Surveys:Q", title="Surveys", format=".0f")],
-            )
-            csat_points = base.mark_point(filled=True, color="#00FF66").encode(
-                x=x_enc,
-                y=alt.Y("CSAT_pct:Q", axis=None, scale=alt.Scale(domain=[0, 100])),
-                size=alt.condition(hover, alt.value(120), alt.value(60)),
-                tooltip=[alt.Tooltip("Date:T", format="%d %b"),
-                         alt.Tooltip("CSAT_pct:Q", title="CSAT (%)", format=".1f")],
-            ).add_params(hover)
-            nps_line = base.mark_line(strokeWidth=3, color="#FAE100", strokeDash=[5, 5]).encode(
-                x=x_enc,
-                y=alt.Y("NPS:Q", title="NPS Score", axis=alt.Axis(orient="right"),
-                        scale=alt.Scale(domain=[-100, 100])),
-                tooltip=[alt.Tooltip("Date:T", format="%d %b"),
-                         alt.Tooltip("NPS:Q", title="NPS Score", format=".0f"),
-                         alt.Tooltip("Surveys:Q", title="Surveys", format=".0f")],
-            )
-            nps_points = base.mark_point(filled=True, color="#FAE100", shape="square").encode(
-                x=x_enc,
-                y=alt.Y("NPS:Q", axis=None, scale=alt.Scale(domain=[-100, 100])),
-                size=alt.condition(hover, alt.value(120), alt.value(60)),
-                tooltip=[alt.Tooltip("Date:T", format="%d %b"),
-                         alt.Tooltip("NPS:Q", title="NPS Score", format=".0f")],
-            ).add_params(hover)
-            nps_zero = alt.Chart(pd.DataFrame({"zero": [0]})).mark_rule(
-                strokeDash=[6, 4], color="#9ca3af", opacity=0.6
-            ).encode(y=alt.Y("zero:Q", axis=None, scale=alt.Scale(domain=[-100, 100])))
-
-            altair_chart(
-                alt.layer(csat_line, nps_line, csat_points, nps_points, nps_zero)
-                .resolve_scale(y="independent")
-                .properties(height=400)
-                .configure_axis(grid=True, gridColor="rgba(255,255,255,0.14)", gridDash=[2, 3])
-                .configure_legend(orient="top-right")
-                .interactive()
-            )
-
-            _suppressed = int(daily_survey["NPS"].isna().sum())
-            if _suppressed:
-                st.caption(f"NPS is hidden on {_suppressed} day(s) with fewer than "
-                           f"{NPS_MIN_SAMPLE} responses, where the figure would be noise.")
+    _ct = csat_trend(_sv_all, ts_start, ts_end)
+    if not _ct.empty:
+        st.markdown("#### CSAT trend")
+        _ctp = _ct.dropna(subset=["CSAT %"])
+        if _ctp.empty:
+            st.caption("Every bucket in this period has fewer than 30 CSAT responses, so no "
+                       "trend is drawn (shown as a table below).")
+        else:
+            _cl = alt.Chart(_ctp).mark_line(point=True, color="#00FF66").encode(
+                x=alt.X("Bucket:T", title="Period start", axis=date_axis(_ctp["Bucket"])),
+                y=alt.Y("CSAT %:Q", scale=alt.Scale(domain=[0, 100])),
+                tooltip=[alt.Tooltip("Bucket:T"), alt.Tooltip("CSAT %:Q", format=".1f"),
+                         alt.Tooltip("Satisfied:Q"), alt.Tooltip("Valid:Q")])
+            _cr = alt.Chart(pd.DataFrame({"y": [80.0]})).mark_rule(
+                color="#FAE100", strokeDash=[5, 5]).encode(y="y:Q")
+            altair_chart((_cl + _cr).properties(height=300))
+        st.caption("Bucket size adapts to the period (daily up to 31 days, weekly to 180, then "
+                   "monthly); buckets with fewer than 30 responses show no rate.")
+        _ctd = _ct.copy()
+        _ctd["Bucket"] = _ctd["Bucket"].dt.strftime("%d %b %Y")
+        with st.expander("CSAT by period"):
+            st.dataframe(_ctd.style.format({"CSAT %": "{:.1f}"}, na_rep="n < 30"),
+                         width="stretch", hide_index=True)
 
 
 # =============================================================================
@@ -3222,6 +3239,83 @@ else:
                     "Unmapped chat buttons or Messaging channel names:"
                 )
                 st.dataframe(_names, width="stretch")
+
+
+# =============================================================================
+# Department breakdowns (Change 6) - metrics/breakdowns.py
+# Overall Service Attainment split by department-level dimensions. No agent dimension.
+# =============================================================================
+st.markdown("---")
+st.subheader(":material/account_tree: Department Breakdowns")
+st.caption(
+    "Overall Service Attainment (Email + Messaging) split by each dimension. A result is coloured "
+    f"only with at least {BD_MIN_CONTACTS} eligible contacts and {COVERAGE_MIN_PCT:.0f}% coverage; "
+    "otherwise the numbers are shown in grey. Each group's Successful / Eligible adds back to the "
+    "headline above. Contacts are grouped by arrival time.")
+
+_bd_queue = first_queue_by_case(df_items, channel_value=EMAIL_DEVNAME)
+_bd_msg = messaging_att_p.copy() if messaging_att_p is not None else None
+if _bd_msg is not None and not _bd_msg.empty and MESSAGING_CHANNEL_FIELD in _bd_msg.columns:
+    _bd_msg["Messaging Country"] = _bd_msg[MESSAGING_CHANNEL_FIELD].map(_country_from_devname)
+_bd = add_time_dims(combine_outcomes(
+    email_att_p, _bd_msg, queue_map=_bd_queue, messaging_country_col="Messaging Country"))
+
+_BD_COLOR = {"green": "#00FF66", "amber": "#FAE100", "red": "#FF9300", "grey": "#9ca3af"}
+_BD_TEXT = {"green": "On target", "amber": "Near target", "red": "Below target", "grey": "Not reliable"}
+
+
+def _dim_view(by, channel=None, title=None, key=""):
+    src = _bd if channel is None else _bd[_bd["Channel"] == channel]
+    t = dimension_table(src, by)
+    if title:
+        st.markdown(f"**{title}**")
+    if t.empty:
+        st.caption("No contacts in this period for this dimension.")
+        return
+    shown = t.copy()
+    shown["Status"] = shown["Status"].map(_BD_TEXT)
+    st.dataframe(shown.style.format({"Successful": "{:,}", "Eligible": "{:,}", "Pending": "{:,}",
+                                     "Unmeasurable": "{:,}", "Excluded": "{:,}",
+                                     "Attainment %": "{:.1f}", "Coverage %": "{:.1f}"}, na_rep="—"),
+                 width="stretch", hide_index=True)
+    plot = t.dropna(subset=["Attainment %"])
+    if not plot.empty:
+        order = list(t["Group"])
+        altair_chart(alt.Chart(plot).mark_bar().encode(
+            x=alt.X("Group:N", sort=order, title=None),
+            y=alt.Y("Attainment %:Q", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("Status:N", legend=None, scale=alt.Scale(
+                domain=list(_BD_COLOR), range=list(_BD_COLOR.values()))),
+            tooltip=["Group", "Successful", "Eligible", alt.Tooltip("Attainment %:Q", format=".1f"),
+                     "Status"]).properties(height=240))
+
+
+_bd_tabs = st.tabs(["Channel", "Email queue", "Email origin", "Country / market",
+                    "Day & hour", "New vs reopened", "Messaging transfers"])
+with _bd_tabs[0]:
+    _dim_view("Channel")
+with _bd_tabs[1]:
+    _dim_view("Queue", "Email")
+    st.caption("Queue = the first routing queue of the case in report_items.csv (joined on case "
+               "number). 'Not routed / unknown' cases never reached an Omni-Channel queue.")
+with _bd_tabs[2]:
+    _dim_view("Origin", "Email")
+    st.caption("Contact Us = Contact Form, Email = Direct Email. Priority is a legacy field and is "
+               "not used.")
+with _bd_tabs[3]:
+    _dim_view("Country", "Email", "Email (country from email.csv `Country`)")
+    _dim_view("Country", "Messaging", "Messaging (country from the Messaging channel name)")
+    st.caption("Email and Messaging countries come from different sources and are shown separately. "
+               "Raw email values are mapped to a controlled list; blank or unmapped = Unknown.")
+with _bd_tabs[4]:
+    _dim_view("Day of week", title="Day of week")
+    _dim_view("Hour of day", title="Hour of day")
+with _bd_tabs[5]:
+    _dim_view("Case type", "Email")
+    st.caption("From the authoritative `Re-opened` flag. Reopened cases are measured on their final "
+               "response, so their first-response result is approximate.")
+with _bd_tabs[6]:
+    _dim_view("Transfer", "Messaging")
 
 
 # =============================================================================
