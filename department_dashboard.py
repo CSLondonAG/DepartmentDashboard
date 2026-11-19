@@ -2487,7 +2487,9 @@ _att_tile(
     _a2, "Email first response", overall_p.email,
     f"Replied within {EMAIL_TARGET_BUSINESS_HOURS:.0f} business hours of queue entry "
     "(07:00-22:00 CAT, 7 days/week), recomputed from Date/Time Opened -> Completion Date. "
-    "Overdue unanswered = fail; not yet due = pending and excluded. Informational: does not veto Overall.",
+    "Overdue unanswered = fail; not yet due = pending and excluded. Informational: does not veto Overall. "
+    "Counts cases that ENTERED THE QUEUE in the period (email.csv), which differs from Core Metrics "
+    "'Total Emails' (cases first handled by an agent): see the reconciliation below.",
     provisional=overall_p.email.pending > 0)
 _att_tile(
     _a3, "Messaging complete service", overall_p.messaging,
