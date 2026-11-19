@@ -1,0 +1,6 @@
+Status,Priority,Case Origin,Date/Time Opened,Completion Date,Re-opened,Reopened Time,Elapsed Time (Hours),Your Email Address,Case Number,Case Owner,Country
+Status,Priority,Case Origin,Date/Time Opened,Completion Date,Re-opened,Reopened Time,Elapsed Time (Hours),Your Email Address,Case Number,Case Owner,Country
+Closed,Priority 1,Email,"10/11/2026, 10:00","10/11/2026, 12:30",0,,2.5,synthetic1@example.test,04282933,Agent Alpha,DR Congo
+Closed,Priority 1,Contact Us,"10/11/2026, 10:00","10/11/2026, 14:01",1,"19/11/2026, 09:00",4.0,synthetic2@example.test,00000012,Agent Beta,Nigeria - NairaBet
+Open,Priority 1,Email,"19/11/2026, 10:00",,0,,,synthetic3@example.test,4300378,Agent Gamma,Ghana
+Closed,Priority 1,Email,"11/11/2026, 09:00","11/11/2026, 09:30",0,,0.5,synthetic4@example.test,4300379,Agent Delta,Côte d'Ivoire
