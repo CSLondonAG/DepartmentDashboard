@@ -95,6 +95,10 @@ from metrics.cx import (
     prepare_survey, survey_fcr_summary, unmapped_questions,
 )
 from metrics.workload import UtilisationLine, email_handling, messaging_diagnostics
+from metrics.backlog import (
+    NEW_BANDS, NEW_TARGET_HOURS, REOPENED_BANDS, REOPENED_TARGET_HOURS, ageing as backlog_ageing,
+    build_populations, reconcile as backlog_reconcile,
+)
 from metrics.service_attainment import (
     COVERAGE_MIN_PCT, EMAIL_TARGET_BUSINESS_HOURS, MESSAGING_RESPONSE_COL,
     MESSAGING_TARGET_SEC, TARGET_PCT, attainment_series, build_overall, classify_email,
@@ -2649,6 +2653,102 @@ else:
         _d["Bucket"] = _d["Bucket"].dt.strftime("%a %d %b")
         st.dataframe(_d.rename(columns={"Bucket": "Date"}).style.format(
             {"Overall %": "{:.1f}"}, na_rep="—"), width="stretch", hide_index=True)
+
+
+# =============================================================================
+# Email backlog & ageing (Change 5) - metrics/backlog.py
+# =============================================================================
+st.markdown("---")
+st.subheader(":material/inbox: Email Backlog & Ageing")
+if not email_att_ok:
+    st.info("Email backlog is unavailable: email.csv is missing required columns (see Overall "
+            "Service Attainment above).")
+else:
+    _bl_t = min(ts_end, pd.Timestamp(DATA_ASOF))
+    _bl = build_populations(email_sla_df)
+    _bl_new = _bl["new"]
+    _bl_re = _bl["reopened"]
+    _age_new = backlog_ageing(_bl_new.events, _bl_t, NEW_BANDS, NEW_TARGET_HOURS)
+    _rec_new = backlog_reconcile(_bl_new.events, ts_start, _bl_t)
+    _re_ready = email_ingest.has_reopen_flag and reopen_timing_available(email_sla_df)
+    _age_re = backlog_ageing(_bl_re.events, _bl_t, REOPENED_BANDS, REOPENED_TARGET_HOURS)
+    _rec_re = backlog_reconcile(_bl_re.events, ts_start, _bl_t)
+
+    _BL_COLOR = {"green": COLOR_GOOD, "amber": COLOR_WARN, "red": COLOR_BAD}
+    _BL_TEXT = {"green": "Within safeguards", "amber": "Near safeguards", "red": "Outside safeguards"}
+    _bk1, _bk2 = st.columns(2)
+    render_custom_metric(
+        _bk1, "New-case backlog", f"{_age_new.open_cases:,} open",
+        f"New Email cases with no first response at {_bl_t:%d %b %H:%M}, aged in business hours "
+        f"(07:00-22:00 CAT, 7 days). Target {NEW_TARGET_HOURS:.0f}h. Safeguard: >= 80% within target "
+        "AND none older than 48h.",
+        _BL_COLOR[_age_new.status],
+        f"{fmt_ratio(_age_new.within_target, _age_new.open_cases)} within target • "
+        f"{_age_new.over_limit:,} over 48h • {_BL_TEXT[_age_new.status]}")
+    if _re_ready:
+        render_custom_metric(
+            _bk2, "Reopened-case backlog", f"{_age_re.open_cases:,} open",
+            f"Reopened Email cases with no response since the reopen at {_bl_t:%d %b %H:%M}, "
+            f"aged from `Reopened Time`. Clock {REOPENED_TARGET_HOURS:.0f}h.",
+            _BL_COLOR[_age_re.status],
+            f"{fmt_ratio(_age_re.within_target, _age_re.open_cases)} within target • "
+            f"{_age_re.over_limit:,} over 48h • {_BL_TEXT[_age_re.status]}")
+    else:
+        render_custom_metric(
+            _bk2, "Reopened-case backlog", "—",
+            "Needs reopen timestamps, which exist only for reopens from 19 Nov 2026.", COLOR_NONE,
+            "awaiting data (reopens from 19 Nov 2026)")
+
+    def _bands_chart(a):
+        return alt.Chart(a.bands).mark_bar(color="#00FF66").encode(
+            x=alt.X("Band:N", sort=list(a.bands["Band"]), title="Age (business hours)"),
+            y=alt.Y("Cases:Q"), tooltip=["Band", "Cases", alt.Tooltip("Share %:Q", format=".1f")])
+
+    _ba, _bb = st.columns(2)
+    with _ba:
+        st.markdown("**New cases by age**")
+        altair_chart(_bands_chart(_age_new).properties(height=220))
+    with _bb:
+        st.markdown("**Reopened cases by age**")
+        if _re_ready:
+            altair_chart(_bands_chart(_age_re).properties(height=220))
+        else:
+            st.caption("Awaiting data: reopened ageing fills in weekly from 19 Nov 2026.")
+
+    with st.expander(":material/calculate: Backlog reconciliation (opening + new - responded = closing)",
+                     expanded=True):
+        _recs = [("New cases", _rec_new, "New arrivals", "First response made")]
+        if _re_ready:
+            _recs.append(("Reopened cases", _rec_re, "Reopened", "Responded"))
+        _rows = []
+        for _nm, _r, _in, _out in _recs:
+            _rows.append({"Population": _nm, "Opening": _r.opening, f"+ Inflow": _r.inflow,
+                          "- Outflow": _r.outflow, "= Closing": _r.closing,
+                          "Reconciles": "yes" if _r.reconciles else "NO"})
+        st.dataframe(pd.DataFrame(_rows).style.format(
+            {c: "{:,}" for c in ("Opening", "+ Inflow", "- Outflow", "= Closing")}),
+            width="stretch", hide_index=True)
+        st.caption(
+            f"Window {ts_start:%d %b} to {_bl_t:%d %b %H:%M}. Inflow = cases whose clock started "
+            "in the window (new arrivals; first reopen per case). Outflow = cases responded to in "
+            "the window. Both populations use separate clocks (4h new, 12h reopened).")
+        _notes = []
+        if _bl_new.unmeasurable:
+            _notes.append(f"{_bl_new.unmeasurable:,} new case(s) are closed with no response "
+                          "timestamp or have a response before they opened; excluded.")
+        if email_ingest.has_reopen_flag:
+            if _bl_re.awaiting_data:
+                _notes.append(f"{_bl_re.awaiting_data:,} case(s) are flagged reopened but have no "
+                              "`Reopened Time` (all reopens before 19 Nov 2026): awaiting data, not aged. "
+                              "They are also not aged on the new-case clock.")
+            if _bl_re.unmeasurable:
+                _notes.append(f"{_bl_re.unmeasurable:,} reopened case(s) were closed again at an "
+                              "unknown time; excluded.")
+        else:
+            _notes.append("No `Re-opened` flag in this export: reopened cases cannot be separated, so "
+                          "the new-case backlog may include reopened cases.")
+        for _n in _notes:
+            st.caption(f":material/info: {_n}")
 
 
 # =============================================================================
