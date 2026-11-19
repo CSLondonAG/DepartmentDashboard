@@ -144,7 +144,7 @@ def bucket_start(ts: pd.Series, grain: str) -> pd.Series:
     if grain == "D":
         return day
     if grain == "W":
-        return day - pd.to_timedelta(ts.dt.weekday, unit="D")      # Monday-start weeks
+        return day - pd.to_timedelta(ts.dt.day_of_week, unit="D")      # Monday-start weeks
     return day - pd.to_timedelta(ts.dt.day - 1, unit="D")           # first of month
 
 

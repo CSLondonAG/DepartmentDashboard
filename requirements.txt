@@ -1,4 +1,4 @@
 streamlit
-pandas
-numpy
+pandas==3.1.1
+numpy==2.4.6
 altair
