@@ -94,6 +94,7 @@ from metrics.cx import (
     csat_summary, csat_trend, in_window as cx_in_window, nps_summary, operational_fcr,
     prepare_survey, survey_fcr_summary, unmapped_questions,
 )
+from metrics.workload import UtilisationLine, email_handling, messaging_diagnostics
 from metrics.service_attainment import (
     COVERAGE_MIN_PCT, EMAIL_TARGET_BUSINESS_HOURS, MESSAGING_RESPONSE_COL,
     MESSAGING_TARGET_SEC, TARGET_PCT, attainment_series, build_overall, classify_email,
@@ -2171,33 +2172,33 @@ if has_chat_data:
     render_custom_metric(c1, "💬 Total Chats", f"{chat_total:,}",
                          "Distinct chat cases first handled in the period. Counted once even if "
                          "the case was routed more than once.",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{chat_multi_touch:,} handled more than once" if chat_multi_touch else "")
     render_custom_metric(c2, "✉️ Total Emails", f"{email_total:,}",
                          "Distinct email cases first handled in the period. A case that is "
                          "re-opened and routed again counts ONCE, not once per touch.",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{email_reopened:,} re-opened" if email_reopened else "")
     render_custom_metric(c3, "⏳ Avg Chat Handle Time", fmt_mmss(chat_aht),
                          "Total handle time per chat case, summed across every touch",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{chat_touches:.2f} touches/case" if chat_touches else "")
     render_custom_metric(c4, "⏳ Avg Email Handle Time", fmt_mmss(email_aht),
                          "Total handle time per email case, summed across EVERY touch — including "
                          "re-opens handled later and by different agents",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{email_touches:.2f} touches/case" if email_touches else "")
 else:
     _ce1, _ce2 = st.columns(2)
     render_custom_metric(_ce1, "✉️ Total Emails", f"{email_total:,}",
                          "Distinct email cases first handled in the period. A case that is "
                          "re-opened and routed again counts ONCE, not once per touch.",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{email_reopened:,} re-opened" if email_reopened else "")
     render_custom_metric(_ce2, "⏳ Avg Email Handle Time", fmt_mmss(email_aht),
                          "Total handle time per email case, summed across EVERY touch — including "
                          "re-opens handled later and by different agents",
-                         COLOR_GOOD,
+                         COLOR_NONE,
                          f"{email_touches:.2f} touches/case" if email_touches else "")
 
 st.markdown("#### :material/forum: Enhanced Messaging")
@@ -2206,13 +2207,13 @@ render_custom_metric(
     _m1, "Messaging Sessions", f"{messaging_total:,}",
     "Unique Messaging sessions started in the selected period. Counted once even when "
     "routing, cancellation or transfer creates several Agent Work rows.",
-    COLOR_GOOD,
+    COLOR_NONE,
     f"{messaging_assignments:,} routing assignments",
 )
 render_custom_metric(
     _m2, "Sessions Handled", f"{messaging_handled:,}",
     "Sessions with at least one closed human Agent Work assignment.",
-    COLOR_GOOD,
+    COLOR_NONE,
     f"{messaging_abandoned:,} unhandled/abandoned"
     + (f" • {messaging_unclassified:,} unclassified" if messaging_unclassified else ""),
 )
@@ -2220,13 +2221,13 @@ render_custom_metric(
     _m3, "Messaging AHT", fmt_mmss(messaging_aht),
     "Mean total Agent Work handle time per handled Messaging session. Multiple assignments "
     "for the same session are summed before averaging.",
-    COLOR_GOOD,
+    COLOR_NONE,
     "Agent Work Handle Time",
 )
 render_custom_metric(
     _m4, "Transferred Sessions", f"{messaging_transfers:,}",
     "Sessions handled by more than one human agent.",
-    COLOR_WARN if messaging_transfers else COLOR_GOOD,
+    COLOR_NONE,
     f"{(messaging_transfers / messaging_handled):.1%} of handled"
     if messaging_handled else "",
 )
@@ -2236,28 +2237,27 @@ render_custom_metric(
     _mr1, "First Response ≤60s", fmt_pct(messaging_first_response_target_pct),
     "Share of sessions with a positive Service Rep First Response Time at or below 60 seconds. "
     "Zero means no measurable agent response and is excluded from this denominator.",
-    COLOR_GOOD if messaging_first_response_target_pct is not None
-    and messaging_first_response_target_pct >= 85 else COLOR_WARN,
+    COLOR_NONE,
     f"{messaging_first_response_in_target:,} of {len(_messaging_first_response):,} measurable",
 )
 render_custom_metric(
     _mr2, "Median First Response", fmt_mmss(messaging_first_response_median),
     "Median route-to-first-agent-response time. Median is used because asynchronous sessions "
     "create a substantial long tail.",
-    COLOR_GOOD,
+    COLOR_NONE,
     f"mean {fmt_mmss(messaging_first_response_mean)}",
 )
 render_custom_metric(
     _mr3, "Avg Speed to Answer", fmt_mmss(messaging_speed_to_answer),
     "Mean routing-request-to-acceptance time from Agent Work. This is different from the "
     "time until the first written response.",
-    COLOR_GOOD,
+    COLOR_NONE,
     f"median post-accept response {fmt_mmss(messaging_accept_to_response_median)}",
 )
 render_custom_metric(
     _mr4, "Messages Sent", f"{messaging_agent_messages:,}",
     "Total agent messages sent in sessions started in the selected period.",
-    COLOR_GOOD,
+    COLOR_NONE,
     f"{messaging_customer_messages:,} customer messages",
 )
 
@@ -2313,7 +2313,11 @@ if email_total and email_multi_touch:
     )
 
 st.markdown("---")
-st.subheader(":material/speed: Operational Metrics")
+st.subheader(":material/speed: Workload & Efficiency Diagnostics")
+st.caption(
+    ":material/info: **Diagnostics only.** These describe how work flows through the department; "
+    "none has a target or a pass/fail status, and lower or higher is not treated as good or bad. "
+    "Department totals only - there is no agent-level view.")
 
 _chat_util_tooltip = (
     f"Capacity-adjusted legacy Chat plus Enhanced Messaging load divided by all "
@@ -2326,48 +2330,87 @@ _chat_util_tooltip = (
 _email_util_tooltip = (
     "Email load divided by assignable email capacity. Email-only presence supplies "
     "100% email capacity. During 'Available_All', email capacity is counted only while "
-    "the agent has no active chats; any active chat makes the agent unavailable for email."
+    "the agent has no active Messaging/chat session; any active session removes Email capacity."
 )
 
+_util_lines = [UtilisationLine("Conversation", dept_chat_load / 3600, dept_chat_avail / 3600),
+               UtilisationLine("Email", dept_email_load / 3600, dept_email_avail / 3600)]
 _op = st.columns(3)
-render_custom_metric(_op[0], "📈 Conversation Utilization",
-                     f"{chat_util:.1%}" if chat_util is not None else "—",
-                     _chat_util_tooltip, get_utilization_color(chat_util),
-                     f"{dept_chat_load/3600:,.1f} load-h of {dept_chat_avail/3600:,.1f}h")
-render_custom_metric(_op[1], "📈 Email Utilization",
-                     f"{email_util:.1%}" if email_util is not None else "—",
-                     _email_util_tooltip, get_utilization_color(email_util),
-                     f"{dept_email_load/3600:,.1f} load-h of "
-                     f"{dept_email_avail/3600:,.1f} residual-h")
+render_custom_metric(_op[0], "Conversation utilisation", fmt_pct_floor(_util_lines[0].rate_pct),
+                     _chat_util_tooltip, COLOR_NONE,
+                     f"{_util_lines[0].load_hours:,.1f} load-h / {_util_lines[0].capacity_hours:,.1f} h available")
+render_custom_metric(_op[1], "Email utilisation", fmt_pct_floor(_util_lines[1].rate_pct),
+                     _email_util_tooltip, COLOR_NONE,
+                     f"{_util_lines[1].load_hours:,.1f} load-h / {_util_lines[1].capacity_hours:,.1f} h residual")
+render_custom_metric(_op[2], "Avg Email First Response", fmt_hms(avg_resp_secs),
+                     "Mean first-response time in BUSINESS time (07:00-22:00 CAT, 7 days) of "
+                     "answered emails that entered the queue in the period",
+                     COLOR_NONE, f"across {n_email_total:,} answered emails" if n_email_total else "")
 if dept_email_excess > 0:
     st.caption(
         f"⚠️ {dept_email_excess/3600:,.1f} email-hours were recorded while conversation load "
         "made shared status unavailable for email. These hours are shown as excess "
-        "demand and are not allowed to push email utilisation above 100%."
-    )
-render_custom_metric(_op[2], "⏱️ Avg Email First Response", fmt_hms(avg_resp_secs),
-                     "Mean first-response time in BUSINESS time (07:00-22:00 CAT, 7 days) of "
-                     "answered emails that entered the queue in the period",
-                     get_email_resp_time_color(avg_resp_secs),
-                     f"across {n_email_total:,} emails" if n_email_total else "")
+        "demand and are not allowed to push email utilisation above 100%.")
 
-with st.expander("Per-agent utilisation"):
-    if df_util.empty:
-        st.info("No presence or handling data in this period.")
-    else:
-        _show = df_util.drop(columns=["_avail_secs", "_key"]).sort_values("Agent")
-        st.dataframe(
-            _show.style.format({
-                "Conversation load (h)": "{:,.2f}",
-                "Conversation slot-hours": "{:,.2f}",
-                "Conversation available (h)": "{:,.2f}",
-                "Email load (h)": "{:,.2f}",
-                "Email residual capacity (h)": "{:,.2f}",
-                "Email excess demand (h)": "{:,.2f}",
-                "Conversation util": "{:.1%}", "Email util": "{:.1%}",
-            }, na_rep="—"),
-            width="stretch",
-        )
+_eh = email_handling(email_cases, email_df["Row Secs"] if "Row Secs" in email_df.columns
+                     else pd.Series(dtype="float64"))
+_md = messaging_diagnostics(messaging_period)
+
+
+def _secs(v):
+    return fmt_mmss(v) if v is not None else "—"
+
+
+_wl_a, _wl_b = st.columns(2)
+with _wl_a:
+    st.markdown("**Email handling**")
+    st.dataframe(pd.DataFrame([
+        {"Measure": "Handle time per case (all touches)", "Cases / touches": _eh.per_case.n,
+         "Mean": _secs(_eh.per_case.mean), "Median": _secs(_eh.per_case.median),
+         "p90": _secs(_eh.per_case.p90)},
+        {"Measure": "Handle time per touch", "Cases / touches": _eh.per_touch.n,
+         "Mean": _secs(_eh.per_touch.mean), "Median": _secs(_eh.per_touch.median),
+         "p90": _secs(_eh.per_touch.p90)},
+    ]).style.format({"Cases / touches": "{:,}"}), width="stretch", hide_index=True)
+    st.caption(
+        f"Touches per case: mean {_eh.touches_per_case.mean:.2f}, median {_eh.touches_per_case.median:.0f}, "
+        f"p90 {_eh.touches_per_case.p90:.0f}. "
+        f"{fmt_ratio(_eh.multi_touch_cases, _eh.cases)} of cases were handled more than once "
+        "(a routing/handling measure; it is not reopening, which comes only from the `Re-opened` flag)."
+        if _eh.cases else "No Email cases in this period.")
+with _wl_b:
+    st.markdown("**Enhanced Messaging**")
+    st.dataframe(pd.DataFrame([
+        {"Measure": "Handle time per handled session", "Sessions": _md.handling_per_session.n,
+         "Mean": _secs(_md.handling_per_session.mean), "Median": _secs(_md.handling_per_session.median),
+         "p90": _secs(_md.handling_per_session.p90)},
+        {"Measure": "Routing: assign -> accept", "Sessions": _md.routing_assign_to_accept.n,
+         "Mean": _secs(_md.routing_assign_to_accept.mean),
+         "Median": _secs(_md.routing_assign_to_accept.median),
+         "p90": _secs(_md.routing_assign_to_accept.p90)},
+        {"Measure": "Speed to answer (Agent Work)", "Sessions": _md.speed_to_answer.n,
+         "Mean": _secs(_md.speed_to_answer.mean), "Median": _secs(_md.speed_to_answer.median),
+         "p90": _secs(_md.speed_to_answer.p90)},
+    ]).style.format({"Sessions": "{:,}"}), width="stretch", hide_index=True)
+
+_v1, _v2, _v3, _v4 = st.columns(4)
+render_custom_metric(_v1, "Email cases", f"{email_total:,}",
+                     "Distinct Email cases first handled in the period (counted once however many "
+                     "times they were routed).", COLOR_NONE,
+                     f"{_eh.multi_touch_cases:,} handled more than once" if _eh.cases else "")
+render_custom_metric(_v2, "Messaging sessions", f"{_md.sessions:,}",
+                     "Unique Messaging sessions started in the period.", COLOR_NONE,
+                     f"{_md.handled:,} handled by a human")
+render_custom_metric(_v3, "Messages", f"{int(_md.agent_messages.total):,} agent",
+                     "Agent and customer messages in sessions started in the period.", COLOR_NONE,
+                     f"{int(_md.customer_messages.total):,} customer • median "
+                     f"{_md.agent_messages.median or 0:.0f} / {_md.customer_messages.median or 0:.0f} per session")
+render_custom_metric(_v4, "Transferred sessions", f"{_md.transferred:,}",
+                     "Handled Messaging sessions worked by more than one human agent.", COLOR_NONE,
+                     fmt_ratio(_md.transferred, _md.handled) + " of handled" if _md.handled else "")
+if has_chat_data:
+    st.caption(f"Historical Live Chat (before 1 Nov 2026): {chat_total:,} chats, average handle time "
+               f"{fmt_mmss(chat_aht)}, {chat_multi_touch:,} handled more than once.")
 
 # ---- Schedule Adherence (Change 2) ---------------------------------------
 # Department-level only (no per-agent view). See metrics/adherence.py for every rule.
