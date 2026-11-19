@@ -99,6 +99,10 @@ from metrics.backlog import (
     NEW_BANDS, NEW_TARGET_HOURS, REOPENED_BANDS, REOPENED_TARGET_HOURS, ageing as backlog_ageing,
     build_populations, reconcile as backlog_reconcile,
 )
+from metrics.breakdowns import (
+    MIN_CONTACTS as BD_MIN_CONTACTS, adaptive_grain, add_time_dims, attainment_trend,
+    combine_outcomes, dimension_table, first_queue_by_case,
+)
 from metrics.service_attainment import (
     COVERAGE_MIN_PCT, EMAIL_TARGET_BUSINESS_HOURS, MESSAGING_RESPONSE_COL,
     MESSAGING_TARGET_SEC, TARGET_PCT, attainment_series, build_overall, classify_email,
@@ -2625,34 +2629,32 @@ if len(chat_sla_p):
 # ---- Trend ---------------------------------------------------------------
 st.markdown("---")
 st.subheader(":material/show_chart: Overall Service Attainment Trend")
-_trend = attainment_series(email_att_p, messaging_att_p, ts_start, ts_end, "D")
-_tplot = _trend.dropna(subset=["Overall %"])
+_trend_src = combine_outcomes(email_att_p, messaging_att_p)
+_trend = attainment_trend(_trend_src, ts_start, ts_end)
+_tgrain = {"D": "day", "W": "week (Monday start)", "M": "month"}[adaptive_grain(ts_start, ts_end)]
+_tplot = _trend.dropna(subset=["Attainment %"]) if not _trend.empty else _trend
 if _tplot.empty:
     st.info("No mature eligible contacts in the selected period, so there is nothing to plot.")
 else:
     _line = alt.Chart(_tplot).mark_line(point=True, color="#FFFFFF").encode(
-        x=alt.X("Bucket:T", title="Date", axis=alt.Axis(format="%d %b", labelAngle=-45)),
-        y=alt.Y("Overall %:Q", title="Overall Service Attainment (%)",
+        x=alt.X("Bucket:T", title=f"Arrival {_tgrain}"),
+        y=alt.Y("Attainment %:Q", title="Overall Service Attainment (%)",
                 scale=alt.Scale(domain=[0, 105])),
-        tooltip=[alt.Tooltip("Bucket:T", title="Date", format="%d %b"),
-                 alt.Tooltip("Overall %:Q", format=".1f"),
-                 alt.Tooltip("Overall Num:Q", title="Successful"),
-                 alt.Tooltip("Overall Den:Q", title="Mature eligible"),
-                 alt.Tooltip("Email %:Q", format=".1f"), alt.Tooltip("Messaging %:Q", format=".1f"),
+        tooltip=[alt.Tooltip("Bucket:T", title="Period start", format="%d %b %Y"),
+                 alt.Tooltip("Attainment %:Q", format=".1f"),
+                 alt.Tooltip("Successful:Q"), alt.Tooltip("Eligible:Q", title="Mature eligible"),
                  alt.Tooltip("Pending:Q", title="Email pending")])
     _rule = alt.Chart(pd.DataFrame({"y": [TARGET_PCT]})).mark_rule(
         color="#FAE100", strokeDash=[5, 5]).encode(y="y:Q")
     altair_chart((_line + _rule).properties(height=350))
-    _gaps = int(_trend["Overall %"].isna().sum())
-    if _gaps:
-        st.caption(f"{_gaps} day(s) had no mature eligible contacts and are shown as gaps, not zeros. "
-                   "Contacts are grouped by the day they entered the queue.")
-    with st.expander("Daily attainment detail"):
-        _d = _trend[["Bucket", "Email Num", "Email Den", "Messaging Num", "Messaging Den",
-                     "Overall Num", "Overall Den", "Overall %", "Pending", "Unmeasurable"]].copy()
-        _d["Bucket"] = _d["Bucket"].dt.strftime("%a %d %b")
-        st.dataframe(_d.rename(columns={"Bucket": "Date"}).style.format(
-            {"Overall %": "{:.1f}"}, na_rep="—"), width="stretch", hide_index=True)
+    st.caption(f"Grouped by arrival {_tgrain} (daily up to 31 days, weekly to 180, then monthly). "
+               "Periods with no mature eligible contacts are gaps, not zeros.")
+    with st.expander("Attainment by period"):
+        _d = _trend.copy()
+        _d["Bucket"] = _d["Bucket"].dt.strftime("%d %b %Y")
+        st.dataframe(_d.rename(columns={"Bucket": "Period start", "Eligible": "Mature eligible"})
+                     .style.format({"Attainment %": "{:.1f}"}, na_rep="—"),
+                     width="stretch", hide_index=True)
 
 
 # =============================================================================
@@ -3173,6 +3175,83 @@ else:
                     "Unmapped chat buttons or Messaging channel names:"
                 )
                 st.dataframe(_names, width="stretch")
+
+
+# =============================================================================
+# Department breakdowns (Change 6) - metrics/breakdowns.py
+# Overall Service Attainment split by department-level dimensions. No agent dimension.
+# =============================================================================
+st.markdown("---")
+st.subheader(":material/account_tree: Department Breakdowns")
+st.caption(
+    "Overall Service Attainment (Email + Messaging) split by each dimension. A result is coloured "
+    f"only with at least {BD_MIN_CONTACTS} eligible contacts and {COVERAGE_MIN_PCT:.0f}% coverage; "
+    "otherwise the numbers are shown in grey. Each group's Successful / Eligible adds back to the "
+    "headline above. Contacts are grouped by arrival time.")
+
+_bd_queue = first_queue_by_case(df_items, channel_value=EMAIL_DEVNAME)
+_bd_msg = messaging_att_p.copy() if messaging_att_p is not None else None
+if _bd_msg is not None and not _bd_msg.empty and MESSAGING_CHANNEL_FIELD in _bd_msg.columns:
+    _bd_msg["Messaging Country"] = _bd_msg[MESSAGING_CHANNEL_FIELD].map(_country_from_devname)
+_bd = add_time_dims(combine_outcomes(
+    email_att_p, _bd_msg, queue_map=_bd_queue, messaging_country_col="Messaging Country"))
+
+_BD_COLOR = {"green": "#00FF66", "amber": "#FAE100", "red": "#FF9300", "grey": "#9ca3af"}
+_BD_TEXT = {"green": "On target", "amber": "Near target", "red": "Below target", "grey": "Not reliable"}
+
+
+def _dim_view(by, channel=None, title=None, key=""):
+    src = _bd if channel is None else _bd[_bd["Channel"] == channel]
+    t = dimension_table(src, by)
+    if title:
+        st.markdown(f"**{title}**")
+    if t.empty:
+        st.caption("No contacts in this period for this dimension.")
+        return
+    shown = t.copy()
+    shown["Status"] = shown["Status"].map(_BD_TEXT)
+    st.dataframe(shown.style.format({"Successful": "{:,}", "Eligible": "{:,}", "Pending": "{:,}",
+                                     "Unmeasurable": "{:,}", "Excluded": "{:,}",
+                                     "Attainment %": "{:.1f}", "Coverage %": "{:.1f}"}, na_rep="—"),
+                 width="stretch", hide_index=True)
+    plot = t.dropna(subset=["Attainment %"])
+    if not plot.empty:
+        order = list(t["Group"])
+        altair_chart(alt.Chart(plot).mark_bar().encode(
+            x=alt.X("Group:N", sort=order, title=None),
+            y=alt.Y("Attainment %:Q", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("Status:N", legend=None, scale=alt.Scale(
+                domain=list(_BD_COLOR), range=list(_BD_COLOR.values()))),
+            tooltip=["Group", "Successful", "Eligible", alt.Tooltip("Attainment %:Q", format=".1f"),
+                     "Status"]).properties(height=240))
+
+
+_bd_tabs = st.tabs(["Channel", "Email queue", "Email origin", "Country / market",
+                    "Day & hour", "New vs reopened", "Messaging transfers"])
+with _bd_tabs[0]:
+    _dim_view("Channel")
+with _bd_tabs[1]:
+    _dim_view("Queue", "Email")
+    st.caption("Queue = the first routing queue of the case in report_items.csv (joined on case "
+               "number). 'Not routed / unknown' cases never reached an Omni-Channel queue.")
+with _bd_tabs[2]:
+    _dim_view("Origin", "Email")
+    st.caption("Contact Us = Contact Form, Email = Direct Email. Priority is a legacy field and is "
+               "not used.")
+with _bd_tabs[3]:
+    _dim_view("Country", "Email", "Email (country from email.csv `Country`)")
+    _dim_view("Country", "Messaging", "Messaging (country from the Messaging channel name)")
+    st.caption("Email and Messaging countries come from different sources and are shown separately. "
+               "Raw email values are mapped to a controlled list; blank or unmapped = Unknown.")
+with _bd_tabs[4]:
+    _dim_view("Day of week", title="Day of week")
+    _dim_view("Hour of day", title="Hour of day")
+with _bd_tabs[5]:
+    _dim_view("Case type", "Email")
+    st.caption("From the authoritative `Re-opened` flag. Reopened cases are measured on their final "
+               "response, so their first-response result is approximate.")
+with _bd_tabs[6]:
+    _dim_view("Transfer", "Messaging")
 
 
 # =============================================================================
