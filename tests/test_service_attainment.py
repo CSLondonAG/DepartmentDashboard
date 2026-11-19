@@ -248,7 +248,8 @@ def test_percentage_point_change():
 
 # ------------------------------------------------------------------ reopened
 def test_reopened_summary_uses_flag_and_flags_not_excludes():
-    out = classify_email(email_frame(), AS_OF)
+    from data.ingest import clean_email_frame
+    out = classify_email(clean_email_frame(email_frame()).frame, AS_OF)   # adds `Reopened` from `Re-opened`
     r = reopened_summary(out)
     # reopened: 1012 (late -> fail) and 1013 (quick -> success)
     assert (r["reopened_den"], r["reopened_num"]) == (2, 1)
