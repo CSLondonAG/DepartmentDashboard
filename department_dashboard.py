@@ -86,6 +86,7 @@ import pandas as pd
 import streamlit as st
 
 from data.ingest import clean_email_frame, normalise_case_number, reopen_timing_available
+from metrics.reconcile import email_cohort_reconciliation
 from metrics.service_attainment import (
     COVERAGE_MIN_PCT, EMAIL_TARGET_BUSINESS_HOURS, MESSAGING_RESPONSE_COL,
     MESSAGING_TARGET_SEC, TARGET_PCT, attainment_series, build_overall, classify_email,
@@ -717,6 +718,22 @@ def altair_chart(chart, **kwargs):
         st.altair_chart(chart, width="stretch", **kwargs)
     except TypeError:
         st.altair_chart(chart, use_container_width=True, **kwargs)
+
+
+def date_axis(dates, fmt: str = "%d %b", angle: int = -45, max_ticks: int = 62, **kw):
+    """Axis with ONE tick per distinct calendar day.
+
+    Vega-Lite's automatic time ticks sit every ~12 hours on a short daily series, so a date-only
+    label repeats ("13 Nov, 13 Nov, 14 Nov, ..."). Pinning the tick values to the distinct days
+    avoids that. Long series fall back to an automatic, de-duplicated tick count.
+    """
+    try:
+        days = sorted(pd.to_datetime(pd.Series(list(dates))).dt.normalize().dropna().unique())
+    except Exception:
+        days = []
+    if days and len(days) <= max_ticks:
+        return alt.Axis(format=fmt, labelAngle=angle, values=[pd.Timestamp(d).to_pydatetime() for d in days], **kw)
+    return alt.Axis(format=fmt, labelAngle=angle, tickCount=12, **kw)
 
 
 # =============================================================================
@@ -2539,6 +2556,49 @@ with st.expander(":material/calculate: How the headline reconciles (numerators, 
                 st.dataframe(_bd.style.format({"Contacts": "{:,}"}), width="stretch",
                              hide_index=True)
 
+# Why Core Metrics "Total Emails" and the Email attainment cohort differ (they count different things).
+if email_att_ok and HAS_CASE_KEY and email_att_p is not None:
+    _routed_all = df_cases.loc[df_cases["Service Channel: Developer Name"] == EMAIL_DEVNAME, CASE_KEY]
+    _flag_keys = (email_sla_df.loc[email_sla_df["Reopened"], EMAIL_CASE_KEY]
+                  if email_ingest.has_reopen_flag else [])
+    _rc = email_cohort_reconciliation(
+        email_att_p, email_sla_df[EMAIL_CASE_KEY], _routed_all, email_cases[CASE_KEY], _flag_keys,
+        key_col=EMAIL_CASE_KEY)
+    with st.expander(":material/compare_arrows: Why Total Emails (Core Metrics) differs from the "
+                     "Email attainment cohort", expanded=False):
+        st.markdown(
+            f"**Core Metrics - Total Emails = {_rc['core_cases']:,}**: distinct cases an agent *first "
+            f"handled* in the period (`report_items.csv`).  \n"
+            f"**Attainment Email cohort = {_rc['cohort_cases']:,}**: distinct cases that *entered the "
+            f"queue* in the period (`email.csv` Date/Time Opened).")
+        st.dataframe(pd.DataFrame([
+            {"Measure": "Attainment cohort: cases opened in the period (distinct)",
+             "Cases": _rc["cohort_cases"]},
+            {"Measure": "   rows in that cohort (equals cases: no double counting)",
+             "Cases": _rc["cohort_rows"]},
+            {"Measure": "   ...routed to an agent (present in report_items)", "Cases": _rc["cohort_routed"]},
+            {"Measure": "   ...never routed to an agent (email export only)",
+             "Cases": _rc["cohort_never_routed"]},
+            {"Measure": "Core Metrics cases first handled in the period", "Cases": _rc["core_cases"]},
+            {"Measure": "   ...also opened in the period", "Cases": _rc["core_in_cohort"]},
+            {"Measure": "   ...opened BEFORE the period (carried in)",
+             "Cases": _rc["core_opened_before_window"]},
+            {"Measure": "   ...not in the email export at all", "Cases": _rc["core_missing_from_export"]},
+            {"Measure": "Reopened: Core Metrics cases flagged `Re-opened`", "Cases": _rc["core_reopened"]},
+            {"Measure": "Reopened: attainment cohort cases flagged `Re-opened`",
+             "Cases": _rc["cohort_reopened"]},
+        ]).style.format({"Cases": "{:,}"}), width="stretch", hide_index=True)
+        _ra, _ru = _rc["routed_summary"], _rc["unrouted_summary"]
+        st.markdown(
+            f"**Attainment of routed cases:** {fmt_ratio(_ra.numerator, _ra.denominator)}  \n"
+            f"**Attainment of never-routed cases:** {fmt_ratio(_ru.numerator, _ru.denominator)}  \n"
+            "If never-routed cases score very differently, they (e.g. automated or system-handled "
+            "mail) are moving the headline; check with the data owner whether they belong in scope.")
+        st.caption(
+            "Counts are distinct cases (the export is de-duplicated per Case Number before "
+            "scoring). Email attainment is also less than the headline's eligible count because "
+            "the headline adds Messaging sessions.")
+
 # Reopened handling: authoritative `Re-opened` flag; timing gated on `Reopened Time`.
 if email_att_ok and email_ingest.has_reopen_flag:
     _ro = reopened_summary(email_att_p)
@@ -2581,7 +2641,9 @@ if _tplot.empty:
     st.info("No mature eligible contacts in the selected period, so there is nothing to plot.")
 else:
     _line = alt.Chart(_tplot).mark_line(point=True, color="#FFFFFF").encode(
-        x=alt.X("Bucket:T", title="Date", axis=alt.Axis(format="%d %b", labelAngle=-45)),
+        x=alt.X("Bucket:T", title="Date", axis=date_axis(_tplot["Bucket"]),
+                scale=alt.Scale(domain=[_tplot["Bucket"].min() - pd.Timedelta(hours=12),
+                                        _tplot["Bucket"].max() + pd.Timedelta(hours=12)])),
         y=alt.Y("Overall %:Q", title="Overall Service Attainment (%)",
                 scale=alt.Scale(domain=[0, 105])),
         tooltip=[alt.Tooltip("Bucket:T", title="Date", format="%d %b"),
@@ -2955,7 +3017,7 @@ else:
 
             base = alt.Chart(daily_survey)
             x_enc = alt.X("yearmonthdate(Date):T", title="Date",
-                          axis=alt.Axis(format="%d %b", labelAngle=45))
+                          axis=date_axis(daily_survey["Date"], angle=45))
             hover = alt.selection_point(on="mouseover", fields=["Date"], nearest=True, empty=False)
 
             csat_line = base.mark_line(strokeWidth=3, color="#00FF66").encode(
